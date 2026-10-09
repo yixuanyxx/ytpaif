@@ -6,7 +6,7 @@
 **Version:** v0 (Theme Lab)  
 **Last updated:** October 2026  
 **Target audience:** Internal team — sprint planning and development handoff  
-**Jira:** [YTP board](https://is212-g5-t2.atlassian.net/jira/software/projects/YTP/boards/3/backlog) — each story heading below is tagged with its Jira ID (e.g. `US-01 (YTP-8)`)
+**Jira:** [YTP board](https://is212-g5-t2.atlassian.net/jira/software/projects/YTP/boards/3/backlog) — each story heading below is tagged with its Jira ID (e.g. `YTP-8`)
 
 ---
 
@@ -39,9 +39,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 1 (YTP-1) — Theme Definition
+## Epic 1 — Theme Definition
 
-### US-01 (YTP-8) · Define a theme 
+### YTP-8 · Define a theme 
 
 **As a** Portfolio Manager,  
 **I want to** define an investment theme with structured scope fields,  
@@ -60,7 +60,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-02 (YTP-9) · Generate a sub-theme taxonomy with AI 
+### YTP-9 · Generate a sub-theme taxonomy with AI 
 
 **As a** Portfolio Manager,  
 **I want to** generate a sub-theme taxonomy via AI from the theme definition,  
@@ -80,7 +80,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-03 (YTP-10) · Review and approve a taxonomy 
+### YTP-10 · Review and approve a taxonomy 
 
 **As a** Portfolio Manager,  
 **I want to** review the proposed taxonomy and approve it before it is used in any analysis,  
@@ -95,9 +95,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 2 (YTP-2) — Company & Source Management
+## Epic 2 — Company & Source Management
 
-### US-04 (YTP-11) · Register a company 
+### YTP-11 · Register a company 
 
 **As an** Analyst,  
 **I want to** register a company with a stable ID and legal name,  
@@ -112,7 +112,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-05 (YTP-12) · Upload a company source document 
+### YTP-12 · Upload a company source document 
 
 **As an** Analyst,  
 **I want to** upload an annual report or regulatory filing,  
@@ -134,7 +134,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-06 (YTP-13) · Enforce evidence cutoff 
+### YTP-13 · Enforce evidence cutoff 
 
 **As an** Analyst,  
 **I want** sources published after a theme's cutoff date to be automatically excluded from analysis,  
@@ -148,9 +148,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 3 (YTP-3) — AI-Assisted Analysis
+## Epic 3 — AI-Assisted Analysis
 
-### US-07 (YTP-14) · Run AI analysis on selected passages 
+### YTP-14 · Run AI analysis on selected passages 
 
 **As an** Analyst,  
 **I want to** select evidence passages and trigger AI fact extraction and classification in one step,  
@@ -175,7 +175,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-08 (YTP-15) · Control AI usage with a call cap 
+### YTP-15 · Control AI usage with a call cap 
 
 **As a** Portfolio Manager,  
 **I want** AI calls to be capped by an explicit environment variable,  
@@ -191,9 +191,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 4 (YTP-4) — Manual Review Workflow
+## Epic 4 — Manual Review Workflow
 
-### US-09 (YTP-16) · Enter a manual revenue case 
+### YTP-16 · Enter a manual revenue case 
 
 **As an** Analyst,  
 **I want to** manually enter a structured revenue case,  
@@ -214,7 +214,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-10 (YTP-17) · Approve or reject a case 
+### YTP-17 · Approve or reject a case 
 
 **As a** Portfolio Manager,  
 **I want to** approve or reject a submitted case with a documented reason,  
@@ -232,9 +232,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 5 (YTP-5) — Portfolio Dashboard
+## Epic 5 — Portfolio Dashboard
 
-### US-11 (YTP-18) · Import a portfolio and benchmark snapshot 
+### YTP-18 · Import a portfolio and benchmark snapshot 
 
 **As a** Portfolio Manager,  
 **I want to** import a portfolio and benchmark holdings snapshot,  
@@ -255,7 +255,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-12 (YTP-19) · View the portfolio exposure dashboard 
+### YTP-19 · View the portfolio exposure dashboard 
 
 **As a** Portfolio Manager,  
 **I want to** see portfolio, benchmark, and active thematic exposures with company-level breakdown,  
@@ -279,7 +279,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-13 (YTP-20) · Export the research package 
+### YTP-20 · Export the research package 
 
 **As an** Analyst,  
 **I want to** export all analysis artefacts as a ZIP archive,  
@@ -294,9 +294,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 6 (YTP-6) — Validation & Evaluation
+## Epic 6 — Validation & Evaluation
 
-### US-14 (YTP-21) · Evaluate classification accuracy against a labelled set 
+### YTP-21 · Evaluate classification accuracy against a labelled set 
 
 **As an** Analyst,  
 **I want to** run `evaluate.py` against a labelled reference set,  
@@ -313,13 +313,13 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Backend Stories (Epic 7 — YTP-7)
+## Backend Stories (Epic 7)
 
 > System-level behaviour: persistence, state transitions, calculation invariants, security. These are implementation acceptance criteria for the backend.
 
 ---
 
-### US-B01 (YTP-22) · Persist themes as versioned, immutable records 
+### YTP-22 · Persist themes as versioned, immutable records 
 
 **As the** system,  
 **I need to** write every theme as an immutable record and create new versions on edit,  
@@ -334,7 +334,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B02 (YTP-23) · Ingest source documents with deduplication and passage extraction 
+### YTP-23 · Ingest source documents with deduplication and passage extraction 
 
 **As the** system,  
 **I need to** hash each uploaded file, detect duplicates, and split the text into page-linked passages,  
@@ -350,7 +350,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B03 (YTP-24) · Manage the AI run through a strict state machine 
+### YTP-24 · Manage the AI run through a strict state machine 
 
 **As the** system,  
 **I need to** transition each AI run through defined statuses and record failures with stage and reason,  
@@ -366,7 +366,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B04 (YTP-25) · Cache LLM responses for determinism 
+### YTP-25 · Cache LLM responses for determinism 
 
 **As the** system,  
 **I need to** cache validated LLM responses by a hash of (task, payload, model, endpoint, versions),  
@@ -381,7 +381,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B05 (YTP-26) · Calculate exposure deterministically with no LLM involvement 
+### YTP-26 · Calculate exposure deterministically with no LLM involvement 
 
 **As the** system,  
 **I need to** compute all exposure figures in `engine.estimate()` as a pure function,  
@@ -399,7 +399,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B06 (YTP-27) · Gate case approval on resolved reconciliation 
+### YTP-27 · Gate case approval on resolved reconciliation 
 
 **As the** system,  
 **I need to** block approval of any case with a non-empty `issues[]` on the estimate,  
@@ -415,7 +415,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B07 (YTP-28) · Aggregate portfolio exposure using the latest approved case per company 
+### YTP-28 · Aggregate portfolio exposure using the latest approved case per company 
 
 **As the** system,  
 **I need to** select exactly one approved case per company per theme for the dashboard,  
@@ -432,7 +432,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B08 (YTP-29) · Enforce same-origin and local-only access 
+### YTP-29 · Enforce same-origin and local-only access 
 
 **As the** system,  
 **I need to** reject write requests from any origin other than the local application,  
