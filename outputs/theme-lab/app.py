@@ -20,6 +20,17 @@ import zipfile
 import engine
 
 ROOT = Path(__file__).resolve().parent
+
+# Load environment variables from a local .env file if present. Real shell
+# environment variables always take precedence over .env values. This is
+# optional: if python-dotenv is not installed the app still runs using only
+# variables set in the shell.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / '.env', override=False)
+except ImportError:
+    pass
+
 DATA = Path(os.environ.get('THEME_DATA_DIR', str(ROOT / 'data')))
 DATA.mkdir(parents=True, exist_ok=True)
 (DATA / 'sources').mkdir(exist_ok=True)
