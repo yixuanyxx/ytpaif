@@ -5,7 +5,8 @@
 **Sponsor:** Schroders  
 **Version:** v0 (Theme Lab)  
 **Last updated:** October 2026  
-**Target audience:** Internal team — sprint planning and development handoff
+**Target audience:** Internal team — sprint planning and development handoff  
+**Jira:** [YTP board](https://is212-g5-t2.atlassian.net/jira/software/projects/YTP/boards/3/backlog) — each story heading below is tagged with its Jira ID (e.g. `US-01 (YTP-8)`)
 
 ---
 
@@ -38,9 +39,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 1 — Theme Definition
+## Epic 1 (YTP-1) — Theme Definition
 
-### US-01 · Define a theme 
+### US-01 (YTP-8) · Define a theme 
 
 **As a** Portfolio Manager,  
 **I want to** define an investment theme with structured scope fields,  
@@ -59,7 +60,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-02 · Generate a sub-theme taxonomy with AI 
+### US-02 (YTP-9) · Generate a sub-theme taxonomy with AI 
 
 **As a** Portfolio Manager,  
 **I want to** generate a sub-theme taxonomy via AI from the theme definition,  
@@ -79,7 +80,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-03 · Review and approve a taxonomy 
+### US-03 (YTP-10) · Review and approve a taxonomy 
 
 **As a** Portfolio Manager,  
 **I want to** review the proposed taxonomy and approve it before it is used in any analysis,  
@@ -94,9 +95,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 2 — Company & Source Management
+## Epic 2 (YTP-2) — Company & Source Management
 
-### US-04 · Register a company 
+### US-04 (YTP-11) · Register a company 
 
 **As an** Analyst,  
 **I want to** register a company with a stable ID and legal name,  
@@ -111,7 +112,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-05 · Upload a company source document 
+### US-05 (YTP-12) · Upload a company source document 
 
 **As an** Analyst,  
 **I want to** upload an annual report or regulatory filing,  
@@ -133,7 +134,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-06 · Enforce evidence cutoff 
+### US-06 (YTP-13) · Enforce evidence cutoff 
 
 **As an** Analyst,  
 **I want** sources published after a theme's cutoff date to be automatically excluded from analysis,  
@@ -147,9 +148,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 3 — AI-Assisted Analysis
+## Epic 3 (YTP-3) — AI-Assisted Analysis
 
-### US-07 · Run AI analysis on selected passages 
+### US-07 (YTP-14) · Run AI analysis on selected passages 
 
 **As an** Analyst,  
 **I want to** select evidence passages and trigger AI fact extraction and classification in one step,  
@@ -174,7 +175,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-08 · Control AI usage with a call cap 
+### US-08 (YTP-15) · Control AI usage with a call cap 
 
 **As a** Portfolio Manager,  
 **I want** AI calls to be capped by an explicit environment variable,  
@@ -190,9 +191,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 4 — Manual Review Workflow
+## Epic 4 (YTP-4) — Manual Review Workflow
 
-### US-09 · Enter a manual revenue case 
+### US-09 (YTP-16) · Enter a manual revenue case 
 
 **As an** Analyst,  
 **I want to** manually enter a structured revenue case,  
@@ -213,7 +214,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-10 · Approve or reject a case 
+### US-10 (YTP-17) · Approve or reject a case 
 
 **As a** Portfolio Manager,  
 **I want to** approve or reject a submitted case with a documented reason,  
@@ -231,9 +232,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 5 — Portfolio Dashboard
+## Epic 5 (YTP-5) — Portfolio Dashboard
 
-### US-11 · Import a portfolio and benchmark snapshot 
+### US-11 (YTP-18) · Import a portfolio and benchmark snapshot 
 
 **As a** Portfolio Manager,  
 **I want to** import a portfolio and benchmark holdings snapshot,  
@@ -254,7 +255,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-12 · View the portfolio exposure dashboard 
+### US-12 (YTP-19) · View the portfolio exposure dashboard 
 
 **As a** Portfolio Manager,  
 **I want to** see portfolio, benchmark, and active thematic exposures with company-level breakdown,  
@@ -278,7 +279,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-13 · Export the research package 
+### US-13 (YTP-20) · Export the research package 
 
 **As an** Analyst,  
 **I want to** export all analysis artefacts as a ZIP archive,  
@@ -293,9 +294,9 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 6 — Validation & Evaluation
+## Epic 6 (YTP-6) — Validation & Evaluation
 
-### US-14 · Evaluate classification accuracy against a labelled set 
+### US-14 (YTP-21) · Evaluate classification accuracy against a labelled set 
 
 **As an** Analyst,  
 **I want to** run `evaluate.py` against a labelled reference set,  
@@ -312,13 +313,13 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Backend Stories
+## Backend Stories (Epic 7 — YTP-7)
 
 > System-level behaviour: persistence, state transitions, calculation invariants, security. These are implementation acceptance criteria for the backend.
 
 ---
 
-### US-B01 · Persist themes as versioned, immutable records 
+### US-B01 (YTP-22) · Persist themes as versioned, immutable records 
 
 **As the** system,  
 **I need to** write every theme as an immutable record and create new versions on edit,  
@@ -333,7 +334,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B02 · Ingest source documents with deduplication and passage extraction 
+### US-B02 (YTP-23) · Ingest source documents with deduplication and passage extraction 
 
 **As the** system,  
 **I need to** hash each uploaded file, detect duplicates, and split the text into page-linked passages,  
@@ -349,7 +350,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B03 · Manage the AI run through a strict state machine 
+### US-B03 (YTP-24) · Manage the AI run through a strict state machine 
 
 **As the** system,  
 **I need to** transition each AI run through defined statuses and record failures with stage and reason,  
@@ -365,7 +366,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B04 · Cache LLM responses for determinism 
+### US-B04 (YTP-25) · Cache LLM responses for determinism 
 
 **As the** system,  
 **I need to** cache validated LLM responses by a hash of (task, payload, model, endpoint, versions),  
@@ -380,7 +381,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B05 · Calculate exposure deterministically with no LLM involvement 
+### US-B05 (YTP-26) · Calculate exposure deterministically with no LLM involvement 
 
 **As the** system,  
 **I need to** compute all exposure figures in `engine.estimate()` as a pure function,  
@@ -398,7 +399,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B06 · Gate case approval on resolved reconciliation 
+### US-B06 (YTP-27) · Gate case approval on resolved reconciliation 
 
 **As the** system,  
 **I need to** block approval of any case with a non-empty `issues[]` on the estimate,  
@@ -414,7 +415,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B07 · Aggregate portfolio exposure using the latest approved case per company 
+### US-B07 (YTP-28) · Aggregate portfolio exposure using the latest approved case per company 
 
 **As the** system,  
 **I need to** select exactly one approved case per company per theme for the dashboard,  
@@ -431,7 +432,7 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### US-B08 · Enforce same-origin and local-only access 
+### US-B08 (YTP-29) · Enforce same-origin and local-only access 
 
 **As the** system,  
 **I need to** reject write requests from any origin other than the local application,  
@@ -449,11 +450,11 @@ The following are explicitly out of scope for the presentation:
 
 | Priority | Stories | Why |
 |---|---|---|
-| **Must have** | US-01, US-02, US-03, US-04, US-05, US-06 | Theme + source pipeline — everything depends on this |
-| **Must have** | US-07, US-08, US-09, US-10 | Analysis + review — core classification workflow |
-| **Must have** | US-11, US-12, US-13 | Portfolio dashboard — the primary deliverable |
-| **Must have** | US-B01–B08 | Backend contracts that make the above work correctly |
-| **Should have** | US-14 | Evaluation for presentation evidence |
+| **Must have** | US-01 (YTP-8), US-02 (YTP-9), US-03 (YTP-10), US-04 (YTP-11), US-05 (YTP-12), US-06 (YTP-13) | Theme + source pipeline — everything depends on this |
+| **Must have** | US-07 (YTP-14), US-08 (YTP-15), US-09 (YTP-16), US-10 (YTP-17) | Analysis + review — core classification workflow |
+| **Must have** | US-11 (YTP-18), US-12 (YTP-19), US-13 (YTP-20) | Portfolio dashboard — the primary deliverable |
+| **Must have** | US-B01–B08 (YTP-22–YTP-29) | Backend contracts that make the above work correctly |
+| **Should have** | US-14 (YTP-21) | Evaluation for presentation evidence |
 | **Cut** | Specialist feedback (US-11 old), Exposure monitoring (US-15/16 old), Indirect beneficiary quantification | Not achievable in under 1 month |
 
 ---
