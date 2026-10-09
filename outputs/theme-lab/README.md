@@ -32,7 +32,19 @@ Load the worked example to reproduce the specification's 18% portfolio, 14% benc
 
 ## Optional AI configuration
 
-The provider adapter supports an OpenAI-compatible Chat Completions endpoint with JSON-object responses. Use a provider/model supporting this contract. No model or paid call is selected automatically. API secrets are read only from environment variables, never saved in SQLite or exports.
+The provider adapter supports an OpenAI-compatible Chat Completions endpoint with JSON-object responses. Use a provider/model supporting this contract. No model or paid call is selected automatically. API secrets are read only from environment variables (optionally loaded from a local `.env` file), never saved in SQLite or exports.
+
+**Option A — `.env` file (recommended).** Copy the template and fill in your keys. The `.env` file is gitignored and never committed:
+
+```sh
+cp .env.example .env
+# edit .env: set LLM_MODEL, LLM_API_KEY, and LLM_MAX_CALLS (e.g. 6)
+python app.py
+```
+
+Variables loaded from `.env`: `LLM_ENDPOINT`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_MAX_CALLS` (and optionally `THEME_DATA_DIR`, `PORT`). Any variable already set in the shell takes precedence over `.env`.
+
+**Option B — shell environment variables.** Equivalent to the above without a file:
 
 ```powershell
 $env:LLM_ENDPOINT = 'https://api.openai.com/v1/chat/completions'
@@ -41,6 +53,8 @@ $env:LLM_API_KEY = 'YOUR_KEY'
 $env:LLM_MAX_CALLS = '6'
 .\start.ps1
 ```
+
+> Note: `https://api.openai.com/v1/chat/completions` is OpenAI's paid API and requires a billed OpenAI key. Point `LLM_ENDPOINT` at any OpenAI-compatible provider (including a free local model such as Ollama at `http://localhost:11434/v1/chat/completions`) to avoid OpenAI charges.
 
 `LLM_MAX_CALLS` defaults to zero. This is a persistent workspace call cap including retry attempts, not a dollar spending cap. Each company uses two calls; taxonomy generation uses one. Confirm provider pricing, data handling and permitted material before enabling it. Token usage is retained where returned; monetary cost is explicitly unknown. Calls have 90-second timeouts and at most one retry for transient HTTP failures. Bad JSON and invalid schema/reference outputs fail visibly and never produce a zero result. Unchanged valid provider responses cache by payload/model/endpoint/version hash.
 

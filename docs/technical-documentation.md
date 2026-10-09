@@ -207,8 +207,10 @@ outputs/theme-lab/
 ├── evaluate.py         # Standalone accuracy evaluation script
 ├── test_app.py         # Integration tests
 ├── test_engine.py      # Unit tests
-├── requirements.txt    # pypdf only (all else is stdlib)
+├── requirements.txt    # pypdf + python-dotenv (all else is stdlib)
 ├── start.ps1           # PowerShell launcher
+├── .env                # Local secrets (gitignored; not committed)
+├── .env.example        # Template for .env — copy and fill in your keys
 ├── static/
 │   ├── index.html      # Single-page shell
 │   ├── app.js          # All frontend logic (~600 lines)
