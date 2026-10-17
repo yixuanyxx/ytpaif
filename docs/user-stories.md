@@ -6,7 +6,7 @@
 **Version:** v0 (Theme Lab)  
 **Last updated:** October 2026  
 **Target audience:** Internal team — sprint planning and development handoff  
-**Jira:** [YTP board](https://is212-g5-t2.atlassian.net/jira/software/projects/YTP/boards/3/backlog) — each story heading below is tagged with its Jira ID (e.g. `YTP-8`)
+**Jira:** YTP board — each story heading is tagged with its Jira issue key
 
 ---
 
@@ -25,11 +25,11 @@
 The MVP delivers this end-to-end flow and nothing else:
 
 ```
-Define theme → Add companies → Upload filings → Run AI analysis
+Define theme → Match companies → Find/upload filings → Run AI analysis
     → Manual review → Import portfolio → View dashboard → Export
 ```
 
-The following are explicitly out of scope for the presentation:
+Explicitly out of scope for the presentation:
 - Specialist feedback routing channel
 - Exposure change monitoring / alerts
 - Portfolio Exposure Log (historical dashboard snapshots)
@@ -39,105 +39,121 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 1 — Theme Definition
+## Epic YTP-6 — Theme Definition
 
-### YTP-8 · Define a theme 
+### YTP-8 · Define a theme
 
-**As a** Portfolio Manager,  
-**I want to** define an investment theme with structured scope fields,  
+**As a** Portfolio Manager,
+**I want to** define an investment theme with structured scope fields,
 **so that** all downstream analysis is anchored to a precise, versioned definition.
 
 **Acceptance Criteria:**
 
-1. Required fields: `name`, `description`, `economic_driver`, `inclusions`, `exclusions`, `examples`, `geographic_scope`, `cutoff` (ISO date `YYYY-MM-DD`), `exposure_basis`.
-2. Submitting with any blank field returns an error naming the missing field; no partial record is created.
-3. `exposure_basis` must be `qualifying_revenue`; any other value is rejected.
-4. On success the theme is assigned a unique `id`, a stable `theme_id`, and `version = 1`.
-5. Editing an approved theme creates a new record with `version + 1` sharing the same `theme_id`; the original is not modified.
-6. The UI requires all fields before submission and shows inline validation errors.
-
-**Mentor notes (6 Oct):** All fields required — no optional fields. Geographic scope is MSCI Asia ex Japan for the pilot. Assume the analyst knows what they're doing; AI refinement of the definition is optional.
+1. Required field: `theme_name`.
+2. At least one of the following pairs must be filled: {`theme_description`, `included_activities`} or {`positive_examples`}.
+3. Non-required fields: `excluded_activities`, `negative_examples`, `additional_information`.
+4. Submitting with a blank `theme_name` returns an error; no partial record is created.
+5. The UI requires all required fields before submission and shows inline validation errors.
+6. On success the theme is assigned a unique `theme_id` and `version = 1`.
+7. Editing an approved theme creates a new record with `version + 1` sharing the same `theme_id`; the original is not modified.
 
 ---
 
-### YTP-9 · Generate a sub-theme taxonomy with AI 
+### YTP-14 · Generate a sub-theme taxonomy with AI
 
-**As a** Portfolio Manager,  
-**I want to** generate a sub-theme taxonomy via AI from the theme definition,  
+**As a** Portfolio Manager,
+**I want to** generate a sub-theme taxonomy via AI from the theme definition,
 **so that** I have a structured classification hierarchy without drafting it manually.
 
 **Acceptance Criteria:**
 
 1. The system sends the theme scope to the LLM and returns a proposed node list.
-2. Each node has: `node_id`, `parent_id` (null for roots), `name`, `definition`, `inclusion_rule`, `exclusion_rule`, `examples[]`, `rationale`.
-3. Hierarchy is exactly **two levels deep** (theme → subtheme); deeper nesting is not generated.
-4. The number of subthemes is capped at **5–10** per theme.
-5. The returned taxonomy has `needs_review` status — it is never auto-approved.
-6. If `LLM_API_KEY` or `LLM_MODEL` is not configured, the system returns a clear error; manual taxonomy editing is still available.
-7. A failed or malformed LLM response does not produce a partial node list; the run is marked `failed`.
+2. Each node has: `node_id`, `parent_id` (null for roots), `name`, `definition`, `examples[]`.
+3. The hierarchy contains two subtheme levels beneath the main theme: theme → Tier-1 subtheme → Tier-2 subtheme. No deeper nesting is generated.
+4. Before generation, the PM can select "Let AI decide" or specify the number of Tier-1 subthemes and the number of Tier-2 subthemes per Tier-1 node. Specified counts must be positive integers and are followed by the generator. These settings are saved with the generation run.
+5. If counts are not specified, the AI proposes an appropriate number of Tier-1 and Tier-2 subthemes based on the theme definition, avoiding redundant categories and unnecessary splitting.
+6. The PM can manually edit the proposed taxonomy or request AI regeneration for a selected node and its descendants before approval. The PM can provide instructions for regeneration. Changes are presented for review before being applied; unrelated branches remain unchanged. Regenerated content must remain within the theme definition and the two-subtheme-level limit.
+7. The returned taxonomy has `needs_review` status — it is never auto-approved.
+8. If `LLM_API_KEY` or `LLM_MODEL` is not configured, the system returns a clear error; manual taxonomy editing is still available.
+9. If generation fails or the response cannot be validated as a complete, structurally valid taxonomy, the system shows a clear error and allows the PM to retry. The failed attempt does not replace any existing taxonomy.
+10. Repeating generation with the same theme definition, requested category counts, model and prompt version produces materially consistent categories and hierarchy. Consistency is assessed by category meaning and parent-child relationships, not exact wording. The acceptance threshold will be defined in the project's validation criteria.
 
-**Mentor notes (6 Oct):** Theme → subtheme only (2 levels). Keywords from both company language and market consensus are acceptable; AI combines both. GICS can be a starting anchor but is not required.
+**Mentor notes (6 Oct):** 2 levels to subthemes. AI may combine company language and market consensus. GICS or Bloomberg Industry Classification System (BICS) can be a starting anchor but is not required.
+
+**Future enhancement:** Configurable hierarchy depth beyond two subtheme levels.
 
 ---
 
-### YTP-10 · Review and approve a taxonomy 
+### YTP-15 · Review and approve a taxonomy
 
-**As a** Portfolio Manager,  
-**I want to** review the proposed taxonomy and approve it before it is used in any analysis,  
+**As a** Portfolio Manager,
+**I want to** review the proposed taxonomy and approve it before it is used in any analysis,
 **so that** I control what counts as thematic exposure.
 
 **Acceptance Criteria:**
 
-1. Taxonomy nodes can be edited (add, remove, update `inclusion_rule`, `exclusion_rule`, `definition`) before approving.
-2. Only **leaf nodes** (nodes with no children) are valid classification targets.
-3. Approving a theme version locks the taxonomy; further edits create a new theme version.
-4. The UI clearly distinguishes `needs_review` drafts from `approved` versions.
+1. The PM can manually edit by adding, removing, or editing nodes across all layers, or request AI regeneration for a selected node and its descendants before approval. The PM can provide instructions for regeneration. Changes are presented for review before being applied; unrelated branches remain unchanged. Regenerated content must remain within the theme definition and the two-subtheme-level limit.
+2. Only Tier-2 subthemes (level-2 nodes) are valid classification targets.
+3. Before approval, the system validates that: required node fields are completed, node IDs are unique, parent references are valid, no cycles exist, and the hierarchy does not exceed two subtheme levels. Each Tier-1 subtheme must contain at least one Tier-2 subtheme before approval. Invalid structures block approval and show clear errors. Drafts that fail validation can be saved but cannot be approved.
+4. Approving a taxonomy locks that version. Further edits create a new draft under the same theme. The existing approved taxonomy remains in use until the new draft is approved; after that the newest approved taxonomy is used for new analyses. Previous taxonomy versions are retained unchanged; previous analyses remain linked to the exact version used.
+5. Only approved taxonomy versions can be used for company classification. Each analysis records the taxonomy version used.
+6. The UI clearly distinguishes `needs_review` drafts from `approved` versions.
+
+**Future enhancement:** Browse and select a previous taxonomy version for a new analysis run.
+
+**Next step:** YTP-23
 
 ---
 
-## Epic 2 — Company & Source Management
+## Epic YTP-7 — Company & Source Management
 
-### YTP-11 · Register a company 
+### YTP-16 · Create and match company records
 
-**As an** Analyst,  
-**I want to** register a company with a stable ID and legal name,  
-**so that** all uploaded sources and cases are linked to the correct entity.
+**As a** Portfolio Manager,
+**I want** the system to create or match company records with securities from my imported portfolio data,
+**so that** documents and thematic analyses are linked to the correct companies and securities without manually registering each one.
 
 **Acceptance Criteria:**
 
-1. Required fields: `id` (stable, analyst-assigned string), `name` (legal name), optional `jurisdiction`.
-2. `id` must not be `CASH` (reserved for cash holdings).
-3. A duplicate `id` is rejected with a clear error.
-4. The registered company is immediately available for source uploads and analysis.
+1. For each imported portfolio row, the system creates a security record if its SEDOL or Bloomberg ticker is not already registered; otherwise it reuses the existing security record. Each security is linked to its company record, creating a new company record where necessary.
+2. Conflicting security identifiers or ambiguous security-to-company matches are flagged for PM review. Companies are not automatically merged based solely on similar names.
+3. Multiple securities belonging to the same company can be linked to one company record following PM confirmation. Their portfolio and benchmark weights remain separate in the imported data.
+4. Portfolio weights, benchmark weights, and dates remain associated with the relevant portfolio import, not stored as permanent attributes of the company or security.
+5. The PM can manually register an additional company and security by providing the company name and at least one security identifier.
+6. Once identity conflicts are resolved, company records are available for source collection and thematic analysis.
 
 ---
 
-### YTP-12 · Upload a company source document 
+### YTP-17 · Find company source documents
 
-**As an** Analyst,  
-**I want to** upload an annual report or regulatory filing,  
-**so that** the system can extract text passages for AI analysis.
+**As a** Portfolio Manager,
+**I want** the system to find relevant public documents for companies in my imported portfolio,
+**so that** thematic analysis can use supporting evidence without requiring me to collect every document manually.
 
 **Acceptance Criteria:**
 
-1. Accepted formats: PDF and UTF-8 TXT only; other types are rejected.
-2. File size: 1 byte – 20 MB; outside this range is rejected.
-3. PDFs are validated by magic bytes (`%PDF-`); invalid PDFs are rejected.
-4. PDFs are capped at 500 pages.
-5. Required metadata on upload: `company_id`, `publication_date` (ISO date), `period` (e.g. `FY2025`), `source_type`.
-6. Optional: `url` (must be HTTP/HTTPS if provided).
-7. The system deduplicates by SHA-256 hash + company + period + date; re-uploading the same file returns the existing record without creating a duplicate.
-8. Text is split into passages of up to 5,000 characters, each tagged with `evidence_id`, `source_id`, and `page` number.
-9. Pages with fewer than 80 characters of extracted text are flagged with a warning; they are not silently dropped.
+1. The system searches for source documents for selected portfolio companies using their company names and available identifiers.
+2. The PM can upload documents or provide source URLs before or after an automated search. Automated searching is optional when sufficient documents have already been provided. All sources undergo the same validation, company-matching, cutoff, and deduplication checks. The PM can review and exclude sources before analysis.
+3. Before searching, the PM can select the source types to search for. Annual reports and regulatory filings are selected by default. Additional supported options include: investor presentations, company website pages, earnings-call transcripts, sustainability reports, news and company announcements. The PM can specify additional source types. If a requested source cannot be accessed or processed, the system explains the limitation and allows the PM to provide an alternative URL or upload. Selected source types and the resulting sources (labelled with source type) are saved with the search run.
+4. The system prioritises official company websites, investor relations pages, and regulatory or stock-exchange sources.
+5. Before source collection or analysis, the PM can specify the reporting period and evidence cutoff date. These settings apply to both manually provided and automatically retrieved sources and are saved with the analysis run.
+6. For each document found, the system records: title, associated company, source URL, source type, publication date, and reporting period where applicable. Missing metadata is explicitly identified rather than guessed.
+7. Documents published after the selected cutoff date are excluded from analysis, with the exclusion reason shown. Documents with unknown publication dates are flagged for review before use.
+8. The system checks that each document relates to the intended company. Ambiguous company matches are flagged for PM review and are not used until resolved.
+9. The PM can view the collected documents and exclude unsuitable sources.
+10. If no suitable documents are found or a document cannot be retrieved, the system identifies the affected company and the reason where known, and allows retry or manual upload. Failures for one company do not prevent collection for other companies.
+11. Successfully retrieved documents are passed to document ingestion for file validation, deduplication, and text extraction.
+12. Additional sources may support classification and explain business activities. Revenue figures used in exposure calculations must remain traceable to supporting disclosures; estimates are clearly distinguished from reported figures.
+13. The system retains the source list and document versions used for each analysis. A fresh search does not silently replace evidence used in a previous analysis.
 
-**Mentor notes (6 Oct):** Primary sources are SEC filings via EDGAR (10-K, 20-F, 40-F). Earnings transcripts are acceptable supplements. Lagging (published) information only — no forward projections.
+**Mentor notes (6 Oct):** Primary sources are SEC filings via EDGAR (10-K, 20-F, 40-F). Lagging (published) information only — no forward projections.
 
 ---
 
-### YTP-13 · Enforce evidence cutoff 
+### YTP-18 · Enforce evidence cutoff
 
-**As an** Analyst,  
-**I want** sources published after a theme's cutoff date to be automatically excluded from analysis,  
+**As an** Analyst,
+**I want** sources published after a theme's cutoff date to be automatically excluded from analysis,
 **so that** no future-dated disclosure contaminates the assessment.
 
 **Acceptance Criteria:**
@@ -148,12 +164,12 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 3 — AI-Assisted Analysis
+## Epic YTP-9 — AI-Assisted Analysis
 
-### YTP-14 · Run AI analysis on selected passages 
+### YTP-19 · Run AI analysis on selected passages
 
-**As an** Analyst,  
-**I want to** select evidence passages and trigger AI fact extraction and classification in one step,  
+**As an** Analyst,
+**I want to** verify that the AI fact extraction and classification output is accurate,
 **so that** the system produces a draft exposure case ready for review.
 
 **Acceptance Criteria:**
@@ -162,10 +178,10 @@ The following are explicitly out of scope for the presentation:
 2. Only valid evidence IDs (within the approved evidence set for that theme) are accepted; invalid IDs are rejected.
 3. Total character count of selected passages must not exceed 60,000.
 4. **Stage 1 — Fact extraction:** the LLM returns `total_revenue`, `denominator_evidence_ids`, `period`, `currency`, `scale`, `units[]`, `unresolved_questions[]`. Each unit has `unit_id`, `activity`, `revenue`, `period`, `currency`, `scale`, `external: true`, `evidence_ids[]`.
-5. **Stage 2 — Classification:** the LLM classifies each extracted unit against approved taxonomy leaf nodes, returning `relationship_type` (one of `direct`, `indirect`, `excluded`, `insufficient_evidence`), `rationale`, `scope_check`, `confidence_band` (`high`/`medium`/`low`), and `confidence_basis`.
+5. **Stage 2 — Classification:** the LLM classifies each extracted unit against approved Tier-2 taxonomy nodes, returning `relationship_type` (one of `direct`, `indirect`, `excluded`, `insufficient_evidence`), `rationale`, `scope_check`, `confidence_band` (`high`/`medium`/`low`), and `confidence_basis`.
 6. The AI must not invent revenue figures; all numbers must be traceable to selected passages.
 7. Every extracted unit appears exactly once in the classification output.
-8. `direct` classifications require at least one valid leaf node ID and at least one cited evidence ID.
+8. `direct` classifications require at least one valid Tier-2 node ID and at least one cited evidence ID.
 9. `excluded` and `indirect` units contribute zero qualifying revenue.
 10. Units with ambiguous allocation retain a range (`lower < upper`, `point = null`).
 11. A malformed or schema-violating LLM response marks the run `failed`; no case is created.
@@ -175,10 +191,10 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### YTP-15 · Control AI usage with a call cap 
+### YTP-20 · Control AI usage with a call cap
 
-**As a** Portfolio Manager,  
-**I want** AI calls to be capped by an explicit environment variable,  
+**As a** Portfolio Manager,
+**I want** AI calls to be capped by an explicit environment variable,
 **so that** I never incur unexpected API charges.
 
 **Acceptance Criteria:**
@@ -191,98 +207,95 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 4 — Manual Review Workflow
+## Epic YTP-10 — Manual Review Workflow
 
-### YTP-16 · Enter a manual revenue case 
+### YTP-21 · Enter a manual revenue case
 
-**As an** Analyst,  
-**I want to** manually enter a structured revenue case,  
+**As an** Analyst,
+**I want to** manually enter a structured revenue case,
 **so that** I can classify exposure without AI or override an AI draft.
 
 **Acceptance Criteria:**
 
-1. Required: `company_id`, `theme_id`, `total_revenue` (positive finite number), `denominator_evidence_ids[]`, `period`, `currency`, `scale`, `units[]`, `classification_confidence` (`high`/`medium`/`low`), `exposure_quality`, `confidence_basis` (non-empty text).
+1. Required: `company_id`, `theme_id`, `total_revenue` (positive finite number), `denominator_evidence_ids[]`, `period`, `currency`, `scale`, `units[]`, `classification_confidence` (ratio), `exposure_quality`, `confidence_basis` (non-empty text).
 2. Each unit must be `external: true`, `revenue ≥ 0`, match denominator `period`/`currency`/`scale`, reference valid `evidence_ids[]`, have a non-empty `rationale`.
-3. `excluded` and `indirect` units must have `lower = upper = point = 0`.
-4. `estimated` method units require a non-empty `assumption`.
-5. `insufficient_evidence` method units cannot have a `point` estimate.
-6. Duplicate `unit_id` values in one case are rejected.
-7. Two units sharing an `overlap_group` are rejected (prevents double-counting).
-8. Sum of unit revenues must not exceed `total_revenue` (tolerance 1e-8).
-9. An unallocated residual (gap between unit sum and total) is flagged in `issues[]`; cases with `issues[]` cannot be approved until resolved.
-10. All evidence IDs must belong to sources whose `period` matches the case's declared revenue period.
+3. Duplicate `unit_id` values in one case are rejected.
+4. Two units sharing an `overlap_group` are rejected (prevents double-counting).
+5. Sum of unit revenues must not exceed `total_revenue` (tolerance 1e-8).
+6. An unallocated residual is flagged in `issues[]`; cases with `issues[]` cannot be approved until resolved.
+7. All evidence IDs must belong to sources whose `period` matches the case's declared revenue period.
 
 ---
 
-### YTP-17 · Approve or reject a case 
+### YTP-22 · Approve or reject a case
 
-**As a** Portfolio Manager,  
-**I want to** approve or reject a submitted case with a documented reason,  
+**As a** Portfolio Manager,
+**I want to** approve or reject a submitted case with a documented reason,
 **so that** only verified results reach the portfolio dashboard.
 
 **Acceptance Criteria:**
 
 1. Only cases with `review_status = needs_review` can be reviewed; re-reviewing a decided case is rejected.
 2. Required: `decision` (`approved` or `rejected`), non-empty `reviewer`, non-empty `reason`.
-3. Cases with non-empty `issues[]` on the estimate **cannot** be approved.
-4. On approval: `review_status → approved`; associated run → `completed`.
-5. On rejection: run → `needs_review`; analyst can create a revised case version.
-6. An audit record is stored containing: original case value, revised case value, reviewer, reason, and UTC timestamp.
-7. Approved cases are immutable; revisions create a new case record, not an edit.
+3. On approval: `review_status → approved`; associated run → `completed`.
+4. On rejection: `review_status → rejected`; analyst can create a revised case version.
+5. An audit record is stored containing: original case value, revised case value, reviewer, reason, and UTC timestamp.
+6. Approved cases are immutable; revisions create a new case record, not an edit.
 
 ---
 
-## Epic 5 — Portfolio Dashboard
+## Epic YTP-11 — Portfolio Dashboard
 
-### YTP-18 · Import a portfolio and benchmark snapshot 
+### YTP-23 · Import portfolio and benchmark holdings data
 
-**As a** Portfolio Manager,  
-**I want to** import a portfolio and benchmark holdings snapshot,  
-**so that** the system can aggregate company-level exposures into a portfolio view.
+**As a** Portfolio Manager,
+**I want to** import portfolio holdings and their corresponding benchmark weights,
+**so that** the system can calculate portfolio thematic exposure and active thematic contribution across the companies held in the portfolio.
+
+**Working assumption:** Analysis covers only companies in the uploaded portfolio. Active thematic contribution is calculated as the sum of `(portfolio weight − reference weight) × company thematic exposure` across these companies. Benchmark-only companies are excluded; the result is not presented as full portfolio-minus-benchmark thematic exposure.
 
 **Acceptance Criteria:**
 
-1. Both `portfolio` and `benchmark` arrays are required.
-2. Each row requires: `snapshot_id`, `as_of_date`, `security_id`, `company_id`, `weight` (decimal 0–1).
-3. Weights within each snapshot must sum to 1.0 (tolerance 0.000001).
-4. `as_of_date` must be identical for portfolio and benchmark.
-5. A `security_id` must map to the same `company_id` in both snapshots; conflicting mappings are rejected.
-6. Duplicate `security_id` within a single snapshot is rejected.
-7. Multiple securities may share a `company_id` (multiple share classes); their weights are aggregated to company level.
-8. `company_id = CASH` is accepted and treated as zero thematic exposure.
+1. The PM can upload an Excel file following the Schroders sample format with columns: Company, Bloomberg ticker, Country, Sector, SEDOL, Portfolio wt, Reference wt, Active wt.
+2. Required per row: company name, at least one security identifier (Bloomberg ticker or SEDOL), portfolio weight, and reference weight. The import upload timestamp is recorded separately.
+3. Optional: Country and Sector are retained when provided. Portfolio holdings date, benchmark name, and benchmark holdings date can also be uploaded or filled in. If unavailable, they are recorded as "Not provided". If both holdings dates are provided and differ, the system flags the mismatch for PM confirmation before proceeding.
+4. The system reads Excel percentage-formatted weights correctly and stores them internally as decimal fractions.
+5. Missing required information, invalid numeric weights, and duplicate security identifiers are flagged for correction before import is completed. Missing weights are not silently treated as zero.
+6. Active weight is calculated as portfolio weight minus reference weight. If an uploaded Active wt differs beyond an agreed rounding tolerance, the discrepancy is flagged.
+7. The system displays total portfolio and reference weights. Portfolio weights are expected to total 100%, subject to an agreed rounding tolerance. Reference weights are not required to total 100% because only portfolio holdings are included.
+8. Successfully imported holdings are available for company analysis and subsequent exposure calculations.
 
 **Mentor notes (6 Oct):** Equities only. Benchmark is MSCI Asia ex Japan for the pilot. Exposure formula: Σ (portfolio weight × company revenue exposure). Cost exposure is not considered.
 
+**Further enhancement:** Allow the PM to upload updated benchmark companies and weights or retrieve them through an authorised data source. Support importing all benchmark companies including those not held in the portfolio to calculate full benchmark and active thematic exposures.
+
+**Next step:** YTP-16
+
 ---
 
-### YTP-19 · View the portfolio exposure dashboard 
+### YTP-24 · View the portfolio exposure dashboard
 
-**As a** Portfolio Manager,  
-**I want to** see portfolio, benchmark, and active thematic exposures with company-level breakdown,  
+**As a** Portfolio Manager,
+**I want to** see portfolio, benchmark, and active thematic exposures with company-level breakdown,
 **so that** I understand how the portfolio is positioned and can explain each exposure.
 
 **Acceptance Criteria:**
 
 1. The dashboard shows `portfolio`, `benchmark`, and `active` (portfolio − benchmark) exposures with `lower`, `upper`, and `point` values.
-2. Companies without an approved case contribute `lower = 0`, `upper = 1`, `point = null` (unknown, not zero).
-3. Cash holdings show zero exposure and are reported separately from equity coverage.
-4. Negative active weights (underweight positions) correctly reverse `lower`/`upper` bounds.
-5. When any company with a nonzero active weight has no point estimate, `active.point` is shown as null/unavailable — not a false zero.
-6. Holdings weights are never renormalised.
-7. Companies are sorted by absolute active contribution (largest contributors first).
-8. A coverage metric shows the percentage of portfolio and benchmark weight with approved estimates.
-9. Each company row shows its exposure range, point estimate, and the classification rationale — supporting explainability.
-10. Sub-theme breakdown is shown to explain drivers of overall theme exposure.
-11. The same inputs always produce the same dashboard output (consistency).
+2. Companies are sorted by absolute active contribution (largest contributors first).
+3. A coverage metric shows the percentage of portfolio and benchmark weight with approved estimates.
+4. Each company row shows its exposure and the classification rationale — supporting explainability.
+5. Sub-theme breakdown is shown to explain drivers of overall theme exposure.
+6. The same inputs always produce the same dashboard output (consistency).
 
-**Mentor notes (6 Oct):** Non-negotiable: show exposure *and* explain why. "Why does this portfolio have X% exposure?" must be answerable from the UI.
+**Mentor notes (6 Oct):** Non-negotiable — show exposure and explain why. "Why does this portfolio have X% exposure?" must be answerable from the UI.
 
 ---
 
-### YTP-20 · Export the research package 
+### YTP-25 · Export the research package
 
-**As an** Analyst,  
-**I want to** export all analysis artefacts as a ZIP archive,  
+**As an** Analyst,
+**I want to** export all analysis artefacts as a ZIP archive,
 **so that** the research is reproducible, auditable, and shareable with the team.
 
 **Acceptance Criteria:**
@@ -294,35 +307,31 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-## Epic 6 — Validation & Evaluation
+## Epic YTP-12 — Validation & Evaluation
 
-### YTP-21 · Evaluate classification accuracy against a labelled set 
+### YTP-27 · Evaluate classification accuracy against a labelled set
 
-**As an** Analyst,  
-**I want to** run `evaluate.py` against a labelled reference set,  
-**so that** I can report classification accuracy, exposure error, and confidence calibration for the presentation.
+**As an** Analyst,
+**I want to** run `evaluate.py` against a labelled reference set,
+**so that** I can report classification accuracy, exposure error, and confidence scores.
 
 **Acceptance Criteria:**
 
 1. `python evaluate.py labelled_examples.json` produces a JSON report without error.
-2. Report includes: `examples`, `abstention_rate`, `answered_accuracy`, per-label `precision`/`recall`/`F1`, per-rubric-band `observed_accuracy`, `exposure_mean_absolute_error_pp`, `reference_range_overlap_rate`.
-3. Rubric band accuracy is labelled as non-probabilistic.
-4. Development and held-out splits are kept separate; no accuracy claim is made from the synthetic demo.
+2. Report includes: `examples`, `answered_accuracy`, per-label `precision`/`recall`/`F1`, `exposure_mean_absolute_error_pp`, `reference_range_overlap_rate`.
+3. Data is classified into sub-theme categories; exposure is estimated with confidence scores and supporting evidence.
+4. Where data is insufficient to support a classification, this is explicitly identified.
 
-**Mentor notes (6 Oct):** Target gold set: 20 companies (8 dev / 12 held-out). Acceptable bar: mean exposure error ≤ 10 pp on held-out, beating sector-label and keyword baselines. 15–20 well-validated companies beats 30 poorly-validated ones.
-
----
-
-## Backend Stories (Epic 7)
-
-> System-level behaviour: persistence, state transitions, calculation invariants, security. These are implementation acceptance criteria for the backend.
+**Mentor notes (6 Oct):** Target gold set: 20 companies (8 dev / 12 held-out). Acceptable bar: mean exposure error ≤ 10 pp on held-out, beating sector-label and keyword baselines.
 
 ---
 
-### YTP-22 · Persist themes as versioned, immutable records 
+## Epic YTP-13 — Backend / System
 
-**As the** system,  
-**I need to** write every theme as an immutable record and create new versions on edit,  
+### YTP-29 · Persist themes as versioned, immutable records
+
+**As the** system,
+**I need to** write every theme as an immutable record and create new versions on edit,
 **so that** past analyses always reference the exact scope definition they were run against.
 
 **Acceptance Criteria:**
@@ -334,10 +343,10 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### YTP-23 · Ingest source documents with deduplication and passage extraction 
+### YTP-30 · Ingest source documents with deduplication and passage extraction
 
-**As the** system,  
-**I need to** hash each uploaded file, detect duplicates, and split the text into page-linked passages,  
+**As the** system,
+**I need to** hash each uploaded file, detect duplicates, and split the text into page-linked passages,
 **so that** evidence IDs are stable and the same filing is never ingested twice.
 
 **Acceptance Criteria:**
@@ -350,26 +359,26 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### YTP-24 · Manage the AI run through a strict state machine 
+### YTP-31 · Manage the AI run through a strict state machine
 
-**As the** system,  
-**I need to** transition each AI run through defined statuses and record failures with stage and reason,  
+**As the** system,
+**I need to** transition each AI run through defined statuses and record failures with stage and reason,
 **so that** every failure is traceable and no partial output reaches the case store.
 
 **Acceptance Criteria:**
 
 1. `analyze()` creates a run at `status = extracting` before any LLM call.
 2. Successful Stage 1 → `classifying`; successful Stage 2 + engine validation → `needs_review`; case record written only at this point.
-3. Any exception at any stage: `run.status = failed`, `run.errors[]` appended with `{stage, reason}`, run persisted, exception re-raised, **no case record created**.
+3. Any exception at any stage: `run.status = failed`, `run.errors[]` appended with `{stage, reason}`, run persisted, exception re-raised, no case record created.
 4. Raw provider responses are stored in `provider_outputs` before schema validation; validated model outputs are stored in `model_outputs` with stage label.
 5. LLM responses are validated for required keys and types before use; a missing key or wrong type is treated as a failure, not silently ignored.
 
 ---
 
-### YTP-25 · Cache LLM responses for determinism 
+### YTP-32 · Cache LLM responses for determinism
 
-**As the** system,  
-**I need to** cache validated LLM responses by a hash of (task, payload, model, endpoint, versions),  
+**As the** system,
+**I need to** cache validated LLM responses by a hash of (task, payload, model, endpoint, versions),
 **so that** re-running the same analysis on the same data returns identical results without extra API calls.
 
 **Acceptance Criteria:**
@@ -381,10 +390,10 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### YTP-26 · Calculate exposure deterministically with no LLM involvement 
+### YTP-33 · Calculate exposure deterministically with no LLM involvement
 
-**As the** system,  
-**I need to** compute all exposure figures in `engine.estimate()` as a pure function,  
+**As the** system,
+**I need to** compute all exposure figures in `engine.estimate()` as a pure function,
 **so that** the same case always produces the same numerical result regardless of model or provider.
 
 **Acceptance Criteria:**
@@ -399,10 +408,10 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### YTP-27 · Gate case approval on resolved reconciliation 
+### YTP-34 · Gate case approval on resolved reconciliation
 
-**As the** system,  
-**I need to** block approval of any case with a non-empty `issues[]` on the estimate,  
+**As the** system,
+**I need to** block approval of any case with a non-empty `issues[]` on the estimate,
 **so that** the dashboard is never fed a result with an unresolved revenue gap.
 
 **Acceptance Criteria:**
@@ -415,10 +424,10 @@ The following are explicitly out of scope for the presentation:
 
 ---
 
-### YTP-28 · Aggregate portfolio exposure using the latest approved case per company 
+### YTP-35 · Aggregate portfolio exposure using the latest approved case per company
 
-**As the** system,  
-**I need to** select exactly one approved case per company per theme for the dashboard,  
+**As the** system,
+**I need to** select exactly one approved case per company per theme for the dashboard,
 **so that** the portfolio view is always consistent and never uses a superseded result.
 
 **Acceptance Criteria:**
@@ -427,15 +436,13 @@ The following are explicitly out of scope for the presentation:
 2. Companies present in the snapshot but absent from estimates: `lower=0, upper=1, point=null` (unknown, not zero).
 3. Negative active weight (underweight position) reverses `lower`/`upper` bounds.
 4. `active.point` is suppressed to null if any company with nonzero active weight has `point = null`.
-5. `CASH` holdings are always `lower=upper=point=0`.
-6. Snapshot weights are never renormalised.
 
 ---
 
-### YTP-29 · Enforce same-origin and local-only access 
+### YTP-36 · Enforce same-origin and local-only access
 
-**As the** system,  
-**I need to** reject write requests from any origin other than the local application,  
+**As the** system,
+**I need to** reject write requests from any origin other than the local application,
 **so that** a page from any external site cannot trigger data modifications.
 
 **Acceptance Criteria:**
@@ -448,14 +455,14 @@ The following are explicitly out of scope for the presentation:
 
 ## Appendix: Prioritised Story Map
 
-| Priority | Stories | Why |
+| Priority | Jira IDs | Why |
 |---|---|---|
-| **Must have** | US-01 (YTP-8), US-02 (YTP-9), US-03 (YTP-10), US-04 (YTP-11), US-05 (YTP-12), US-06 (YTP-13) | Theme + source pipeline — everything depends on this |
-| **Must have** | US-07 (YTP-14), US-08 (YTP-15), US-09 (YTP-16), US-10 (YTP-17) | Analysis + review — core classification workflow |
-| **Must have** | US-11 (YTP-18), US-12 (YTP-19), US-13 (YTP-20) | Portfolio dashboard — the primary deliverable |
-| **Must have** | US-B01–B08 (YTP-22–YTP-29) | Backend contracts that make the above work correctly |
-| **Should have** | US-14 (YTP-21) | Evaluation for presentation evidence |
-| **Cut** | Specialist feedback (US-11 old), Exposure monitoring (US-15/16 old), Indirect beneficiary quantification | Not achievable in under 1 month |
+| **Must have** | YTP-8, YTP-14, YTP-15 | Theme + taxonomy — everything downstream depends on this |
+| **Must have** | YTP-16, YTP-17, YTP-18 | Company matching + source collection |
+| **Must have** | YTP-19, YTP-20, YTP-21, YTP-22 | AI analysis + manual review — core classification workflow |
+| **Must have** | YTP-23, YTP-24, YTP-25 | Portfolio dashboard — the primary deliverable |
+| **Must have** | YTP-29–YTP-36 | Backend contracts underpinning all of the above |
+| **Should have** | YTP-27 | Evaluation metrics for presentation evidence |
 
 ---
 
@@ -463,9 +470,9 @@ The following are explicitly out of scope for the presentation:
 
 | Rule | Behaviour |
 |---|---|
-| All theme fields required | Reject with field name if any blank |
-| Theme → Subtheme only (2 levels) | Max depth 2; leaf nodes only for classification |
-| 5–10 subthemes per theme | LLM constrained at generation time |
+| `theme_name` required; other fields partially required | See YTP-8 for field requirements |
+| Two-tier taxonomy (Tier-1 → Tier-2) | Max depth 2 levels below theme; only Tier-2 nodes are classification targets |
+| Tier-1: 5 nodes (target), Tier-2: 3 per parent (target, max 4) | LLM constrained via prompt; hard ceiling enforced by validation |
 | Equities only | No bonds, derivatives, or other instruments |
 | Revenue exposure, not cost | Cost lines are not used in the formula |
 | MSCI Asia ex Japan benchmark | Pilot universe |
@@ -476,6 +483,6 @@ The following are explicitly out of scope for the presentation:
 | Immutable approved themes | Edits create a new version |
 | Immutable approved cases | Revisions create a new case record |
 | AI cap defaults to 0 | Must be set explicitly before any paid calls |
-| Confidence is ordinal, not probabilistic | high/medium/low = 3/2/1; never a percentage |
+| Confidence is ordinal, not probabilistic | high/medium/low; never a percentage |
 | Consistency | Same inputs → same output on every run |
 | Explainability | Every exposure entry shows its evidence and rationale |
