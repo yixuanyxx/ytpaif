@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Theme Lab · Thematic Exposure Engine</title>
+  <link rel="stylesheet" href="/style.css">
+  <!-- SheetJS for client-side Excel parsing (no server round-trip) -->
+  <script src="/xlsx.full.min.js"></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+
+<!-- ===== SIDEBAR ===== -->
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <a class="logo" href="#">
+      <div class="logo-icon">◈</div>
+      <span>Theme Lab</span>
+    </a>
+    <div class="tagline">Thematic Exposure Engine</div>
+  </div>
+
+  <div class="sidebar-section-label">Workflow</div>
+
+  <nav id="sidebar-nav">
+    <button class="nav-step active" data-view="overview">
+      <div class="step-num">◈</div>
+      <div class="step-text">
+        <strong>Overview</strong>
+        <small>Dashboard summary</small>
+      </div>
+    </button>
+
+    <button class="nav-step" data-view="theme">
+      <div class="step-num">1</div>
+      <div class="step-text">
+        <strong>Theme Definition</strong>
+        <small>Name, scope &amp; taxonomy</small>
+      </div>
+    </button>
+
+    <button class="nav-step" data-view="portfolio">
+      <div class="step-num">2</div>
+      <div class="step-text">
+        <strong>Portfolio Import</strong>
+        <small>Holdings &amp; companies</small>
+      </div>
+    </button>
+
+    <button class="nav-step" data-view="sources">
+      <div class="step-num">3</div>
+      <div class="step-text">
+        <strong>Source Documents</strong>
+        <small>Find &amp; upload filings</small>
+      </div>
+      <span class="step-badge warn" id="badge-sources" hidden>0</span>
+    </button>
+
+    <button class="nav-step" data-view="analysis">
+      <div class="step-num">4</div>
+      <div class="step-text">
+        <strong>AI Analysis</strong>
+        <small>Extract &amp; classify</small>
+      </div>
+      <span class="step-badge warn" id="badge-review" hidden>0</span>
+    </button>
+
+    <button class="nav-step" data-view="review">
+      <div class="step-num">5</div>
+      <div class="step-text">
+        <strong>Review Cases</strong>
+        <small>Approve classifications</small>
+      </div>
+    </button>
+
+    <button class="nav-step" data-view="dashboard">
+      <div class="step-num">6</div>
+      <div class="step-text">
+        <strong>Dashboard</strong>
+        <small>Portfolio exposure</small>
+      </div>
+    </button>
+
+    <div style="height:1px;background:rgba(255,255,255,.07);margin:12px 0"></div>
+
+    <button class="nav-step" data-view="evaluate">
+      <div class="step-num">✓</div>
+      <div class="step-text">
+        <strong>Evaluate</strong>
+        <small>Accuracy &amp; validation</small>
+      </div>
+    </button>
+  </nav>
+
+  <div class="sidebar-bottom">
+    <div><span class="status-dot"></span> Local workspace</div>
+    <div style="margin-top:6px;line-height:1.7">
+      Revenue exposure research<br>
+      <span id="ai-status-label">AI: not configured</span>
+    </div>
+  </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<div class="main">
+  <!-- Page header -->
+  <div class="page-header">
+    <div class="page-header-left">
+      <div class="eyebrow" id="page-eyebrow">THEMATIC EXPOSURE ENGINE</div>
+      <h1 id="page-title">Overview</h1>
+      <div class="subtitle" id="page-subtitle"></div>
+    </div>
+    <div class="page-header-right" id="page-actions"></div>
+  </div>
+
+  <!-- Notice area -->
+  <div id="notice-area" style="padding: 0 40px; margin-top: 16px;"></div>
+
+  <!-- Page content -->
+  <div class="content" id="page-content"></div>
+</div>
+
+<!-- ===== LOADING OVERLAY ===== -->
+<div id="loading-overlay" hidden>
+  <div class="spinner"></div>
+  <div id="loading-text">Working…</div>
+</div>
+
+</body>
+</html>
