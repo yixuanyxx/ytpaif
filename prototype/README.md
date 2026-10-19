@@ -17,7 +17,7 @@ Open http://127.0.0.1:8766. Set `PORT` to override the port. V0 uses port 8765.
 
 ## Workflow
 
-1. Define a theme and its two-tier taxonomy. Provide a theme name and either a description plus included activities, or positive examples. Editing an approved definition creates a new version.
+1. Define a theme and its two-tier taxonomy. The taxonomy appears as a full-width, top-down mind map from the theme through Tier-1 areas to Tier-2 activities. Click nodes to open definitions and examples in a dialog. Theme scope and JSON editing are collapsible to keep the map compact. The preview updates when you edit the theme name, edit JSON, or generate a taxonomy with AI. Provide a theme name and either a description plus included activities, or positive examples. Editing an approved definition creates a new version.
 2. Import a portfolio in Portfolio Import. Select or drop an `.xlsx`, `.xls`, or `.csv` file, enter a portfolio name, and click **Load & preview data**.
 3. Review the loaded holdings table. Edit company names, identifiers, country, sector, portfolio weights, and reference weights inline. Active weights are calculated automatically. Search, add rows, exclude rows, and resolve identity conflicts before clicking **Confirm & import**. The table remains available for further editing during the session.
 4. Upload company PDF or UTF-8 TXT evidence, with publication date and fiscal period. PDFs are limited to 500 pages; files are limited to 20 MB.

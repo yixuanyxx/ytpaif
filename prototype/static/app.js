@@ -348,10 +348,10 @@ async function viewTheme() {
             placeholder="Any other context for analysts…">
         </div>
       </div>
-      <div class="card-footer" style="border-radius:var(--radius-lg);margin-top:20px">
-        <div class="flex-1 text-muted text-small">
-          Saving creates a new approved version. Existing analyses are unaffected.
-        </div>
+      <div class="card-footer theme-save-footer">
+        <p class="theme-save-note text-muted text-small">
+          ${theme ? 'Saving approves a new theme version. Previous analyses remain linked to their original version.' : 'Saving approves the first version of this theme.'}
+        </p>
         <button type="button" class="btn" id="btn-gen-taxonomy" ${!state?.ai_configured ? 'disabled title="Configure LLM_API_KEY to enable"' : ''}>
           ✧ Generate taxonomy with AI
         </button>
@@ -362,18 +362,18 @@ async function viewTheme() {
   // Taxonomy panel
   const nodes = theme?.nodes || [];
   const tier1 = nodes.filter(n => !n.parent_id);
-  const taxonomyHtml = buildTaxonomyEditor(nodes, tier1, !!theme);
+  const taxonomyHtml = buildTaxonomyEditor(nodes);
 
   $('#page-content').innerHTML = `
-    <div class="grid-1-2" style="align-items:start">
+    <div class="theme-layout">
       <div>
-        <div class="panel">
-          <div class="panel-title">Theme scope</div>
+        <details class="panel theme-scope" open>
+          <summary class="panel-title">Edit theme scope</summary>
           <div class="panel-subtitle">
             Only <code>theme_name</code> is required. The more detail you provide, the better the AI analysis.
           </div>
           ${themeFormHtml}
-        </div>
+        </details>
 
         ${theme ? `
         <div class="panel">
@@ -405,15 +405,14 @@ async function viewTheme() {
             Target: 5 Tier-1 nodes, 3 Tier-2 per parent.
           </div>
           ${taxonomyHtml}
-          ${!theme && nodes.length === 0 ? `
-            <div class="empty-state" style="padding:40px 16px">
-              <div class="empty-icon">◇</div>
-              <h3>No taxonomy yet</h3>
-              <p>Fill in the theme scope and click "Generate taxonomy with AI", or add nodes manually.</p>
-            </div>` : ''}
+
         </div>
       </div>
     </div>`;
+
+  updateTaxonomyMindmap();
+  $('#taxonomy-json-area').addEventListener('input', updateTaxonomyMindmap);
+  $('#theme-form [name="theme_name"]').addEventListener('input', updateTaxonomyMindmap);
 
   // Form submit
   $('#theme-form').onsubmit = e => {
@@ -445,6 +444,7 @@ async function viewTheme() {
       const result = await api('generate', { ...fd, tier1_count: 5, tier2_count: 3 });
       const ta = $('#taxonomy-json-area');
       if (ta) ta.value = JSON.stringify(result.nodes, null, 2);
+      updateTaxonomyMindmap();
       notice('AI taxonomy proposed. Review every node before approving.', 'info');
     }, 'Generating taxonomy with AI…');
   });
@@ -454,57 +454,56 @@ async function viewTheme() {
   });
 }
 
-function buildTaxonomyEditor(nodes, tier1Nodes, hasApproved) {
-  if (nodes.length === 0 && !hasApproved) {
-    // Show JSON textarea for manual entry / AI result
-    return `
-      <div class="form-group">
-        <label class="field-label">Taxonomy JSON
-          <span class="optional">— edit directly or use AI generation above</span></label>
-        <textarea class="code" id="taxonomy-json-area" name="nodes" rows="14"
-          placeholder='[\n  {\n    "node_id": "compute",\n    "parent_id": null,\n    "name": "Compute Hardware",\n    "definition": "Dedicated AI chips and systems",\n    "examples": ["AI accelerators"]\n  }\n]'></textarea>
-        <div class="field-hint">
-          Tier-1 nodes have <code>parent_id: null</code>.
-          Tier-2 nodes set <code>parent_id</code> to a Tier-1 <code>node_id</code>.
-          Only Tier-2 leaf nodes are used as classification targets.
-        </div>
-      </div>`;
+function taxonomyMindmap(nodes, themeName) {
+  const roots = nodes.filter(n => !n.parent_id);
+  if (!roots.length) return '<div class="empty-state"><h3>No taxonomy yet</h3><p>Generate a taxonomy with AI or enter nodes below to build the mind map.</p></div>';
+  const nodeCard = (node, level) => `<button type="button" class="mindmap-node mindmap-${level === 1 ? 'parent' : 'leaf'}" data-mindmap-id="${esc(node.node_id)}"><span class="mindmap-level">TIER ${level}</span><strong>${esc(node.name)}</strong></button>`;
+  return `<div class="taxonomy-mindmap" role="region" aria-label="Theme taxonomy mind map">
+    <div class="mindmap-root"><span class="mindmap-level">THEME</span><strong>${esc(themeName || 'Investment theme')}</strong></div>
+    <ul class="mindmap-branches" style="--branch-count:${roots.length}">${roots.map(root => {
+      const children = nodes.filter(n => n.parent_id === root.node_id);
+      return `<li class="mindmap-branch">${nodeCard(root, 1)}<ul class="mindmap-leaves">${children.length ? children.map(child => `<li>${nodeCard(child, 2)}</li>`).join('') : '<li class="mindmap-missing">Add Tier-2 activities below.</li>'}</ul></li>`;
+    }).join('')}</ul>
+  </div>`;
+}
+
+function mindmapExamples(node) {
+  return Array.isArray(node.examples) && node.examples.length
+    ? `<p class="text-muted text-small">Examples: ${node.examples.map(esc).join(', ')}</p>` : '';
+}
+
+function buildTaxonomyEditor(nodes) {
+  return `<div id="taxonomy-mindmap"></div>
+    <div class="field-hint">Follow the branches from the theme to Tier-1 areas and Tier-2 activities. Click a node to view its definition and examples.</div>
+    <details class="form-section">
+      <summary class="field-label">Edit taxonomy JSON</summary>
+      <textarea class="code" id="taxonomy-json-area" rows="10" placeholder="Enter a JSON array of taxonomy nodes">${esc(JSON.stringify(nodes, null, 2))}</textarea>
+      <div id="taxonomy-preview-error" class="field-hint" role="status"></div>
+      <div class="field-hint">Tier-1 nodes use parent_id: null; Tier-2 nodes reference a Tier-1 node_id. The map updates as you edit. Save the theme to approve changes.</div>
+    </details>
+    <dialog id="taxonomy-node-dialog" class="mindmap-dialog"><form method="dialog"><button class="btn" aria-label="Close node details">Close</button></form><div id="taxonomy-node-details"></div></dialog>`;
+}
+
+function updateTaxonomyMindmap() {
+  const target = $('#taxonomy-mindmap');
+  if (!target) return;
+  const error = $('#taxonomy-preview-error');
+  try {
+    const nodes = JSON.parse($('#taxonomy-json-area').value || '[]');
+    if (!Array.isArray(nodes) || nodes.some(n => !n || typeof n !== 'object' || Array.isArray(n))) throw new Error();
+    target.innerHTML = taxonomyMindmap(nodes, $('#theme-form [name="theme_name"]').value);
+    target.onclick = event => {
+      const button = event.target.closest('[data-mindmap-id]');
+      if (!button) return;
+      const node = nodes.find(n => n.node_id === button.dataset.mindmapId);
+      if (!node) return;
+      $('#taxonomy-node-details').innerHTML = `<h2>${esc(node.name)}</h2><p>${esc(node.definition || 'No definition provided.')}</p>${mindmapExamples(node)}<code>${esc(node.node_id)}</code>`;
+      $('#taxonomy-node-dialog').showModal();
+    };
+    error.textContent = '';
+  } catch {
+    error.textContent = 'Enter a valid JSON array of nodes to update the map. The last valid preview is retained.';
   }
-
-  // Visual tree
-  const tier1Html = tier1Nodes.map(t1 => {
-    const children = nodes.filter(n => n.parent_id === t1.node_id);
-    return `
-      <div class="tier1-node">
-        <div class="tier1-header" onclick="this.classList.toggle('open');this.nextElementSibling.style.display=this.classList.contains('open')?'':'none'">
-          <span class="tier1-chevron">▶</span>
-          <span class="node-name">${esc(t1.name)}</span>
-          <span class="node-count">${children.length} sub-themes</span>
-        </div>
-        <div class="tier2-list" style="display:none">
-          ${children.map(t2 => `
-            <div class="tier2-node">
-              <div class="tier2-bullet"></div>
-              <div>
-                <div class="node-name">${esc(t2.name)}</div>
-                <div class="node-def">${esc(t2.definition || '')}</div>
-                <div class="text-mono text-muted mt-4">${esc(t2.node_id)}</div>
-              </div>
-            </div>`).join('')}
-          ${children.length === 0 ? `<div class="text-muted text-small" style="padding:8px">No Tier-2 nodes yet — at least one required before approval.</div>` : ''}
-        </div>
-      </div>`;
-  }).join('');
-
-  // Also expose JSON textarea below tree for editing
-  const jsonStr = JSON.stringify(nodes, null, 2);
-  return `
-    <div class="taxonomy-tree">${tier1Html}</div>
-    <div class="form-section">
-      <div class="form-section-title">Edit taxonomy JSON</div>
-      <textarea class="code" id="taxonomy-json-area" rows="10">${esc(jsonStr)}</textarea>
-      <div class="field-hint">Edit JSON directly or use "Generate taxonomy with AI". Changes take effect when you save the theme.</div>
-    </div>`;
 }
 
 // ══════════════════════════════════════════════════════
