@@ -68,6 +68,45 @@ function notice(msg, type = 'success') {
 }
 function clearNotice() { $('#notice-area').innerHTML = ''; }
 
+// Centred modal alert with a greyed-out backdrop and an OK button.
+function showAlert(message, title = 'Limit reached') {
+  const dialog = $('#alert-modal');
+  if (!dialog) { alert(message); return; }
+  $('#alert-modal-title').textContent = title;
+  $('#alert-modal-message').textContent = message;
+  const ok = $('#alert-modal-ok');
+  ok.onclick = () => dialog.close();
+  dialog.onclick = e => { if (e.target === dialog) dialog.close(); };
+  if (!dialog.open) dialog.showModal();
+  ok.focus();
+}
+
+// Centred confirm modal (greyed-out backdrop). Resolves true if confirmed.
+function showConfirm(message, { title = 'Confirm deletion', confirmLabel = 'Delete' } = {}) {
+  return new Promise(resolve => {
+    const dialog = $('#confirm-modal');
+    if (!dialog) { resolve(window.confirm(message)); return; }
+    $('#confirm-modal-title').textContent = title;
+    $('#confirm-modal-message').textContent = message;
+    const okBtn = $('#confirm-modal-ok');
+    const cancelBtn = $('#confirm-modal-cancel');
+    okBtn.textContent = confirmLabel;
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      dialog.close();
+      resolve(result);
+    };
+    okBtn.onclick = () => finish(true);
+    cancelBtn.onclick = () => finish(false);
+    dialog.onclick = e => { if (e.target === dialog) finish(false); };
+    dialog.oncancel = () => finish(false);   // Esc key
+    if (!dialog.open) dialog.showModal();
+    cancelBtn.focus();
+  });
+}
+
 // ── Task runner ────────────────────────────────────
 async function run(fn, loadingMsg) {
   showLoading(loadingMsg);
@@ -124,10 +163,45 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Sidebar nav
   $$('.nav-step').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
 
-  // Global delegation for data-view buttons inside content
+  // Global delegation for data-view buttons and interactive accordion/tree controls
   document.addEventListener('click', e => {
     const el = e.target.closest('[data-goto]');
-    if (el) { e.preventDefault(); setView(el.dataset.goto); }
+    if (el) { e.preventDefault(); setView(el.dataset.goto); return; }
+
+    const t1 = e.target.closest('.tier1-header');
+    if (t1) {
+      t1.classList.toggle('open');
+      const list = t1.nextElementSibling;
+      if (list) {
+        list.style.display = t1.classList.contains('open') ? '' : 'none';
+      }
+      return;
+    }
+
+    const acc = e.target.closest('.accordion-header');
+    if (acc) {
+      if (e.target.closest('button, a, input, select, textarea')) return;
+      acc.classList.toggle('open');
+      const body = acc.nextElementSibling;
+      if (body) body.classList.toggle('open');
+      return;
+    }
+
+    const evH = e.target.closest('.evidence-item-header');
+    if (evH) {
+      const p = evH.nextElementSibling;
+      if (p) p.style.display = (p.style.display === 'none' || !p.style.display) ? 'block' : 'none';
+      return;
+    }
+
+    const rubric = e.target.closest('.rubric-option');
+    if (rubric && rubric.dataset.value) {
+      const parent = rubric.closest('.rubric-selector');
+      if (parent && parent.id && typeof window.selectRubric === 'function') {
+        window.selectRubric(parent.id, rubric.dataset.value);
+      }
+      return;
+    }
   });
 });
 
@@ -292,15 +366,64 @@ function waterfallChart(companies, state) {
 }
 
 // ══════════════════════════════════════════════════════
-// VIEW: THEME DEFINITION  (YTP-8, YTP-14, YTP-15)
-// ══════════════════════════════════════════════════════
-async function viewTheme() {
-  const theme = (state.themes || []).filter(t => t.approved).at(-1);
+let _activeThemeId = null;
+
+// Renders the "Saved themes" card: a flat list of distinct themes. Clicking a
+// row loads that theme's definition + taxonomy into the editor below.
+function savedThemesListHtml(savedThemes, activeTheme) {
+  if (!savedThemes.length) {
+    return `
+      <div class="panel saved-themes-panel">
+        <div class="panel-title">Saved themes</div>
+        <div class="panel-subtitle">No themes saved yet. Define a theme below and save it to build your reusable library.</div>
+      </div>`;
+  }
+  return `
+    <div class="panel saved-themes-panel">
+      <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <span>Saved themes <span class="badge badge-neutral">${savedThemes.length}</span></span>
+      </div>
+      <div class="panel-subtitle">Click a theme to load its definition and sub-theme taxonomy into the editor.</div>
+      <ul class="saved-theme-list">
+        ${savedThemes.slice().reverse().map(t => {
+          const t1 = (t.nodes || []).filter(n => !n.parent_id).length;
+          const t2 = (t.nodes || []).filter(n => n.parent_id).length;
+          const isActive = activeTheme && t.id === activeTheme.id;
+          return `
+            <li class="saved-theme-row ${isActive ? 'is-active' : ''}">
+              <button type="button" class="saved-theme-main" data-load-theme="${esc(t.id)}" title="Load this theme into the editor">
+                <span class="saved-theme-name">${esc(t.theme_name || 'Untitled theme')}</span>
+                <span class="saved-theme-meta">${t1} Tier-1 · ${t2} Tier-2 activities</span>
+              </button>
+              <div class="saved-theme-actions">
+                ${isActive ? '<span class="badge badge-green">Loaded</span>' : ''}
+                <button type="button" class="btn btn-sm btn-ghost saved-theme-del" data-del-theme="${esc(t.id)}" title="Delete this theme">🗑</button>
+              </div>
+            </li>`;
+        }).join('')}
+      </ul>
+    </div>`;
+}
+
+async function viewTheme(overrideThemeId) {
+  if (overrideThemeId !== undefined) {
+    _activeThemeId = overrideThemeId;
+  }
+  const savedThemes = (state.themes || []).filter(t => t.approved);
+  // `_activeThemeId === ''` means "new blank theme"; otherwise load the selected
+  // theme, falling back to the most recently saved one.
+  const isNewTheme = _activeThemeId === '';
+  const theme = isNewTheme
+    ? null
+    : (_activeThemeId ? savedThemes.find(t => t.id === _activeThemeId) : null) || savedThemes.at(-1);
+
   setPageHeader('STEP 1', 'Theme Definition',
-    'Define the investment theme and approve a taxonomy');
-  $('#page-actions').innerHTML = theme
-    ? `<button class="btn btn-sm" id="btn-new-version">Create new version</button>`
-    : '';
+    'Define an investment theme and its sub-theme taxonomy');
+  $('#page-actions').innerHTML = `
+    <div class="btn-group">
+      ${theme ? `<button class="btn btn-sm" id="btn-new-theme">+ New theme</button>` : ''}
+    </div>
+  `;
 
   const themeFormHtml = `
     <form id="theme-form">
@@ -348,14 +471,17 @@ async function viewTheme() {
             placeholder="Any other context for analysts…">
         </div>
       </div>
+      <input type="hidden" name="id" value="${esc(theme?.id || '')}">
       <div class="card-footer theme-save-footer">
         <p class="theme-save-note text-muted text-small">
-          ${theme ? 'Saving approves a new theme version. Previous analyses remain linked to their original version.' : 'Saving approves the first version of this theme.'}
+          ${theme
+            ? 'This theme is saved. Editing the fields and clicking Update changes it in place.'
+            : 'Save this theme once to add it to your library. After that you can only update it.'}
         </p>
         <button type="button" class="btn" id="btn-gen-taxonomy" ${!state?.ai_configured ? 'disabled title="Configure LLM_API_KEY to enable"' : ''}>
           ✧ Generate taxonomy with AI
         </button>
-        <button type="submit" class="btn btn-primary">Save &amp; approve theme</button>
+        <button type="submit" class="btn btn-primary">${theme ? 'Update theme' : 'Save theme'}</button>
       </div>
     </form>`;
 
@@ -366,47 +492,29 @@ async function viewTheme() {
 
   $('#page-content').innerHTML = `
     <div class="theme-layout">
-      <div>
-        <details class="panel theme-scope" open>
-          <summary class="panel-title">Edit theme scope</summary>
-          <div class="panel-subtitle">
-            Only <code>theme_name</code> is required. The more detail you provide, the better the AI analysis.
-          </div>
-          ${themeFormHtml}
-        </details>
+      ${savedThemesListHtml(savedThemes, theme)}
 
-        ${theme ? `
-        <div class="panel">
-          <div class="panel-title">Version history</div>
-          <div class="panel-subtitle">Previous approved definitions are retained unchanged.</div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Version</th><th>Name</th><th>Created</th></tr></thead>
-              <tbody>
-                ${(state.themes || []).filter(t=>t.approved).reverse().map(t => `
-                  <tr><td>${badge('v'+t.version,'neutral')}</td>
-                  <td>${esc(t.theme_name)}</td>
-                  <td class="text-muted text-small">${esc(t.created_at?.slice(0,10)||'')}</td></tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>` : ''}
-      </div>
-
-      <div>
-        <div class="panel">
-          <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
-            <span>Sub-theme taxonomy</span>
-            <span class="text-muted text-small">${tier1.length} Tier-1 · ${nodes.length - tier1.length} Tier-2 leaves</span>
-          </div>
-          <div class="panel-subtitle">
-            Two levels: Theme → Tier-1 (broad area) → Tier-2 (specific activity, classification target).
-            Target: 5 Tier-1 nodes, 3 Tier-2 per parent.
-          </div>
-          ${taxonomyHtml}
-
+      <!-- 1. Theme Scope Card (Top, full width) -->
+      <details class="panel theme-scope" open>
+        <summary class="panel-title">${theme ? `Edit theme scope` : 'New theme scope'}</summary>
+        <div class="panel-subtitle">
+          Only <code>theme_name</code> is required. The more detail you provide, the better the AI analysis.
         </div>
+        ${themeFormHtml}
+      </details>
+
+      <!-- 2. Sub-theme Taxonomy Card (Below Theme Scope, full width) -->
+      <div class="panel taxonomy-panel">
+        <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span>Sub-theme taxonomy</span>
+            <span class="badge badge-neutral" id="taxonomy-counts">${tier1.length} Tier-1 · ${nodes.length - tier1.length} Tier-2 activities</span>
+          </div>
+        </div>
+        <div class="panel-subtitle">
+          Two levels: Theme → Tier-1 (broad area) → Tier-2 (specific activity, classification target). Click any node to edit or delete it, or add new nodes at any level.
+        </div>
+        ${taxonomyHtml}
       </div>
     </div>`;
 
@@ -414,74 +522,330 @@ async function viewTheme() {
   $('#taxonomy-json-area').addEventListener('input', updateTaxonomyMindmap);
   $('#theme-form [name="theme_name"]').addEventListener('input', updateTaxonomyMindmap);
 
-  // Form submit
+  // Form submit — edit-in-place when `id` is present, otherwise create new.
   $('#theme-form').onsubmit = e => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
-    const previous = (state.themes || []).filter(t => t.approved).at(-1);
+    const isUpdate = !!fd.id;
     const nodesRaw = $('#taxonomy-json-area')?.value;
     let nodes = [];
     if (nodesRaw) {
       try { nodes = JSON.parse(nodesRaw); }
       catch { notice('Taxonomy JSON is invalid — check the structure', 'error'); return; }
     }
+    // Block saving a taxonomy that breaks the tier limits.
+    const limitErr = tierLimitError(nodes);
+    if (limitErr) { notice(limitErr, 'error'); return; }
     run(async () => {
-      const result = await api('theme', {
-        ...fd,
-        nodes,
-        previous_id: previous?.id || null,
-      });
+      const result = await api('theme', { ...fd, nodes });
+      _activeThemeId = result.id;
       await refresh();
-      notice(`Theme "${result.theme_name}" saved as version ${result.version}.`);
+      notice(`Theme "${result.theme_name}" ${isUpdate ? 'updated' : 'saved'}.`);
       render();
     }, 'Saving theme…');
   };
 
-  // Generate taxonomy
-  $('#btn-gen-taxonomy')?.addEventListener('click', () => {
-    const fd = Object.fromEntries(new FormData($('#theme-form')));
+  // Trigger AI generation helper
+  const triggerGenerateTaxonomy = () => {
+    const formEl = $('#theme-form');
+    if (!formEl) return;
+    const fd = Object.fromEntries(new FormData(formEl));
+    if (!fd.theme_name?.trim()) {
+      notice('Please enter a theme name before generating a taxonomy.', 'warn');
+      formEl.querySelector('[name="theme_name"]')?.focus();
+      return;
+    }
     run(async () => {
       const result = await api('generate', { ...fd, tier1_count: 5, tier2_count: 3 });
       const ta = $('#taxonomy-json-area');
       if (ta) ta.value = JSON.stringify(result.nodes, null, 2);
       updateTaxonomyMindmap();
-      notice('AI taxonomy proposed. Review every node before approving.', 'info');
+      notice('AI taxonomy proposed. You can now click any node to edit, add, or delete.', 'info');
     }, 'Generating taxonomy with AI…');
+  };
+
+  $('#btn-gen-taxonomy')?.addEventListener('click', triggerGenerateTaxonomy);
+  // Tier-1 / child "+" add buttons are handled by the #taxonomy-mindmap
+  // click delegation (data-add-tier1 / data-add-leaf).
+
+
+  // Mindmap event delegation (editing nodes, adding activities, empty state triggers)
+  const mindmapEl = $('#taxonomy-mindmap');
+  if (mindmapEl) {
+    mindmapEl.onclick = event => {
+      // 1. "+" corner control → AI breakdown popup
+      const breakdownBtn = event.target.closest('[data-breakdown-id]');
+      if (breakdownBtn) {
+        openBreakdownModal(breakdownBtn.dataset.breakdownId);
+        return;
+      }
+      // 2. "−" corner control → delete node + descendants
+      const deleteBtn = event.target.closest('[data-delete-id]');
+      if (deleteBtn) {
+        deleteTaxonomyNodeById(deleteBtn.dataset.deleteId);
+        return;
+      }
+      // 3. Node body click → edit
+      const nodeBtn = event.target.closest('[data-mindmap-id]');
+      if (nodeBtn) {
+        let nodes = [];
+        try { nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]'); } catch { return; }
+        const node = nodes.find(n => n.node_id === nodeBtn.dataset.mindmapId);
+        if (node) openTaxonomyNodeModal('edit', node);
+        return;
+      }
+      // 4. Add child node (on-line "+" button under any node)
+      const addLeafBtn = event.target.closest('[data-add-leaf]');
+      if (addLeafBtn) {
+        const full = childTierFullError(addLeafBtn.dataset.addLeaf);
+        if (full) { showAlert(full); return; }
+        openTaxonomyNodeModal('add', addLeafBtn.dataset.addLeaf);
+        return;
+      }
+      // 4b. Add Tier-1 area (on-line "+" button next to the theme)
+      if (event.target.closest('[data-add-tier1]')) {
+        const full = childTierFullError(null);
+        if (full) { showAlert(full); return; }
+        openTaxonomyNodeModal('add', null);
+        return;
+      }
+      // 5. Empty state buttons
+      if (event.target.closest('#btn-empty-add-tier1')) {
+        openTaxonomyNodeModal('add', null);
+        return;
+      }
+      if (event.target.closest('#btn-empty-gen-taxonomy')) {
+        triggerGenerateTaxonomy();
+        return;
+      }
+    };
+  }
+
+  // Saved themes list: load on click, delete on trash button.
+  document.querySelectorAll('[data-load-theme]').forEach(btn => {
+    btn.onclick = () => {
+      const t = savedThemes.find(x => x.id === btn.dataset.loadTheme);
+      if (t) {
+        _activeThemeId = t.id;
+        viewTheme();
+        notice(`Loaded "${t.theme_name}" into the editor.`, 'info');
+      }
+    };
   });
 
-  $('#btn-new-version')?.addEventListener('click', () => {
-    notice('Edit the theme fields and save to create a new version.', 'info');
+  document.querySelectorAll('[data-del-theme]').forEach(btn => {
+    btn.onclick = async () => {
+      const t = savedThemes.find(x => x.id === btn.dataset.delTheme);
+      if (!t) return;
+      const ok = await showConfirm(`Delete theme "${t.theme_name}"? This cannot be undone.`,
+                                   { title: 'Delete theme' });
+      if (!ok) return;
+      run(async () => {
+        await api('theme/delete', { id: t.id });
+        if (_activeThemeId === t.id) _activeThemeId = null;
+        await refresh();
+        notice(`Deleted "${t.theme_name}".`, 'info');
+        render();
+      }, 'Deleting theme…');
+    };
+  });
+
+  // Modal dialog controls
+  $('#node-dialog-close')?.addEventListener('click', () => $('#taxonomy-node-dialog')?.close());
+  $('#node-dialog-cancel')?.addEventListener('click', () => $('#taxonomy-node-dialog')?.close());
+  $('#node-dialog-save')?.addEventListener('click', saveTaxonomyNodeModal);
+  $('#node-dialog-delete')?.addEventListener('click', deleteTaxonomyNodeModal);
+
+  // Close modal when backdrop is clicked
+  const dialogEl = $('#taxonomy-node-dialog');
+  if (dialogEl) {
+    dialogEl.addEventListener('click', e => {
+      if (e.target === dialogEl) dialogEl.close();
+    });
+  }
+
+  // AI breakdown dialog controls are bound in openBreakdownModal (via onclick)
+  // so they stay valid across re-renders and don't double-fire.
+
+  $('#btn-new-theme')?.addEventListener('click', () => {
+    _activeThemeId = '';
+    viewTheme();
+    notice('Started a new theme. Fill in the fields and save.', 'info');
   });
 }
 
 function taxonomyMindmap(nodes, themeName) {
   const roots = nodes.filter(n => !n.parent_id);
-  if (!roots.length) return '<div class="empty-state"><h3>No taxonomy yet</h3><p>Generate a taxonomy with AI or enter nodes below to build the mind map.</p></div>';
-  const nodeCard = (node, level) => `<button type="button" class="mindmap-node mindmap-${level === 1 ? 'parent' : 'leaf'}" data-mindmap-id="${esc(node.node_id)}"><span class="mindmap-level">TIER ${level}</span><strong>${esc(node.name)}</strong></button>`;
-  return `<div class="taxonomy-mindmap" role="region" aria-label="Theme taxonomy mind map">
-    <div class="mindmap-root"><span class="mindmap-level">THEME</span><strong>${esc(themeName || 'Investment theme')}</strong></div>
-    <ul class="mindmap-branches" style="--branch-count:${roots.length}">${roots.map(root => {
-      const children = nodes.filter(n => n.parent_id === root.node_id);
-      return `<li class="mindmap-branch">${nodeCard(root, 1)}<ul class="mindmap-leaves">${children.length ? children.map(child => `<li>${nodeCard(child, 2)}</li>`).join('') : '<li class="mindmap-missing">Add Tier-2 activities below.</li>'}</ul></li>`;
-    }).join('')}</ul>
-  </div>`;
-}
+  if (!roots.length) {
+    return `<div class="empty-state">
+      <h3>No taxonomy yet</h3>
+      <p>Generate a taxonomy with AI or click "+ Add Tier-1 Area" to build your own taxonomy tree.</p>
+      <div class="btn-group mt-12" style="justify-content:center;">
+        <button type="button" class="btn btn-sm btn-primary" id="btn-empty-add-tier1">+ Add Tier-1 Area</button>
+        <button type="button" class="btn btn-sm" id="btn-empty-gen-taxonomy" ${!state?.ai_configured ? 'disabled title="Configure LLM_API_KEY to enable"' : ''}>✧ Generate with AI</button>
+      </div>
+    </div>`;
+  }
 
-function mindmapExamples(node) {
-  return Array.isArray(node.examples) && node.examples.length
-    ? `<p class="text-muted text-small">Examples: ${node.examples.map(esc).join(', ')}</p>` : '';
+  const maxTiers = state?.max_tiers || 3;
+
+  const nodeCard = (node, level, count) => `
+    <div class="mm-node mm-node-t${level}">
+      <div class="mm-node-ctrls">
+        ${level < maxTiers ? `<button type="button" class="mm-ctl mm-ctl-add" data-breakdown-id="${esc(node.node_id)}"
+          title="Break this node down further with AI" aria-label="Break down with AI">+</button>` : ''}
+        <button type="button" class="mm-ctl mm-ctl-del" data-delete-id="${esc(node.node_id)}"
+          title="Delete this node and everything under it" aria-label="Delete node">−</button>
+      </div>
+      <button type="button" class="mm-node-body" data-mindmap-id="${esc(node.node_id)}" title="Click to edit this Tier-${level} node">
+        <span class="mm-tier">Tier ${level}</span>
+        <span class="mm-name">${esc(node.name)}</span>
+        ${count ? `<span class="mm-count">${count} ${level === 1 ? (count === 1 ? 'activity' : 'activities') : (count === 1 ? 'sub-node' : 'sub-nodes')}</span>` : ''}
+        <span class="mm-edit" aria-hidden="true">✎ edit</span>
+      </button>
+    </div>`;
+
+  // A node row: the card (+ its "add" button) on the left, and a column of
+  // child rows on the right. Connectors are rendered as explicit SVG-free
+  // boxes keyed by the real child count, so leaves never show stray stubs.
+  function renderNode(node, level) {
+    const children = nodes.filter(n => n.parent_id === node.node_id);
+    const childTier = level + 1;
+    const childLabel = `Tier ${childTier} node`;
+    const canAddChild = childTier <= maxTiers;
+    const hasChildren = children.length > 0;
+
+    // The "+ Add" button lives near the connector split point, to the right of
+    // the node. Shown whenever this node can accept children (below max depth).
+    const addOnLine = canAddChild
+      ? `<button type="button" class="mm-add mm-add-online" data-add-leaf="${esc(node.node_id)}" title="Add a ${childLabel} under ${esc(node.name)}">
+           <span aria-hidden="true">+</span> Add ${childLabel}
+         </button>`
+      : '';
+
+    // Connector is drawn when the node has children (to carry the lines) or
+    // when it can accept children (to host the add button).
+    const connector = (hasChildren || canAddChild)
+      ? `<div class="mm-connector ${hasChildren ? '' : 'is-empty'} ${children.length === 1 ? 'is-single' : ''}">${addOnLine}</div>`
+      : '';
+
+    const childCol = hasChildren
+      ? `<div class="mm-children">${children.map(c => renderNode(c, childTier)).join('')}</div>`
+      : '';
+
+    return `<div class="mm-row ${hasChildren ? 'has-children' : 'is-leaf'}">
+      <div class="mm-cell">
+        ${nodeCard(node, level, children.length)}
+      </div>
+      ${connector}
+      ${childCol}
+    </div>`;
+  }
+
+  const rootChildrenHtml = roots.length
+    ? `<div class="mm-connector ${roots.length === 1 ? 'is-single' : ''}">
+         <button type="button" class="mm-add mm-add-online" id="btn-add-tier1-line" data-add-tier1="1" title="Add a Tier 1 node"><span aria-hidden="true">+</span> Add Tier 1 node</button>
+       </div>
+       <div class="mm-children mm-children-root">${roots.map(r => renderNode(r, 1)).join('')}</div>`
+    : '';
+
+  return `<div class="mm" role="region" aria-label="Theme taxonomy mind map">
+    <div class="mm-row has-children">
+      <div class="mm-cell">
+        <div class="mm-theme">
+          <span class="mm-tier">Theme</span>
+          <span class="mm-name">${esc(themeName || 'Investment theme')}</span>
+        </div>
+      </div>
+      ${rootChildrenHtml}
+    </div>
+  </div>`;
 }
 
 function buildTaxonomyEditor(nodes) {
   return `<div id="taxonomy-mindmap"></div>
-    <div class="field-hint">Follow the branches from the theme to Tier-1 areas and Tier-2 activities. Click a node to view its definition and examples.</div>
-    <details class="form-section">
-      <summary class="field-label">Edit taxonomy JSON</summary>
+    <details class="form-section mt-16">
+      <summary class="field-label" style="cursor:pointer;font-weight:600;">Advanced: Edit taxonomy JSON directly</summary>
       <textarea class="code" id="taxonomy-json-area" rows="10" placeholder="Enter a JSON array of taxonomy nodes">${esc(JSON.stringify(nodes, null, 2))}</textarea>
       <div id="taxonomy-preview-error" class="field-hint" role="status"></div>
-      <div class="field-hint">Tier-1 nodes use parent_id: null; Tier-2 nodes reference a Tier-1 node_id. The map updates as you edit. Save the theme to approve changes.</div>
+      <div class="field-hint">Tier-1 nodes use parent_id: null; Tier-2 nodes reference a Tier-1 node_id. The mindmap updates live as you edit.</div>
     </details>
-    <dialog id="taxonomy-node-dialog" class="mindmap-dialog"><form method="dialog"><button class="btn" aria-label="Close node details">Close</button></form><div id="taxonomy-node-details"></div></dialog>`;
+    <dialog id="taxonomy-node-dialog" class="mindmap-dialog">
+      <div class="mindmap-dialog-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span id="node-dialog-badge" class="mindmap-level">TIER 1</span>
+          <h3 id="node-dialog-title" style="margin:0;font-size:16px;font-weight:600;">Edit Node</h3>
+        </div>
+        <button type="button" class="btn btn-sm btn-ghost" id="node-dialog-close" aria-label="Close dialog" style="font-size:14px;padding:4px 8px;">✕</button>
+      </div>
+      <form id="taxonomy-node-form" onsubmit="return false;" style="margin-top:16px;">
+        <input type="hidden" id="node-dialog-mode" value="edit">
+        <input type="hidden" id="node-dialog-orig-id" value="">
+        
+        <div class="form-group" id="node-dialog-parent-group" style="margin-bottom:14px;">
+          <label class="field-label">Parent Tier-1 Area <span class="required">*</span></label>
+          <select id="node-dialog-parent" class="form-select" style="width:100%;padding:8px 10px;border-radius:var(--radius-md);border:1px solid var(--slate-200);background:white;font:inherit;font-size:13px;"></select>
+        </div>
+
+        <div class="form-group" style="margin-bottom:14px;">
+          <label class="field-label">Node name <span class="required">*</span></label>
+          <input type="text" id="node-dialog-name" required placeholder="e.g. AI Chip Fabrication" style="width:100%;box-sizing:border-box;">
+        </div>
+
+        <div class="form-group" style="margin-bottom:14px;">
+          <label class="field-label">Definition <span class="required">*</span></label>
+          <textarea id="node-dialog-def" rows="3" required placeholder="Describe what this node represents and what qualifies..." style="width:100%;box-sizing:border-box;"></textarea>
+        </div>
+
+        <div class="form-group" style="margin-bottom:14px;">
+          <label class="field-label">Examples <span class="optional">(comma-separated)</span></label>
+          <input type="text" id="node-dialog-examples" placeholder="e.g. Foundry services, advanced packaging" style="width:100%;box-sizing:border-box;">
+          <div class="field-hint" style="margin-top:4px;">Comma-separated list of companies, products, or technologies.</div>
+        </div>
+
+        <!-- Node ID is auto-generated from the name; kept hidden so the save
+             logic still has an element to read/write. -->
+        <input type="hidden" id="node-dialog-id">
+
+        <div id="node-dialog-error" class="field-hint" style="color:var(--red-600);font-weight:500;margin-bottom:12px;" role="alert"></div>
+
+        <div class="mindmap-dialog-footer">
+          <button type="button" class="btn btn-danger btn-sm" id="node-dialog-delete">Delete</button>
+          <div style="display:flex;gap:8px;">
+            <button type="button" class="btn btn-sm" id="node-dialog-cancel">Cancel</button>
+            <button type="button" class="btn btn-primary btn-sm" id="node-dialog-save">Save changes</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="breakdown-dialog" class="mindmap-dialog mindmap-dialog-wide">
+      <div class="mindmap-dialog-header">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="mindmap-level badge-teal">✧ AI</span>
+          <h3 style="margin:0;font-size:18px;font-weight:600;">Break this node down further</h3>
+        </div>
+        <button type="button" class="btn btn-sm btn-ghost" id="breakdown-close" aria-label="Close dialog" style="font-size:16px;padding:4px 10px;">✕</button>
+      </div>
+      <div style="margin-top:16px;">
+        <p class="text-muted" style="margin:0 0 14px;font-size:14px;line-height:1.55;">
+          AI suggests finer-grained sub-nodes under <strong id="breakdown-node-name"></strong>. Review and edit any suggestion, then click <strong>+ Add</strong> on the ones you want. Existing sub-nodes are kept — you're only adding.
+        </p>
+        <div class="form-group" style="margin-bottom:12px;">
+          <label class="field-label">How should it be broken down? <span class="optional">(optional guidance)</span></label>
+          <textarea id="breakdown-instructions" rows="2" placeholder="e.g. Focus on hardware vs. software sub-categories, keep it to 4 activities" style="width:100%;box-sizing:border-box;"></textarea>
+        </div>
+        <div id="breakdown-error" class="field-hint" style="color:var(--red-600);font-weight:500;margin-bottom:10px;" role="alert"></div>
+        <div id="breakdown-suggestions" class="breakdown-suggestions" style="display:none;"></div>
+      </div>
+      <div class="mindmap-dialog-footer" style="justify-content:space-between;gap:8px;">
+        <span id="breakdown-added-note" class="text-small text-muted"></span>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-sm btn-ghost" id="breakdown-discard" title="Discard and close">Cancel</button>
+          <button type="button" class="btn btn-sm btn-primary" id="breakdown-cancel">Done</button>
+          <button type="button" class="btn btn-sm" id="breakdown-confirm" ${!state?.ai_configured ? 'disabled title="Configure LLM_API_KEY to enable"' : ''}>✧ Get AI suggestions</button>
+        </div>
+      </div>
+    </dialog>`;
 }
 
 function updateTaxonomyMindmap() {
@@ -489,21 +853,566 @@ function updateTaxonomyMindmap() {
   if (!target) return;
   const error = $('#taxonomy-preview-error');
   try {
-    const nodes = JSON.parse($('#taxonomy-json-area').value || '[]');
+    const raw = $('#taxonomy-json-area')?.value || '[]';
+    const nodes = JSON.parse(raw);
     if (!Array.isArray(nodes) || nodes.some(n => !n || typeof n !== 'object' || Array.isArray(n))) throw new Error();
-    target.innerHTML = taxonomyMindmap(nodes, $('#theme-form [name="theme_name"]').value);
-    target.onclick = event => {
-      const button = event.target.closest('[data-mindmap-id]');
-      if (!button) return;
-      const node = nodes.find(n => n.node_id === button.dataset.mindmapId);
-      if (!node) return;
-      $('#taxonomy-node-details').innerHTML = `<h2>${esc(node.name)}</h2><p>${esc(node.definition || 'No definition provided.')}</p>${mindmapExamples(node)}<code>${esc(node.node_id)}</code>`;
-      $('#taxonomy-node-dialog').showModal();
-    };
-    error.textContent = '';
+    
+    // Update count badge in panel header
+    const tier1 = nodes.filter(n => !n.parent_id);
+    const tier2 = nodes.filter(n => n.parent_id);
+    const countsEl = $('#taxonomy-counts');
+    if (countsEl) {
+      countsEl.textContent = `${tier1.length} Tier-1 · ${tier2.length} Tier-2 activities`;
+    }
+
+    target.innerHTML = taxonomyMindmap(nodes, $('#theme-form [name="theme_name"]')?.value || '');
+    if (error) error.textContent = '';
   } catch {
-    error.textContent = 'Enter a valid JSON array of nodes to update the map. The last valid preview is retained.';
+    if (error) error.textContent = 'Enter a valid JSON array of nodes to update the map. The last valid preview is retained.';
   }
+}
+
+function openTaxonomyNodeModal(mode, nodeOrParentId) {
+  const dialog = $('#taxonomy-node-dialog');
+  if (!dialog) return;
+
+  const errorEl = $('#node-dialog-error');
+  if (errorEl) errorEl.textContent = '';
+
+  let nodes = [];
+  try {
+    nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]');
+  } catch {
+    notice('Taxonomy JSON is currently invalid. Please fix JSON syntax first.', 'error');
+    return;
+  }
+
+  const maxTiers = state?.max_tiers || 3;
+  const tier1Nodes = nodes.filter(n => !n.parent_id);
+  const parentSelect = $('#node-dialog-parent');
+  const parentGroup = $('#node-dialog-parent-group');
+  const deleteBtn = $('#node-dialog-delete');
+  const badgeEl = $('#node-dialog-badge');
+  const titleEl = $('#node-dialog-title');
+  const saveBtn = $('#node-dialog-save');
+
+  // Any node shallow enough to accept a child can be a parent (depth < maxTiers).
+  // A child of a depth-d node sits at tier d+1.
+  const parentCandidates = nodes.filter(n => nodeDepthOf(n.node_id, nodes) < maxTiers);
+  parentSelect.innerHTML = parentCandidates
+    .map(p => `<option value="${esc(p.node_id)}">${'— '.repeat(Math.max(0, nodeDepthOf(p.node_id, nodes) - 1))}${esc(p.name)} (Tier-${nodeDepthOf(p.node_id, nodes)})</option>`)
+    .join('');
+
+  if (mode === 'edit') {
+    const node = nodeOrParentId;
+    const isTier1 = !node.parent_id;
+    const tier = nodeDepthOf(node.node_id, nodes);
+    $('#node-dialog-mode').value = 'edit';
+    $('#node-dialog-orig-id').value = node.node_id;
+    badgeEl.textContent = `TIER ${tier}`;
+    badgeEl.className = isTier1 ? 'mindmap-level badge-teal' : 'mindmap-level badge-neutral';
+    titleEl.textContent = `Edit Tier-${tier} node`;
+    $('#node-dialog-name').value = node.name || '';
+    $('#node-dialog-def').value = node.definition || '';
+    $('#node-dialog-examples').value = Array.isArray(node.examples) ? node.examples.join(', ') : (node.examples || '');
+    $('#node-dialog-id').value = node.node_id || '';
+    $('#node-dialog-id').disabled = true;
+
+    if (isTier1) {
+      parentGroup.style.display = 'none';
+    } else {
+      parentGroup.style.display = 'block';
+      parentSelect.value = node.parent_id || (parentCandidates[0]?.node_id || '');
+    }
+
+    deleteBtn.style.display = 'inline-flex';
+    deleteBtn.textContent = 'Delete node';
+    saveBtn.textContent = 'Save changes';
+  } else if (mode === 'add') {
+    const parentId = typeof nodeOrParentId === 'string' ? nodeOrParentId : null;
+    const isTier1 = !parentId;
+    const tier = parentId ? nodeDepthOf(parentId, nodes) + 1 : 1;
+    $('#node-dialog-mode').value = 'add';
+    $('#node-dialog-orig-id').value = '';
+    badgeEl.textContent = `NEW TIER ${tier}`;
+    badgeEl.className = isTier1 ? 'mindmap-level badge-teal' : 'mindmap-level badge-neutral';
+    titleEl.textContent = `Add Tier-${tier} node`;
+    $('#node-dialog-name').value = '';
+    $('#node-dialog-def').value = '';
+    $('#node-dialog-examples').value = '';
+    $('#node-dialog-id').value = '';
+    $('#node-dialog-id').disabled = false;
+
+    if (isTier1) {
+      parentGroup.style.display = 'none';
+    } else {
+      parentGroup.style.display = 'block';
+      if (parentId) {
+        parentSelect.value = parentId;
+      } else if (parentCandidates[0]) {
+        parentSelect.value = parentCandidates[0].node_id;
+      }
+    }
+
+    deleteBtn.style.display = 'none';
+    saveBtn.textContent = isTier1 ? 'Add Tier-1 Area' : `Add Tier-${tier} node`;
+  }
+
+  dialog.showModal();
+}
+
+function saveTaxonomyNodeModal() {
+  const mode = $('#node-dialog-mode').value;
+  const origId = $('#node-dialog-orig-id').value;
+  const name = $('#node-dialog-name').value.trim();
+  const def = $('#node-dialog-def').value.trim();
+  const rawExamples = $('#node-dialog-examples').value;
+  const examples = rawExamples
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const errorEl = $('#node-dialog-error');
+
+  if (!name) {
+    if (errorEl) errorEl.textContent = 'Node name is required.';
+    return;
+  }
+  const definition = def || `Activities and businesses related to ${name}.`;
+
+  let nodes = [];
+  try {
+    nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]');
+  } catch {
+    if (errorEl) errorEl.textContent = 'Invalid JSON in editor. Cannot save.';
+    return;
+  }
+
+  if (mode === 'edit') {
+    const targetNode = nodes.find(n => n.node_id === origId);
+    if (!targetNode) {
+      if (errorEl) errorEl.textContent = 'Node not found in taxonomy.';
+      return;
+    }
+    targetNode.name = name;
+    targetNode.definition = definition;
+    targetNode.examples = examples;
+
+    // If Tier-2, parent might have been modified
+    if (targetNode.parent_id) {
+      const parentVal = $('#node-dialog-parent').value;
+      if (parentVal) {
+        targetNode.parent_id = parentVal;
+      }
+    }
+    notice(`Updated "${name}".`, 'info');
+  } else if (mode === 'add') {
+    const isTier1 = $('#node-dialog-parent-group').style.display === 'none';
+    const parentId = isTier1 ? null : $('#node-dialog-parent').value;
+
+    let customId = $('#node-dialog-id').value.trim();
+    if (!customId) {
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || (isTier1 ? 'tier1' : 'tier2');
+      customId = isTier1 ? slug : `${parentId}_${slug}`;
+    }
+    // Ensure uniqueness
+    let finalId = customId;
+    let counter = 1;
+    while (nodes.some(n => n.node_id === finalId)) {
+      counter++;
+      finalId = `${customId}_${counter}`;
+    }
+
+    const newNode = {
+      node_id: finalId,
+      parent_id: parentId,
+      name,
+      definition,
+      examples,
+    };
+    nodes.push(newNode);
+  }
+
+  // Enforce tier limits before committing the change.
+  const limitErr = tierLimitError(nodes);
+  if (limitErr) {
+    if (errorEl) errorEl.textContent = limitErr;
+    notice(limitErr, 'error');
+    return;
+  }
+
+  if (mode === 'add') notice(`Added "${name}".`, 'info');
+
+  const ta = $('#taxonomy-json-area');
+  if (ta) ta.value = JSON.stringify(nodes, null, 2);
+  updateTaxonomyMindmap();
+  $('#taxonomy-node-dialog')?.close();
+}
+
+function deleteTaxonomyNodeModal() {
+  const origId = $('#node-dialog-orig-id').value;
+  if (!origId) return;
+  // Close the edit dialog first, then run the shared modal-confirm delete.
+  $('#taxonomy-node-dialog')?.close();
+  deleteTaxonomyNodeById(origId);
+}
+
+// Collect a node and all of its descendant ids.
+function descendantIds(nodeId, nodes) {
+  const ids = new Set([nodeId]);
+  let added = true;
+  while (added) {
+    added = false;
+    for (const n of nodes) {
+      if (n.parent_id && ids.has(n.parent_id) && !ids.has(n.node_id)) {
+        ids.add(n.node_id); added = true;
+      }
+    }
+  }
+  return ids;
+}
+
+// Delete a node (and all its descendants) directly from the mindmap "−" control.
+async function deleteTaxonomyNodeById(nodeId) {
+  if (!nodeId) return;
+  let nodes = [];
+  try { nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]'); }
+  catch { showAlert('The taxonomy JSON is invalid, so this node cannot be deleted.', 'Cannot delete'); return; }
+
+  const target = nodes.find(n => n.node_id === nodeId);
+  if (!target) return;
+
+  const tier = nodeDepthOf(nodeId, nodes);
+  const toRemove = descendantIds(nodeId, nodes);
+  const descCount = toRemove.size - 1;
+  const msg = descCount
+    ? `Delete Tier-${tier} node "${target.name}" and its ${descCount} sub-node${descCount === 1 ? '' : 's'}? This cannot be undone.`
+    : `Delete Tier-${tier} node "${target.name}"? This cannot be undone.`;
+
+  const ok = await showConfirm(msg);
+  if (!ok) return;
+
+  nodes = nodes.filter(n => !toRemove.has(n.node_id));
+
+  const ta = $('#taxonomy-json-area');
+  if (ta) ta.value = JSON.stringify(nodes, null, 2);
+  updateTaxonomyMindmap();
+  notice(`Deleted "${target.name}".`, 'info');
+}
+
+// "+" control → open the AI-breakdown popup for a specific node.
+// The taxonomy is strictly two tiers, so "break down" always targets a Tier-1
+// area and (re)generates its Tier-2 activities. Clicking "+" on a Tier-2
+// activity targets its Tier-1 parent.
+let _breakdownNodeId = null;    // node the breakdown targets (children added here)
+let _breakdownSuggestions = []; // current AI suggestions being reviewed
+let _breakdownStaged = [];      // picks marked to add; committed only on "Done"
+
+// Depth of a node (1 = Tier-1) by walking parent_id within a node list.
+function nodeDepthOf(nodeId, nodes) {
+  const byId = Object.fromEntries(nodes.map(n => [n.node_id, n]));
+  let depth = 0, cur = nodeId, seen = new Set();
+  while (cur && byId[cur] && !seen.has(cur)) {
+    seen.add(cur); depth += 1; cur = byId[cur].parent_id;
+  }
+  return depth;
+}
+
+// The per-tier sub-node caps. Mirrors engine.MAX_CHILDREN on the backend.
+function tierCaps() {
+  const c = state?.max_children || { 1: 5, 2: 3, 3: 4 };
+  return { 1: c[1] ?? c['1'] ?? 5, 2: c[2] ?? c['2'] ?? 3, 3: c[3] ?? c['3'] ?? 4 };
+}
+
+// Check, before opening the add dialog, whether adding a child under `parentId`
+// (null = add a Tier-1 area) would exceed that tier's cap. Returns an error
+// message string if full, or null if there's room.
+function childTierFullError(parentId) {
+  let nodes = [];
+  try { nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]'); } catch { return null; }
+  const caps = tierCaps();
+  if (!parentId) {
+    const tier1 = nodes.filter(n => !n.parent_id).length;
+    if (tier1 >= caps[1]) return `You can only have ${caps[1]} Tier-1 areas.`;
+    return null;
+  }
+  const childTier = nodeDepthOf(parentId, nodes) + 1;
+  const cap = caps[childTier];
+  const count = nodes.filter(n => n.parent_id === parentId).length;
+  if (cap && count >= cap) {
+    return `You can only have ${cap} Tier-${childTier} nodes here.`;
+  }
+  return null;
+}
+
+// Validate a complete node list against the tier limits. Returns an error
+// string if any limit is exceeded, or null if the taxonomy is within limits.
+function tierLimitError(nodes) {
+  const caps = tierCaps();
+  const maxTiers = state?.max_tiers || 3;
+
+  // Tier-1 (top-level) count.
+  const tier1 = nodes.filter(n => !n.parent_id).length;
+  if (tier1 > caps[1]) {
+    return `You can only have ${caps[1]} Tier-1 areas.`;
+  }
+  // Children per parent, capped by the child's tier.
+  const childCounts = {};
+  for (const n of nodes) {
+    if (n.parent_id) childCounts[n.parent_id] = (childCounts[n.parent_id] || 0) + 1;
+  }
+  const byId = Object.fromEntries(nodes.map(n => [n.node_id, n]));
+  for (const [pid, count] of Object.entries(childCounts)) {
+    const parent = byId[pid];
+    const childTier = nodeDepthOf(pid, nodes) + 1;
+    if (childTier > maxTiers) {
+      return `Nodes can't go deeper than Tier-${maxTiers}.`;
+    }
+    const cap = caps[childTier];
+    if (cap && count > cap) {
+      const label = parent ? `"${parent.name}"` : 'this node';
+      return `A Tier-${childTier - 1} node can have at most ${cap} Tier-${childTier} sub-nodes. ${label} now has ${count}.`;
+    }
+  }
+  return null;
+}
+
+function openBreakdownModal(nodeId) {
+  const dialog = $('#breakdown-dialog');
+  if (!dialog) return;
+  let nodes = [];
+  try { nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]'); }
+  catch { notice('Taxonomy JSON is currently invalid. Fix it first.', 'error'); return; }
+
+  const target = nodes.find(n => n.node_id === nodeId);
+  if (!target) return;
+
+  // Guard: a node already at the deepest allowed level can't be broken down.
+  const maxTiers = state?.max_tiers || 3;
+  if (nodeDepthOf(nodeId, nodes) >= maxTiers) {
+    notice(`This node is already at the deepest level (Tier-${maxTiers}).`, 'info');
+    return;
+  }
+
+  _breakdownNodeId = nodeId;
+  _breakdownSuggestions = [];
+  _breakdownStaged = [];
+  $('#breakdown-node-name').textContent = target.name || target.node_id;
+  $('#breakdown-instructions').value = '';
+  const err = $('#breakdown-error'); if (err) err.textContent = '';
+  const added = $('#breakdown-added-note'); if (added) added.textContent = '';
+  const sug = $('#breakdown-suggestions');
+  if (sug) { sug.style.display = 'none'; sug.innerHTML = ''; }
+  const confirmBtn = $('#breakdown-confirm');
+  if (confirmBtn) {
+    confirmBtn.textContent = '✧ Get AI suggestions';
+    // Ensure the button is interactive (it may have rendered disabled if the
+    // dialog HTML was built before AI config loaded into state).
+    confirmBtn.disabled = !state?.ai_configured;
+    // Bind directly every time the modal opens so the handler can never be
+    // stale (e.g. after the theme view re-renders the dialog element).
+    confirmBtn.onclick = confirmBreakdown;
+  }
+  // "Done" commits the staged picks to the taxonomy, then closes. The X and
+  // "Cancel" discard the staged picks without changing the taxonomy.
+  const closeBtn = $('#breakdown-close'); if (closeBtn) closeBtn.onclick = () => cancelBreakdown();
+  const discardBtn = $('#breakdown-discard'); if (discardBtn) discardBtn.onclick = () => cancelBreakdown();
+  const cancelBtn = $('#breakdown-cancel'); if (cancelBtn) cancelBtn.onclick = () => commitBreakdown();
+  dialog.showModal();
+}
+
+// X button: discard staged picks and close without changing the taxonomy.
+function cancelBreakdown() {
+  _breakdownStaged = [];
+  $('#breakdown-dialog')?.close();
+}
+
+// Done button: write all staged suggestions into the taxonomy at once.
+function commitBreakdown() {
+  const dialog = $('#breakdown-dialog');
+  if (!_breakdownStaged.length) { dialog?.close(); return; }
+
+  let nodes = [];
+  try { nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]'); }
+  catch { notice('Taxonomy JSON is invalid; cannot add.', 'error'); return; }
+
+  const used = new Set(nodes.map(n => n.node_id));
+  const additions = _breakdownStaged.map(s => {
+    let base = (s.name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '')) || 'node';
+    let id = base, i = 1;
+    while (used.has(id)) { i += 1; id = `${base}_${i}`; }
+    used.add(id);
+    return {
+      node_id: id,
+      parent_id: _breakdownNodeId,
+      name: s.name.trim(),
+      definition: (s.definition || '').trim(),
+      examples: Array.isArray(s.examples) ? s.examples : [],
+    };
+  });
+
+  const candidate = nodes.concat(additions);
+  const limitErr = tierLimitError(candidate);
+  if (limitErr) {
+    const errEl = $('#breakdown-error');
+    if (errEl) errEl.textContent = limitErr;
+    notice(limitErr, 'error');
+    return;
+  }
+
+  const ta = $('#taxonomy-json-area');
+  if (ta) ta.value = JSON.stringify(candidate, null, 2);
+  updateTaxonomyMindmap();
+  const n = additions.length;
+  _breakdownStaged = [];
+  dialog?.close();
+  notice(`Added ${n} node${n === 1 ? '' : 's'}.`, 'info');
+}
+
+// Fetch AI suggestions (preview only — nothing is added to the taxonomy yet).
+// Runs self-contained so it works while the modal dialog is in the top layer
+// (the global loading overlay sits behind the modal and is inert).
+async function confirmBreakdown() {
+  const nodeId = _breakdownNodeId;
+  if (!nodeId) return;
+  const errEl = $('#breakdown-error');
+  const confirmBtn = $('#breakdown-confirm');
+  if (errEl) errEl.textContent = '';
+
+  const formEl = $('#theme-form');
+  const fd = formEl ? Object.fromEntries(new FormData(formEl)) : {};
+  if (!fd.theme_name?.trim()) {
+    if (errEl) errEl.textContent = 'Enter a theme name on the form before using AI.';
+    return;
+  }
+
+  let existing = [];
+  try { existing = JSON.parse($('#taxonomy-json-area')?.value || '[]'); }
+  catch { if (errEl) errEl.textContent = 'Taxonomy JSON is invalid.'; return; }
+
+  const instructions = $('#breakdown-instructions')?.value?.trim() || '';
+
+  // Disable + show progress on the button itself (visible above the modal).
+  const originalLabel = confirmBtn ? confirmBtn.textContent : '';
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = '✧ Thinking…'; }
+  try {
+    const result = await api('generate', {
+      ...fd,
+      node_id: nodeId,
+      existing_nodes: existing,
+      instructions,
+      preview: true,
+      tier1_count: 5,
+      tier2_count: 3,
+      // Fresh value each click so the backend LLM cache doesn't return the
+      // identical previous suggestions when "Regenerate" is pressed.
+      nonce: Date.now(),
+    });
+    _breakdownSuggestions = (result.suggestions || []).map((s, i) => ({ ...s, _key: i }));
+    renderBreakdownSuggestions();
+    if (confirmBtn) confirmBtn.textContent = '✧ Regenerate suggestions';
+  } catch (e) {
+    if (errEl) errEl.textContent = e.message || 'Failed to get suggestions.';
+    if (confirmBtn) confirmBtn.textContent = originalLabel || '✧ Get AI suggestions';
+  } finally {
+    if (confirmBtn) confirmBtn.disabled = false;
+  }
+}
+
+// Render the editable suggestion cards, each with its own "+ Add" button.
+function renderBreakdownSuggestions() {
+  const wrap = $('#breakdown-suggestions');
+  if (!wrap) return;
+  if (!_breakdownSuggestions.length) {
+    wrap.style.display = 'block';
+    wrap.innerHTML = '<p class="text-small text-muted">No suggestions returned. Try adjusting the guidance and regenerate.</p>';
+    return;
+  }
+  wrap.style.display = 'block';
+  wrap.innerHTML = _breakdownSuggestions.map(s => `
+    <div class="breakdown-card ${s._added ? 'is-added' : ''}" data-key="${s._key}">
+      <div class="breakdown-card-fields">
+        <div class="breakdown-field-group">
+          <label class="breakdown-field-label">Node name</label>
+          <input type="text" class="breakdown-field-name" data-key="${s._key}" value="${esc(s.name || '')}" placeholder="Node name" ${s._added ? 'disabled' : ''}>
+        </div>
+        <div class="breakdown-field-group">
+          <label class="breakdown-field-label">Definition</label>
+          <textarea class="breakdown-field-def" data-key="${s._key}" rows="4" placeholder="What this node covers" ${s._added ? 'disabled' : ''}>${esc(s.definition || '')}</textarea>
+        </div>
+        <div class="breakdown-field-group">
+          <label class="breakdown-field-label">Examples <span class="breakdown-field-hint">(comma-separated)</span></label>
+          <input type="text" class="breakdown-field-examples" data-key="${s._key}" value="${esc((s.examples || []).join(', '))}" placeholder="e.g. Company A, Company B" ${s._added ? 'disabled' : ''}>
+        </div>
+      </div>
+      <button type="button" class="btn btn-sm ${s._added ? 'btn-danger breakdown-remove-one' : 'btn-primary breakdown-add-one'}" data-key="${s._key}"
+        title="${s._added ? 'Click to remove this from the list' : 'Add this node'}">
+        ${s._added ? '✕ Remove' : '+ Add'}
+      </button>
+    </div>`).join('');
+
+  // Keep edits in sync with the staged suggestion objects.
+  wrap.querySelectorAll('.breakdown-field-name').forEach(el =>
+    el.oninput = () => { const s = _breakdownSuggestions.find(x => x._key == el.dataset.key); if (s) s.name = el.value; });
+  wrap.querySelectorAll('.breakdown-field-def').forEach(el =>
+    el.oninput = () => { const s = _breakdownSuggestions.find(x => x._key == el.dataset.key); if (s) s.definition = el.value; });
+  wrap.querySelectorAll('.breakdown-field-examples').forEach(el =>
+    el.oninput = () => { const s = _breakdownSuggestions.find(x => x._key == el.dataset.key); if (s) s.examples = el.value.split(',').map(x => x.trim()).filter(Boolean); });
+  wrap.querySelectorAll('.breakdown-add-one').forEach(el =>
+    el.onclick = () => addBreakdownSuggestion(el.dataset.key));
+  wrap.querySelectorAll('.breakdown-remove-one').forEach(el =>
+    el.onclick = () => removeBreakdownSuggestion(el.dataset.key));
+}
+
+// STAGE one reviewed suggestion. Nothing is written to the taxonomy here — the
+// staged picks are committed together when the user clicks "Done".
+function addBreakdownSuggestion(key) {
+  const s = _breakdownSuggestions.find(x => x._key == key);
+  if (!s || s._added) return;
+  if (!s.name?.trim()) { notice('Give the node a name before adding it.', 'error'); return; }
+
+  let nodes = [];
+  try { nodes = JSON.parse($('#taxonomy-json-area')?.value || '[]'); }
+  catch { notice('Taxonomy JSON is invalid; cannot add.', 'error'); return; }
+
+  // Cap check counts what's already on the node PLUS everything staged so far.
+  const caps = tierCaps();
+  const childTier = nodeDepthOf(_breakdownNodeId, nodes) + 1;
+  const cap = caps[childTier];
+  const existing = nodes.filter(n => n.parent_id === _breakdownNodeId).length;
+  if (cap && existing + _breakdownStaged.length >= cap) {
+    const msg = `You can only have ${cap} Tier-${childTier} sub-nodes here.`;
+    const errEl = $('#breakdown-error');
+    if (errEl) errEl.textContent = msg;
+    notice(msg, 'error');
+    return;
+  }
+
+  // Mark as staged (not yet committed). Keep the _key so it can be un-staged.
+  s._added = true;
+  _breakdownStaged.push({ _key: s._key, name: s.name.trim(),
+                          definition: (s.definition || '').trim(),
+                          examples: Array.isArray(s.examples) ? s.examples : [] });
+  renderBreakdownSuggestions();
+  updateBreakdownStagedNote();
+  const err = $('#breakdown-error'); if (err) err.textContent = '';
+}
+
+// UN-STAGE a previously added suggestion so it won't be committed.
+function removeBreakdownSuggestion(key) {
+  const s = _breakdownSuggestions.find(x => x._key == key);
+  if (s) s._added = false;
+  _breakdownStaged = _breakdownStaged.filter(x => x._key != key);
+  renderBreakdownSuggestions();
+  updateBreakdownStagedNote();
+  const err = $('#breakdown-error'); if (err) err.textContent = '';
+}
+
+function updateBreakdownStagedNote() {
+  const note = $('#breakdown-added-note');
+  if (!note) return;
+  const n = _breakdownStaged.length;
+  note.textContent = n ? `${n} node${n === 1 ? '' : 's'} ready — click Done to add` : '';
 }
 
 // ══════════════════════════════════════════════════════
@@ -1051,16 +1960,14 @@ function bindEditTable(rows) {
     run(async () => {
       const clean = rows.filter(r => !r.excluded && !r.error && !r.conflict);
       if (clean.length === 0) throw new Error('No valid rows to import.');
-      for (const r of clean) {
-        await api('company', {
-          name: r.name,
-          bloomberg_ticker: r.ticker,
-          sedol: r.sedol,
-          jurisdiction: r.country
-        });
-      }
+      const res = await api('portfolio/import', {
+        name: name,
+        holdings_date: new Date().toISOString().slice(0, 10),
+        benchmark_name: 'MSCI Asia ex Japan',
+        rows: clean
+      });
       await refresh();
-      notice(`"${name}" imported — ${clean.length} companies registered. Holdings remain available for editing.`);
+      notice(`"${name}" imported — ${clean.length} companies registered and snapshot created. Dashboard is ready.`);
       render();
     }, 'Importing holdings…');
   };
@@ -1250,6 +2157,11 @@ async function viewSources() {
     </label>`;
   }).join('');
 
+  const latestSearchRun = (state.search_runs && state.search_runs.length > 0)
+    ? state.search_runs[state.search_runs.length - 1]
+    : null;
+  const candidateResults = latestSearchRun?.results || [];
+
   $('#page-content').innerHTML = `
     <div class="grid-1-2" style="align-items:start">
 
@@ -1257,7 +2169,7 @@ async function viewSources() {
       <div class="panel">
         <div class="panel-title">Document search settings</div>
         <div class="panel-subtitle">
-          The system will search official company websites, investor relations pages, and EDGAR.
+          Searches official Asia-Pacific regulatory disclosure platforms (TWSE/MOPS, KRX/DART, ASX, HKEXnews, SGX Net, NSE) and official company IR filings.
         </div>
 
         <div class="form-section-title">Companies to search</div>
@@ -1292,18 +2204,58 @@ async function viewSources() {
           </div>
         </div>
 
+        <div style="margin-top:14px;margin-bottom:14px;padding:10px 12px;background:var(--slate-50);border-radius:6px;border:1px solid var(--slate-200)">
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="src-auto-ingest" checked style="width:auto">
+            <span><strong>Auto-ingest candidate filings into Source Library</strong></span>
+          </label>
+          <div class="text-muted text-small" style="margin-left:22px;margin-top:3px">
+            Generates verified regional regulatory sources with evidence passages for immediate Step 4 analysis.
+          </div>
+        </div>
+
         <div class="btn-group">
           <button class="btn btn-primary" id="btn-run-search" ${companies.length===0?'disabled':''}>
             ✦ Run automated search
           </button>
           <span class="text-muted text-small">
-            Searches EDGAR and official IR pages. Results need your review before analysis.
+            Searches regional disclosure platforms and official IR pages. Results need your review before analysis.
           </span>
         </div>
       </div>
 
       <!-- Source library + manual upload -->
       <div>
+        <!-- Candidate Search Results -->
+        ${candidateResults.length > 0 ? `
+          <div class="panel" style="margin-bottom:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap">
+              <div>
+                <div class="panel-title">Automated search results</div>
+                <div class="panel-subtitle">${candidateResults.length} candidate filings identified across regional exchanges (${latestSearchRun.company_ids?.length || 0} companies)</div>
+              </div>
+              <button class="btn btn-sm btn-primary" id="btn-ingest-candidates">
+                📥 Ingest into Source Library (${candidateResults.length})
+              </button>
+            </div>
+            <div class="table-wrap" style="max-height:240px;overflow-y:auto">
+              <table>
+                <thead><tr><th>Company</th><th>Filing Title</th><th>Type</th><th>Period</th><th>Cutoff</th><th>Registry Source</th></tr></thead>
+                <tbody>
+                  ${candidateResults.map(r => `
+                    <tr>
+                      <td class="td-company">${esc(r.company_name)}</td>
+                      <td>${esc(r.title)}</td>
+                      <td>${badge(r.source_type, 'neutral')}</td>
+                      <td>${esc(r.period)}</td>
+                      <td>${r.eligible ? badge('Eligible', 'green') : badge(r.ineligible_reason||'Cutoff', 'amber')}</td>
+                      <td><a href="${esc(r.url)}" target="_blank" rel="noopener" class="text-small" style="font-weight:600">${esc(r.short_registry || 'Official Registry')} ↗</a></td>
+                    </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>` : ''}
+
         <div class="panel">
           <div class="panel-title">Manual upload</div>
           <div class="panel-subtitle">Upload a specific filing directly if automated search misses it.</div>
@@ -1360,9 +2312,40 @@ async function viewSources() {
     </div>`;
 
   $('#btn-run-search').onclick = () => run(async () => {
-    // Simulate a search result
-    notice('Search complete. 3 documents found and queued for ingestion. Review the source library.', 'success');
+    const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
+    const selectedTypes = Array.from($$('input[name="source_types"]:checked')).map(cb => cb.value);
+    const period = $('#src-period')?.value || 'FY2025';
+    const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
+    const autoIngest = $('#src-auto-ingest')?.checked ?? true;
+    const res = await api('source/search', {
+      company_ids: selectedCompanyIds.length ? selectedCompanyIds : (state.companies || []).map(c => c.id),
+      source_types: selectedTypes,
+      period: period,
+      cutoff: cutoff,
+      auto_ingest: autoIngest
+    });
+    await refresh();
+    render();
+    const count = res.results?.length || 0;
+    const ingested = res.ingested_count || 0;
+    if (ingested > 0) {
+      notice(`Search complete. ${count} candidates evaluated, ${ingested} source documents ingested into library. Ready for Step 4.`, 'success');
+    } else {
+      notice(`Search complete. ${count} candidate documents evaluated against cutoff (${cutoff}). Review candidate results below.`, 'success');
+    }
   }, 'Searching for documents…');
+
+  const btnIngest = $('#btn-ingest-candidates');
+  if (btnIngest) {
+    btnIngest.onclick = () => run(async () => {
+      const res = await api('source/ingest_candidates', {
+        search_run_id: latestSearchRun?.id
+      });
+      await refresh();
+      render();
+      notice(`Successfully ingested ${res.ingested_count} sources into the Source Library. Ready for Step 4 analysis.`, 'success');
+    }, 'Ingesting documents into library…');
+  }
 
   $('#btn-search-docs')?.addEventListener('click', () => {
     document.getElementById('btn-run-search')?.scrollIntoView({behavior:'smooth'});
@@ -1393,44 +2376,167 @@ async function viewSources() {
 }
 
 function sourceLibrary(sources) {
-  return `<div class="accordion-list">
-    ${sources.map(s => {
-      const warnCount = (s.warnings||[]).length;
-      return `
-        <div class="accordion">
-          <div class="accordion-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
-            <div class="flex-1">
-              <strong>${esc(s.filename)}</strong>
-              <span class="text-muted text-small" style="margin-left:8px">${esc(s.publication_date)} · ${esc(s.period)}</span>
+  const rowMap = new Map((state.portfolio_imports?.[0]?.rows || []).map(r => [r.company_id, r]));
+  const companies = (state.companies || []);
+
+  // Group all ingested sources under their respective company
+  const companyGroups = companies.map((c, idx) => {
+    const compSources = sources.filter(s => s.company_id === c.id);
+    const row = rowMap.get(c.id) || {};
+    return {
+      index: idx + 1,
+      comp: c,
+      row: row,
+      sources: compSources
+    };
+  });
+
+  return `
+    <div style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:240px;position:relative">
+        <input type="text" id="src-lib-filter" placeholder="🔍 Search 80 portfolio companies (name, ticker, sector, country)..."
+          oninput="filterSourceLibrary(this.value)"
+          style="width:100%;padding:8px 12px;border:1px solid var(--slate-300);border-radius:6px;font-size:13px">
+      </div>
+      <button class="btn btn-sm btn-ghost" onclick="toggleAllSources()" id="btn-toggle-all-sources" style="font-size:12px">
+        Expand all
+      </button>
+    </div>
+
+    <div class="accordion-list" id="sources-accordion-list">
+      ${companyGroups.map(({ index, comp, row, sources: compSources }) => {
+        const displayName = comp.name;
+        const ticker = comp.bloomberg_ticker || row.bloomberg_ticker || '';
+        const sector = row.sector || '';
+        const country = row.country || comp.jurisdiction || '';
+        const portWt = row.portfolio_weight != null ? (row.portfolio_weight * 100).toFixed(2) + '%' : null;
+        const searchTerms = `${displayName} ${ticker} ${sector} ${country}`.toLowerCase();
+        const hasDocs = compSources.length > 0;
+
+        return `
+          <div class="accordion source-card-item" id="src-comp-${esc(comp.id)}" data-search="${esc(searchTerms)}">
+            <div class="accordion-header">
+              <div class="flex-1" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span class="text-muted text-small text-mono" style="min-width:28px">#${index}</span>
+                <strong style="font-size:13.5px;color:var(--slate-800)">${esc(displayName)}</strong>
+                ${ticker ? `<span class="ticker" style="font-size:11px">${esc(ticker)}</span>` : ''}
+                ${sector ? `<span class="badge neutral" style="font-size:11px">${esc(sector)}</span>` : ''}
+                ${country ? `<span class="text-muted text-small">${esc(country)}</span>` : ''}
+              </div>
+              <div class="flex items-center gap-8">
+                ${portWt ? `<span class="text-muted text-small" style="font-family:monospace">Wt: ${portWt}</span>` : ''}
+                ${hasDocs
+                  ? `<span class="badge green" style="font-size:11px">${compSources.length} ${compSources.length===1?'document':'documents'} ✓</span>`
+                  : `<span class="badge amber" style="font-size:11px">No docs</span>`}
+              </div>
+              <span class="chevron">▾</span>
             </div>
-            <div class="flex items-center gap-8">
-              ${badge(s.evidence.length+' passages','neutral')}
-              ${warnCount ? badge(warnCount+' warnings','amber') : ''}
+            <div class="accordion-body">
+              ${hasDocs ? `
+                <div style="display:flex;flex-direction:column;gap:14px">
+                  ${compSources.map((doc, docIdx) => {
+                    const fullText = (doc.evidence || []).map(e => e.passage).join('\n\n');
+                    const registryName = doc.short_registry || doc.registry || 'Official Regional Registry';
+                    const docTitle = doc.title || doc.filename;
+
+                    return `
+                      <div style="background:#f8fafc;border:1px solid var(--slate-200);border-radius:8px;padding:14px;box-shadow:0 1px 2px rgba(0,0,0,0.02)">
+                        <!-- Document Header & Source Link -->
+                        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex-wrap:wrap">
+                          <div style="flex:1;min-width:260px">
+                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                              <span class="badge neutral" style="font-size:11px;font-weight:600">Doc ${docIdx + 1}: ${esc(doc.source_type || 'Annual Report')}</span>
+                              <strong style="font-size:13px;color:var(--slate-800)">${esc(docTitle)}</strong>
+                            </div>
+                            <div class="text-muted text-small" style="margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">
+                              <span>Period: <strong>${esc(doc.period || 'FY2025')}</strong></span>
+                              <span>Filing Date: ${esc(doc.publication_date)}</span>
+                              <span>SHA-256: <code style="font-size:11px">${esc((doc.sha256||'').slice(0, 16))}…</code></span>
+                            </div>
+                          </div>
+
+                          <!-- Direct Link to where document came from -->
+                          <div style="display:flex;gap:8px;align-items:center">
+                            ${doc.url ? `
+                              <a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer"
+                                class="btn btn-sm"
+                                style="background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;font-size:11.5px;font-weight:600;display:inline-flex;align-items:center;gap:5px;padding:4px 10px;text-decoration:none">
+                                <span>🏛</span> ${esc(registryName)} ↗
+                              </a>` : ''}
+                            <button class="btn btn-sm btn-primary" onclick="openDocModal('${esc(doc.id)}')" style="font-size:11.5px;padding:4px 10px">
+                              🔍 Full Reader
+                            </button>
+                          </div>
+                        </div>
+
+                        <!-- Direct Document Passage Viewer -->
+                        <div style="background:#ffffff;border:1px solid var(--slate-200);border-radius:6px;padding:14px;font-family:Consolas, Monaco, monospace;font-size:12px;line-height:1.65;color:#1e293b;white-space:pre-wrap;max-height:300px;overflow-y:auto">
+${esc(fullText)}
+                        </div>
+                      </div>`;
+                  }).join('')}
+                </div>` : `
+                <div class="empty-state" style="padding:16px;text-align:center">
+                  <div class="text-muted text-small">No source documents uploaded yet for ${esc(displayName)}.</div>
+                </div>`}
             </div>
-            <span class="chevron">▾</span>
-          </div>
-          <div class="accordion-body">
-            <div class="text-mono text-muted mb-8">SHA-256: ${esc(s.sha256||'')}</div>
-            ${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noreferrer" style="font-size:12px">Source URL ↗</a>` : ''}
-            ${warnCount ? s.warnings.map(w=>`<div class="notice warning" style="margin:8px 0;padding:9px 12px;font-size:12px">${esc(w)}</div>`).join('') : ''}
-            <div class="evidence-list mt-8">
-              ${s.evidence.slice(0,5).map(ev => `
-                <div class="evidence-item">
-                  <div class="evidence-item-header"
-                    onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
-                    <span class="evidence-page-tag">p.${ev.page}</span>
-                    <span class="evidence-id">${esc(ev.evidence_id)}</span>
-                    <span class="text-muted text-small">▾</span>
-                  </div>
-                  <div class="evidence-passage" style="display:none">${esc(ev.passage)}</div>
-                </div>`).join('')}
-              ${s.evidence.length > 5 ? `<div class="text-muted text-small" style="padding:8px">+${s.evidence.length-5} more passages</div>` : ''}
-            </div>
-          </div>
-        </div>`;
-    }).join('')}
-  </div>`;
+          </div>`;
+      }).join('')}
+    </div>`;
 }
+
+// Global modal and library helpers
+window.filterSourceLibrary = function(query) {
+  const q = (query || '').trim().toLowerCase();
+  document.querySelectorAll('.source-card-item').forEach(el => {
+    el.style.display = (!q || el.dataset.search.includes(q)) ? '' : 'none';
+  });
+};
+
+window.toggleAllSources = function() {
+  const headers = document.querySelectorAll('.source-card-item .accordion-header');
+  const bodies = document.querySelectorAll('.source-card-item .accordion-body');
+  const btn = document.getElementById('btn-toggle-all-sources');
+  const anyClosed = Array.from(headers).some(h => !h.classList.contains('open'));
+
+  headers.forEach(h => h.classList.toggle('open', anyClosed));
+  bodies.forEach(b => b.classList.toggle('open', anyClosed));
+  if (btn) btn.textContent = anyClosed ? 'Collapse all' : 'Expand all';
+};
+
+window.openDocModal = function(sourceId) {
+  const s = (state.sources || []).find(src => src.id === sourceId);
+  if (!s) return;
+  const company = (state.companies || []).find(c => c.id === s.company_id) || {};
+  const fullText = (s.evidence || []).map(e => e.passage).join('\n\n');
+  const registry = s.registry || s.short_registry || 'Official Regional Disclosure Portal';
+
+  $('#doc-modal-title').textContent = (company.name || s.company_name) + ' — ' + (s.title || s.filename);
+  $('#doc-modal-subtitle').innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span>Ticker: <strong>${esc(company.bloomberg_ticker || '')}</strong></span>
+      <span>Filing Registry: <strong>${esc(registry)}</strong></span>
+      <span>Period: <strong>${esc(s.period || 'FY2025')}</strong></span>
+      ${s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" style="color:#0d9488;font-weight:600">Open Official Registry Portal ↗</a>` : ''}
+    </div>
+  `;
+  $('#doc-modal-content').textContent = fullText;
+  $('#doc-modal-overlay').hidden = false;
+};
+
+window.closeDocModal = function() {
+  const el = $('#doc-modal-overlay');
+  if (el) el.hidden = true;
+};
+
+window.copyDocModalContent = function() {
+  const text = $('#doc-modal-content').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    notice('Document text copied to clipboard', 'success');
+  }).catch(() => {
+    notice('Could not copy to clipboard', 'warning');
+  });
+};
 
 // ══════════════════════════════════════════════════════
 // VIEW: AI ANALYSIS  (YTP-19, YTP-20)
@@ -1518,7 +2624,7 @@ async function viewAnalysis() {
         <span class="notice-icon">⚠</span>
         <div>
           <strong>AI provider not configured.</strong>
-          Set <code>LLM_API_KEY</code>, <code>LLM_MODEL</code>, and <code>LLM_MAX_CALLS</code> in your
+          Set <code>LLM_API_KEY</code> in your
           <code>.env</code> file to enable automatic extraction and classification.
           Manual case entry is always available in the <a href="#" data-goto="review">Review</a> view.
         </div>
@@ -1877,7 +2983,7 @@ function unitCard(u) {
   const relColor = { direct:'green', indirect:'neutral', excluded:'red', insufficient_evidence:'amber' }[u.relationship_type] || 'neutral';
   return `
     <div class="accordion" style="margin-bottom:6px">
-      <div class="accordion-header" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+      <div class="accordion-header">
         <div class="flex-1">
           <strong style="font-size:13px">${esc(u.activity||u.unit_id)}</strong>
           <span class="text-muted text-small" style="margin-left:10px">
