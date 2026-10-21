@@ -179,6 +179,7 @@ body { display: flex; min-height: 125vh; }
 .main {
   margin-left: 250px;
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 125vh;
@@ -721,7 +722,7 @@ tr:hover td { background: var(--slate-50); }
   .grid-2, .grid-3, .grid-1-2 { grid-template-columns: 1fr; }
 }
 @media (max-width: 900px) {
-  .sidebar { width: 60px; }
+  .sidebar { width: 60px; min-width: 60px; }
   .sidebar-brand .logo span, .sidebar-section-label,
   .step-text, .step-badge, .sidebar-bottom { display: none; }
   .nav-step { justify-content: center; padding: 12px 0; }
@@ -1288,3 +1289,148 @@ tr:hover td { background: var(--slate-50); }
 .theme-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); align-items: start; gap: 20px; }
 .theme-layout > .saved-themes-panel { grid-column: 1 / -1; }
 @media (max-width: 640px) { .theme-layout { grid-template-columns: minmax(0, 1fr); } }
+
+/* Workflow presentation preserved from the frontend branch. */
+.section-title-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.workflow-tabs { margin-bottom: 20px; }
+.source-company-row { cursor: pointer; }
+.source-company-row:hover, .source-company-row:focus-visible { background: var(--teal-50); }
+.document-edit-form { display: grid; gap: 8px; margin: 12px 0; }
+/* Actions live with their content; wrap within narrow cards. */
+.body-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.body-actions .btn-group { flex-wrap: wrap; }
+.theme-layout .panel-title { flex-wrap: wrap; gap: 10px; }
+.page-header-right:empty { display: none; }
+/* Consistent action hierarchy within workflow cards. */
+.refined-actions .btn {
+  min-height: 38px;
+  padding: 9px 15px;
+  border-radius: 9px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  gap: 8px;
+  box-shadow: 0 1px 2px rgb(13 43 50 / 5%);
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.refined-actions .btn:not(:disabled):hover { border-color: var(--teal-400); box-shadow: 0 3px 8px rgb(13 43 50 / 10%); }
+.refined-actions .btn:focus-visible { outline: 3px solid var(--teal-200); outline-offset: 3px; }
+.refined-actions .btn:disabled { box-shadow: none; cursor: not-allowed; }
+.refined-actions .btn-sm { min-height: 32px; padding: 7px 12px; font-size: 12px; }
+.refined-actions .btn-secondary { background: var(--teal-50); color: var(--teal-700); border-color: var(--teal-200); }
+.refined-actions .btn-secondary:not(:disabled):hover { background: var(--teal-100); }
+.refined-actions .btn-primary { box-shadow: 0 2px 5px rgb(20 125 112 / 18%); }
+.section-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.section-heading .panel-title { margin-bottom: 0; }
+.section-heading > div { flex: 1; min-width: 0; }
+.refined-actions .theme-save-footer { justify-content: flex-start; gap: 10px; }
+.refined-actions .theme-save-footer .btn-primary { margin-left: auto; }
+.refined-actions .section-title-actions { flex-wrap: wrap; }
+@media (max-width: 640px) {.refined-actions .theme-save-footer .btn { flex: 1 1 100%; margin-left: 0; justify-content: center; }
+}
+/* Portfolio dashboard shares one card system and one company explorer. */
+.dashboard-view { display: grid; gap: 20px; }
+.dashboard-view > .panel, .dashboard-view > .metric-grid, .dashboard-view > .notice { margin-bottom: 0; }
+.dashboard-view .panel, .dashboard-view .metric-tile { border: 1px solid var(--slate-100); border-radius: 12px; box-shadow: 0 2px 8px rgb(13 43 50 / 4%); }
+.dashboard-view .panel { padding: 22px; min-width: 0; }
+.dashboard-view .metric-grid { gap: 16px; }
+.dashboard-view .metric-tile { padding: 22px; background: white; }
+.dashboard-view .metric-tile.accent { background: var(--teal-50); border-color: var(--teal-200); }
+.dashboard-view .metric-tile .value { font-size: 30px; line-height: 1.25; margin: 8px 0; }
+.dashboard-insights { align-items: stretch; gap: 20px; }
+.dashboard-insights > .panel { margin: 0; }
+.dashboard-view .panel-title { font-size: 15px; font-weight: 650; }
+.dashboard-view .panel-subtitle { line-height: 1.6; margin-bottom: 18px; }
+.dashboard-view th { font-size: 11px; color: var(--slate-500); background: var(--slate-50); }
+.dashboard-view td { padding-top: 13px; padding-bottom: 13px; }
+.dashboard-view .subtheme-select { background: transparent; border-color: transparent; box-shadow: none; color: var(--teal-700); text-align: left; white-space: normal; }
+.dashboard-view .subtheme-select:hover { background: var(--teal-100); }
+.dashboard-view .subtheme-selected td { background: var(--teal-100); }
+.dashboard-view .subtheme-select[aria-pressed="true"] { font-weight: 700; }
+.dashboard-empty { text-align: center; padding: 32px !important; color: var(--slate-500); }
+.dashboard-view [hidden] { display: none !important; }
+/* Diverging contributions, centred at zero and labelled in percentage points. */
+.contribution-panel { display: flex; flex-direction: column; }
+.contribution-panel .section-heading { align-items: flex-start; }
+.contribution-unit { background: var(--teal-50); color: var(--teal-700); border: 1px solid var(--teal-200); border-radius: 20px; padding: 5px 10px; font-size: 10px; white-space: nowrap; }
+.contribution-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 18px; color: var(--slate-500); font-size: 11px; }
+.contribution-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.contribution-dot { width: 7px; height: 7px; border-radius: 50%; }
+.positive-dot { background: var(--teal-500); }
+.negative-dot { background: var(--red-600); }
+.contribution-chart { display: grid; gap: 4px; }
+.contribution-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.5fr) 76px; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--slate-100); }
+.contribution-company { min-width: 0; }
+.contribution-company strong { display: block; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.contribution-company > span { display: block; margin-top: 3px; color: var(--slate-400); font-size: 10px; }
+.contribution-track { position: relative; height: 24px; border-radius: 6px; background: var(--slate-50); }
+.contribution-track::after { content: ''; position: absolute; left: 50%; top: -5px; bottom: -5px; width: 1px; background: var(--slate-300); }
+.contribution-bar { position: absolute; top: 4px; height: 16px; border-radius: 4px; }
+.positive-bar { background: linear-gradient(90deg, var(--teal-400), var(--teal-500)); }
+.negative-bar { background: linear-gradient(90deg, var(--red-600), #d59898); }
+.contribution-number { text-align: right; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.contribution-axis { display: flex; justify-content: space-between; margin: 10px 90px 0 33%; font-size: 10px; color: var(--slate-400); }
+.contribution-footnote { margin-top: auto; padding-top: 18px; font-size: 11px; color: var(--slate-500); }
+#company-filter-summary { margin-top: 5px; color: var(--teal-700); }
+@media (max-width: 640px) {.contribution-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 68px; gap: 8px; } }
+/* Make sub-theme selection and its effect on company rows explicit. */
+.company-filter-banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; padding: 16px 18px; margin-bottom: 20px; border: 1px solid var(--teal-200); border-left: 4px solid var(--teal-500); border-radius: 9px; background: var(--teal-50); }
+.company-filter-banner > div { display: grid; gap: 4px; }
+.filter-eyebrow { font-size: 10px; letter-spacing: .1em; font-weight: 700; color: var(--teal-500); }
+#company-filter-name { font-size: 15px; color: var(--teal-800); overflow-wrap: anywhere; }
+#company-filter-count { font-size: 12px; color: var(--slate-500); }
+.dashboard-view #dashboard-companies.has-active-filter { border-color: var(--teal-200); }
+/* Shared title-to-subheader spacing for workspace cards. */
+.theme-layout .section-heading .panel-title + .text-small, .card-heading .panel-title + .text-small { display: block; margin-top: 4px; line-height: 1.5; }
+/* Expanded source library: six consistent category cards and cited documents. */
+.source-expanded-row > td { background: var(--slate-50); padding: 20px; white-space: normal; }
+.source-category-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.source-type-card { min-width: 0; padding: 16px; border: 1px solid var(--slate-100); border-radius: 10px; background: white; }
+.source-category-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.source-category-heading h4 { margin: 0; font-size: 12px; font-weight: 650; color: var(--slate-900); }
+.source-document-count { font-size: 10px; color: var(--slate-500); background: var(--slate-50); padding: 4px 7px; border-radius: 20px; }
+.source-category-empty { padding: 12px; border: 1px dashed var(--slate-200); border-radius: 6px; color: var(--slate-400); font-size: 11px; text-align: center; }
+.source-document { border: 1px solid var(--slate-100); border-radius: 8px; margin-top: 8px; overflow: hidden; }
+.source-document > summary { display: flex; align-items: center; gap: 10px; padding: 12px; list-style: none; cursor: pointer; }
+.source-document > summary::-webkit-details-marker { display: none; }
+.source-document > summary:hover { background: var(--teal-50); }
+.source-file-icon { display: grid; place-items: center; width: 30px; height: 34px; border-radius: 6px; background: var(--teal-50); color: var(--teal-700); font-size: 20px; flex-shrink: 0; }
+.source-file-title { display: grid; gap: 4px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.source-file-title strong { font-size: 12px; }
+.source-file-title > span { font-size: 10px; color: var(--slate-500); }
+.source-file-chevron { color: var(--slate-400); }
+.source-document[open] > summary .source-file-chevron { transform: rotate(180deg); }
+.source-document-body { padding: 12px; border-top: 1px solid var(--slate-100); }
+.source-financial-fact { display: grid; gap: 5px; padding: 10px; margin-bottom: 10px; border-radius: 6px; background: var(--teal-50); font-size: 11px; }
+.source-financial-fact > span { color: var(--slate-500); }
+.source-evidence { margin-top: 10px; font-size: 11px; }
+.source-evidence > summary { cursor: pointer; color: var(--teal-700); }
+.source-synthetic-card { grid-column: 1 / -1; border-color: var(--teal-200); }
+.source-row-chevron { display: inline-block; transition: transform .15s ease; }
+.source-company-row[aria-expanded="true"] .source-row-chevron { transform: rotate(90deg); }
+@media (max-width: 640px) {.source-category-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Responsive vertical tree for the merged three-tier node editor. */
+.theme-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); align-items: start; gap: 20px; }
+.theme-layout > .panel { min-width: 0; width: 100%; }
+.theme-layout > .saved-themes-panel { grid-column: 1 / -1; }
+.mm { display: block; width: 100%; min-width: 0; padding: 20px 14px; overflow: visible; }
+.mm-row { display: flex; flex-direction: column; align-items: center; min-width: 0; width: 100%; }
+.mm-cell, .mm-children .mm-cell { width: min(240px, 100%); min-width: 0; flex: initial; }
+.mm > .mm-row > .mm-cell { width: min(280px, 100%); }
+.mm-children { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); width: 100%; min-width: 0; gap: 18px; align-items: start; }
+.mm-children-root { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.mm-connector { width: 100%; height: 38px; align-self: auto; position: relative; }
+.mm-connector::before { left: 50%; top: 0; width: 2px; height: 100%; transform: none; }
+.mm-add-online { position: relative; display: block; left: auto; top: auto; transform: none; width: fit-content; max-width: 100%; margin: 7px auto; padding: 4px 9px; font-size: 10px; opacity: 1; white-space: normal; }
+.mm-children > .mm-row::before { left: 50%; top: -9px; width: 2px; height: 9px; transform: none; }
+.mm-children > .mm-row::after { display: none; }
+.mm-node-body { min-width: 0; overflow-wrap: anywhere; }
+.mm-name { overflow-wrap: anywhere; }
+.taxonomy-panel .section-heading { align-items: flex-start; }
+.theme-layout > .saved-themes-panel { margin-bottom: 0; }
+@media (max-width: 640px) { .theme-layout { grid-template-columns: minmax(0, 1fr); } }
+
+@media (max-width: 900px) {
+  .sidebar-brand { padding: 20px 12px; }
+  .sidebar-brand .tagline { display: none; }
+}
