@@ -4,16 +4,26 @@ Local prototype of the AI Thematic Exposure Engine for IS4002 / Schroders. All v
 
 ## Run locally
 
-From this folder, using Python 3.11 or newer:
+From `prototype/backend/`, using Python 3.11 or newer:
 
 ```sh
+cd prototype/backend
 python -m venv .venv
-source .venv/bin/activate
+# On Windows: .venv\Scripts\activate  (On macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 python app.py
 ```
 
-Open http://127.0.0.1:8766. Set `PORT` to override the port. V0 uses port 8765.
+Open http://127.0.0.1:8766. Set `PORT` in `prototype/backend/.env` to override the port.
+
+## Directory Structure
+
+```text
+prototype/
+├── frontend/       # Web UI, styles, scripts (index.html, app.js, style.css, js/)
+├── backend/        # Python server, logic, tests, config (app.py, engine.py, evaluate.py, test_*.py, .env)
+└── database/       # SQLite database (research.sqlite) and uploaded sources (sources/)
+```
 
 ## Workflow
 
@@ -30,16 +40,16 @@ The first worksheet must start with a header row containing `Company`, `Portfoli
 
 Weights support decimals such as `0.013` and explicit percentages such as `1.3%`. Numeric values greater than 1.5 in magnitude are interpreted as percentage values. Excel percentage-formatted numeric cells are read as decimals.
 
-Excel parsing runs in the browser using the bundled SheetJS CE 0.20.3 library in `static/js/xlsx.full.min.js`; no CDN connection or `openpyxl` installation is required.
+Excel parsing runs in the browser using the bundled SheetJS CE 0.20.3 library in `prototype/frontend/js/xlsx.full.min.js`; no CDN connection or `openpyxl` installation is required.
 
 ## Implementation
 
-- `app.py`: local Python HTTP server, API, SQLite persistence, source extraction, AI integration, review records, and ZIP exports.
-- `engine.py`: deterministic taxonomy validation, revenue exposure calculations, and portfolio aggregation.
-- `static/index.html`, `static/app.js`, `static/style.css`: frontend and workflow views.
-- `evaluate.py`: classification metrics, abstention, exposure error, and reference-range overlap.
+- `backend/app.py`: local Python HTTP server, API, SQLite persistence, source extraction, AI integration, review records, and ZIP exports.
+- `backend/engine.py`: deterministic taxonomy validation, revenue exposure calculations, and portfolio aggregation.
+- `frontend/index.html`, `frontend/app.js`, `frontend/style.css`: frontend and workflow views.
+- `backend/evaluate.py`: classification metrics, abstention, exposure error, and reference-range overlap.
 
-Data is stored in `data/research.sqlite` and uploaded sources in `data/sources/`. Set `THEME_DATA_DIR` to use another location. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
+Data is stored in `prototype/database/research.sqlite` and uploaded sources in `prototype/database/sources/`. Set `THEME_DATA_DIR` in `.env` to use another location. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
 
 ## Prototype limitations
 
@@ -56,11 +66,11 @@ Click **Load demo data** on Overview. The synthetic worked example produces 18% 
 
 ```sh
 cp .env.example .env
-# Set LLM_API_KEY, LLM_MODEL, and an explicit LLM_MAX_CALLS budget.
+# Set LLM_API_KEY in .env (endpoint, model, and call budget have built-in defaults).
 python app.py
 ```
 
-The adapter supports a configurable `LLM_ENDPOINT`, caches responses, and records usage. AI proposes extracted facts and classifications; Python validates evidence references and computes exposure. Manual analysis remains available without AI configuration.
+The adapter defaults to Google AI Studio Gemini (`gemini-3-flash-preview`) with a 100-call budget, and supports configurable overrides via `LLM_ENDPOINT`, `LLM_MODEL`, and `LLM_MAX_CALLS`. Manual analysis remains available without AI configuration.
 
 ## Evaluation CLI
 

@@ -14,12 +14,22 @@ def fraction(value, name):
         raise ValueError(f'{name} must be between 0 and 1')
     return n
 
-def taxonomy(nodes):
-    """Validate a two-tier taxonomy and return the set of Tier-2 (leaf) node IDs.
+MAX_TIERS = 3  # Theme → Tier-1 → Tier-2 → Tier-3 (Tier-3 only via manual "break down")
+
+# Maximum number of children allowed at each tier depth.
+#   Tier-1: up to 5 top-level areas
+#   Tier-2: up to 3 activities under each Tier-1 (produced by "generate taxonomy")
+#   Tier-3: up to 4 sub-nodes under a Tier-2 (only via manual "break down")
+MAX_CHILDREN = {1: 5, 2: 3, 3: 4}
+
+def taxonomy(nodes, require_leaves=False):
+    """Validate the taxonomy and return the set of leaf node IDs.
 
     Required node fields: node_id, name, definition, examples.
-    parent_id is null for Tier-1 nodes and a valid node_id for Tier-2 nodes.
-    Hierarchy must not exceed two levels below the theme.
+    parent_id is null for Tier-1 nodes and a valid node_id otherwise.
+    Hierarchy must not exceed MAX_TIERS levels below the theme. Leaves are any
+    nodes that are not themselves a parent of another node (so they may sit at
+    Tier-2 or Tier-3 depending on how far the taxonomy was broken down).
     """
     if not isinstance(nodes, list) or not nodes:
         raise ValueError('At least one taxonomy node is required')
@@ -36,14 +46,11 @@ def taxonomy(nodes):
         if not isinstance(n['examples'], list):
             raise ValueError('Node examples must be a list')
         pid = n.get('parent_id')
-        if pid is not None:
-            if pid not in parents:
-                raise ValueError('Unknown parent ID')
-            # Enforce max depth: Tier-2 nodes must have a Tier-1 parent (parent_id=None)
-            grandparent = parents.get(pid)
-            if grandparent is not None:
-                raise ValueError('Hierarchy must not exceed two subtheme levels (Tier-1 → Tier-2)')
+        if pid is not None and pid not in parents:
+            raise ValueError('Unknown parent ID')
+        # Walk the ancestor chain to detect cycles AND measure depth.
         seen = set()
+        depth = 1  # this node is at least Tier-1
         current = n['node_id']
         while current:
             if current in seen:
@@ -51,7 +58,41 @@ def taxonomy(nodes):
             if current not in parents:
                 raise ValueError('Unknown parent ID')
             seen.add(current)
-            current = parents[current]
+            parent = parents[current]
+            if parent is not None:
+                depth += 1
+            current = parent
+        if depth > MAX_TIERS:
+            raise ValueError(f'Hierarchy must not exceed {MAX_TIERS} subtheme levels')
+
+    # Enforce the per-tier child-count caps (Tier-1: 5, Tier-2: 3, Tier-3: 4).
+    def _depth(nid):
+        d, cur, seen = 0, nid, set()
+        while cur is not None and cur not in seen:
+            seen.add(cur)
+            d += 1
+            cur = parents.get(cur)
+        return d
+    tier1_count = sum(1 for p in parents.values() if p is None)
+    if tier1_count > MAX_CHILDREN[1]:
+        raise ValueError(f'A theme may have at most {MAX_CHILDREN[1]} Tier-1 areas')
+    child_counts = {}
+    for n in nodes:
+        pid = n.get('parent_id')
+        if pid is not None:
+            child_counts[pid] = child_counts.get(pid, 0) + 1
+    for pid, count in child_counts.items():
+        child_tier = _depth(pid) + 1
+        cap = MAX_CHILDREN.get(child_tier)
+        if cap is not None and count > cap:
+            raise ValueError(f'A Tier-{child_tier - 1} node may have at most {cap} sub-nodes')
+
+    if require_leaves:
+        tier1_ids = {n['node_id'] for n in nodes if n.get('parent_id') is None}
+        parent_ids_with_children = {p for p in parents.values() if p}
+        for t1 in tier1_ids:
+            if t1 not in parent_ids_with_children:
+                raise ValueError('Each Tier-1 node must have at least one Tier-2 subtheme')
     leaf_ids = set(ids) - {p for p in parents.values() if p}
     return leaf_ids
 
