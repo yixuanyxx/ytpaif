@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import uuid
 import zipfile
 import engine
+import financials
 
 ROOT = Path(__file__).resolve().parent
 
@@ -254,6 +255,23 @@ def source_ingest(d):
         'period': d['period'], 'retrieved_at': now(),
         'warnings': warnings, 'evidence': evidence
     })
+
+def source_update(d):
+    source = get('sources', d['id'])
+    # Evidence and fiscal periods stay immutable once ingested.
+    source_type = d.get('source_type', source.get('source_type'))
+    if source_type != source.get('source_type') and source_type not in ('annual_report', 'regulatory_filing', 'investor_presentation',
+                            'earnings_call', 'company_website', 'sustainability_report'):
+        raise ValueError('Unknown source type')
+    url = str(d.get('url', source.get('url', ''))).strip()
+    if url and urlparse(url).scheme not in ('http', 'https'):
+        raise ValueError('Public source URL must use HTTP or HTTPS')
+    filename = Path(str(d.get('filename', source['filename']))).name.strip()
+    if not filename:
+        raise ValueError('Document name is required')
+    source.update(filename=filename, url=url, source_type=source_type)
+    return put('sources', source)
+
 
 def evidence_for(company_id, theme_id):
     theme = get('themes', theme_id)
@@ -991,6 +1009,7 @@ def snapshot_create(d):
         security_map[r['security_id']] = r['company_id']
     return put('snapshots', {
         'id': ident('snapshot'), 'name': d.get('name', 'Holdings snapshot'),
+        'benchmark_name': str(d.get('benchmark_name', 'Reference benchmark')),
         'portfolio': d['portfolio'], 'benchmark': d['benchmark'],
         'created_at': now()
     })
@@ -1145,7 +1164,7 @@ def state():
     key = os.environ.get('LLM_API_KEY') or os.environ.get('GEMINI_API_KEY', '')
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     return {
-        **{k: all_records(k) for k in
+        **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in all_records(k)] if k == 'sources' else all_records(k)) for k in
            ('themes', 'companies', 'sources', 'cases', 'reviews', 'runs', 'snapshots',
             'portfolio_imports', 'search_runs')},
         'ai_configured': bool(key),
@@ -1261,6 +1280,7 @@ def dispatch(path, d):
     if path == '/api/dashboard':        return dashboard(d['theme_id'], d.get('snapshot_id'))
     if path == '/api/demo':             return demo()
     if path == '/api/evaluate':         return evaluate_examples(d.get('examples', []))
+    if path == '/api/source/update': return source_update(d)
     raise ValueError('Unknown API endpoint')
 
 class Handler(BaseHTTPRequestHandler):

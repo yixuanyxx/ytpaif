@@ -149,6 +149,7 @@ function updateAiStatus() {
 
 // ── Navigation ─────────────────────────────────────
 function setView(view) {
+  if (view === 'review') { analysisTab = 'review'; view = 'analysis'; }
   currentView = view;
   $$('.nav-step').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   render();
@@ -165,6 +166,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Global delegation for data-view buttons and interactive accordion/tree controls
   document.addEventListener('click', e => {
+    const analysis = e.target.closest('[data-open-analysis]');
+    if (analysis) window.openAnalysisPanel(analysis.dataset.openAnalysis);
+    const review = e.target.closest('[data-open-case]');
+    if (review) window.openCase(review.dataset.openCase);
     const el = e.target.closest('[data-goto]');
     if (el) { e.preventDefault(); setView(el.dataset.goto); return; }
 
@@ -212,8 +217,8 @@ async function render() {
     theme:     viewTheme,
     portfolio: viewPortfolio,
     sources:   viewSources,
-    analysis:  viewAnalysis,
-    review:    viewReview,
+    analysis:  viewAnalysisWorkflow,
+    review:    viewAnalysisWorkflow,
     dashboard: viewDashboard,
     evaluate:  viewEvaluate,
   };
@@ -245,8 +250,7 @@ async function viewOverview() {
     { label: 'Theme defined',     done: !!theme,             goto: 'theme',     hint: theme ? theme.theme_name : 'Not yet defined' },
     { label: 'Portfolio imported', done: companies.length>0,  goto: 'portfolio', hint: `${companies.length} companies` },
     { label: 'Sources collected', done: sources.length>0,     goto: 'sources',   hint: `${sources.length} documents` },
-    { label: 'Cases analysed',    done: cases.length>0,       goto: 'analysis',  hint: `${cases.length} total` },
-    { label: 'Cases approved',    done: approved.length>0,    goto: 'review',    hint: `${approved.length} approved, ${pending.length} pending` },
+    { label: 'Analysis & review', done: approved.length>0, goto: 'analysis', hint: `${cases.length} analyzed · ${approved.length} approved · ${pending.length} pending` },
     { label: 'Dashboard ready',   done: !!snapshot,           goto: 'dashboard', hint: snapshot ? snapshot.name : 'No snapshot yet' },
   ];
 
@@ -365,6 +369,25 @@ function waterfallChart(companies, state) {
   </div>`;
 }
 
+function activeContributionChart(rows, companies) {
+  const known = rows.filter(r => Number.isFinite(r.contributions?.active?.point))
+    .sort((a, b) => Math.abs(b.contributions.active.point) - Math.abs(a.contributions.active.point));
+  const displayed = known.slice(0, 8);
+  const max = Math.max(...displayed.map(r => Math.abs(r.contributions.active.point)), 0.00001);
+  const pp = value => `${value > 0 ? '+' : ''}${(value * 100).toFixed(2)} pp`;
+  return `<div class="contribution-legend"><span><i class="contribution-dot positive-dot"></i>Positive contribution</span><span><i class="contribution-dot negative-dot"></i>Negative contribution</span></div>
+    ${displayed.length ? `<div class="contribution-chart">${displayed.map(row => {
+      const value = row.contributions.active.point;
+      const company = companies.find(c => c.id === row.company_id);
+      return `<div class="contribution-row">
+        <div class="contribution-company"><strong>${esc(company?.name || row.company_id)}</strong><span>${esc(company?.bloomberg_ticker || (row.company_id === 'CASH' ? 'Cash' : ''))}</span></div>
+        <div class="contribution-track" role="img" aria-label="${esc(company?.name || row.company_id)}: ${pp(value)}"><span class="contribution-bar ${value < 0 ? 'negative-bar' : 'positive-bar'}" style="left:${value < 0 ? 50 - Math.abs(value) / max * 48 : 50}%;width:${Math.abs(value) / max * 48}%"></span></div>
+        <span class="contribution-number ${value < 0 ? 'negative' : 'positive'}">${pp(value)}</span>
+      </div>`;
+    }).join('')}</div><div class="contribution-axis"><span>Negative</span><span>0</span><span>Positive</span></div>` : '<div class="empty-state"><h3>No contribution estimates yet</h3><p>Approve company exposure estimates to see contributions.</p></div>'}
+    <div class="contribution-footnote">${displayed.length} of ${known.length} available estimates · Ranked by absolute contribution${rows.length > known.length ? ' · ' + (rows.length - known.length) + ' unavailable estimates omitted' : ''}</div>`;
+}
+
 // ══════════════════════════════════════════════════════
 let _activeThemeId = null;
 
@@ -418,12 +441,8 @@ async function viewTheme(overrideThemeId) {
     : (_activeThemeId ? savedThemes.find(t => t.id === _activeThemeId) : null) || savedThemes.at(-1);
 
   setPageHeader('STEP 1', 'Theme Definition',
-    'Define an investment theme and its sub-theme taxonomy');
-  $('#page-actions').innerHTML = `
-    <div class="btn-group">
-      ${theme ? `<button class="btn btn-sm" id="btn-new-theme">+ New theme</button>` : ''}
-    </div>
-  `;
+    'Define the investment theme and approve a taxonomy');
+
 
   const themeFormHtml = `
     <form id="theme-form">
@@ -494,30 +513,18 @@ async function viewTheme(overrideThemeId) {
     <div class="theme-layout">
       ${savedThemesListHtml(savedThemes, theme)}
 
-      <!-- 1. Theme Scope Card (Top, full width) -->
-      <details class="panel theme-scope" open>
-        <summary class="panel-title">${theme ? `Edit theme scope` : 'New theme scope'}</summary>
-        <div class="panel-subtitle">
-          Only <code>theme_name</code> is required. The more detail you provide, the better the AI analysis.
-        </div>
+      <section class="panel theme-scope" aria-labelledby="theme-definition-heading">
+        <div class="section-heading"><div><div class="panel-title" id="theme-definition-heading">Theme definition</div><span class="text-muted text-small">Describe the investment opportunity and set clear boundaries for company analysis.</span></div><button class="btn btn-sm btn-secondary" id="btn-new-theme">+ New theme</button></div>
         ${themeFormHtml}
-      </details>
-
-      <!-- 2. Sub-theme Taxonomy Card (Below Theme Scope, full width) -->
+      </section>
       <div class="panel taxonomy-panel">
-        <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-          <div style="display:flex;align-items:center;gap:10px">
-            <span>Sub-theme taxonomy</span>
-            <span class="badge badge-neutral" id="taxonomy-counts">${tier1.length} Tier-1 · ${nodes.length - tier1.length} Tier-2 activities</span>
-          </div>
-        </div>
-        <div class="panel-subtitle">
-          Two levels: Theme → Tier-1 (broad area) → Tier-2 (specific activity, classification target). Click any node to edit or delete it, or add new nodes at any level.
-        </div>
+        <div class="section-heading"><div><div class="panel-title">Sub-theme taxonomy</div><span class="text-muted text-small" id="taxonomy-counts">${tier1.length} Tier-1 · ${nodes.length - tier1.length} activities</span></div><button class="btn btn-sm btn-secondary" id="btn-map-export">↓ Export mind map</button></div>
+        <div class="panel-subtitle">Explore the theme taxonomy. Click nodes to edit activities or add a level.</div>
         ${taxonomyHtml}
       </div>
     </div>`;
 
+  $('#btn-map-export').onclick = exportMindmap;
   updateTaxonomyMindmap();
   $('#taxonomy-json-area').addEventListener('input', updateTaxonomyMindmap);
   $('#theme-form [name="theme_name"]').addEventListener('input', updateTaxonomyMindmap);
@@ -781,7 +788,7 @@ function buildTaxonomyEditor(nodes) {
       <form id="taxonomy-node-form" onsubmit="return false;" style="margin-top:16px;">
         <input type="hidden" id="node-dialog-mode" value="edit">
         <input type="hidden" id="node-dialog-orig-id" value="">
-        
+
         <div class="form-group" id="node-dialog-parent-group" style="margin-bottom:14px;">
           <label class="field-label">Parent Tier-1 Area <span class="required">*</span></label>
           <select id="node-dialog-parent" class="form-select" style="width:100%;padding:8px 10px;border-radius:var(--radius-md);border:1px solid var(--slate-200);background:white;font:inherit;font-size:13px;"></select>
@@ -856,7 +863,7 @@ function updateTaxonomyMindmap() {
     const raw = $('#taxonomy-json-area')?.value || '[]';
     const nodes = JSON.parse(raw);
     if (!Array.isArray(nodes) || nodes.some(n => !n || typeof n !== 'object' || Array.isArray(n))) throw new Error();
-    
+
     // Update count badge in panel header
     const tier1 = nodes.filter(n => !n.parent_id);
     const tier2 = nodes.filter(n => n.parent_id);
@@ -1420,7 +1427,7 @@ function updateBreakdownStagedNote() {
 // ══════════════════════════════════════════════════════
 
 // Module-level staging area — survives re-renders within the view
-let _stagingRows = null;   // parsed + edited rows before confirmation
+let _stagingRows = null;   // parsed and edited holdings retained during this session
 let _stagingFile = null;   // file name for display
 
 async function viewPortfolio() {
@@ -1430,14 +1437,12 @@ async function viewPortfolio() {
   const companies = state.companies || [];
 
   // ── Two-phase layout: upload zone OR editable table ──────────────────────
-  // If we already have staged rows (from a previous parse or state.portfolio),
+  // If parsed rows are still in memory,
   // go straight to the edit table. Otherwise show the upload zone.
   const hasStaged  = _stagingRows && _stagingRows.length > 0;
   const hasImported = companies.length > 0;
 
-  $('#page-actions').innerHTML = hasImported
-    ? `<button class="btn btn-sm" id="btn-reimport">↑ Replace with new file</button>`
-    : '';
+
 
   if (!hasStaged && !hasImported) {
     renderUploadZone();
@@ -1447,6 +1452,21 @@ async function viewPortfolio() {
     // Already imported — show the company table + allow adding manually
     renderImportedView(companies);
   }
+}
+
+function placePortfolioActions() {
+  const panel = $('#page-content .panel');
+  if (!panel) return;
+  const title = panel.querySelector('.panel-title');
+  const action = '<button class="btn btn-sm btn-secondary" id="btn-portfolio-template">↓ Excel template</button>';
+  if (title && !title.closest('.section-heading')) {
+    const heading = document.createElement('div');
+    heading.className = 'section-heading';
+    title.before(heading);
+    heading.appendChild(title);
+    heading.insertAdjacentHTML('beforeend', action);
+  }
+  $('#btn-portfolio-template').onclick = downloadPortfolioTemplate;
 }
 
 // ─── Phase 1: Upload drop zone ────────────────────────────────────────────────
@@ -1522,6 +1542,7 @@ function renderUploadZone() {
       </div>
     </div>`;
 
+  placePortfolioActions();
   const dropZone = $('#excel-drop');
   const fileInput = $('#excel-file');
   let currentFile = null;
@@ -1727,7 +1748,7 @@ function renderEditTable(rows) {
           </span>
           <span>Reference total:
             <strong id="reference-total">${(refTotal*100).toFixed(2)}%</strong>
-            <span class="text-muted">(need not total 100%)</span>
+            <span class="text-muted">(must total 100% to save holdings)</span>
           </span>
         </div>
       </div>
@@ -1792,6 +1813,7 @@ function renderEditTable(rows) {
       </div>
     </div>`;
 
+  placePortfolioActions();
   bindEditTable(rows);
 }
 
@@ -1960,20 +1982,33 @@ function bindEditTable(rows) {
     run(async () => {
       const clean = rows.filter(r => !r.excluded && !r.error && !r.conflict);
       if (clean.length === 0) throw new Error('No valid rows to import.');
-      const res = await api('portfolio/import', {
-        name: name,
-        holdings_date: new Date().toISOString().slice(0, 10),
-        benchmark_name: 'MSCI Asia ex Japan',
-        rows: clean
-      });
+      for (const field of ['portfolio_wt', 'reference_wt']) {
+        if (clean.some(r => !Number.isFinite(r[field]) || r[field] < 0 || r[field] > 1) || Math.abs(clean.reduce((total, r) => total + r[field], 0) - 1) > 1e-6) {
+          throw new Error(`${field === 'portfolio_wt' ? 'Portfolio' : 'Reference'} weights must be valid and total 100% before saving holdings.`);
+        }
+      }
+      const holdings = [];
+      for (const r of clean) {
+        const company = await api('company', {
+          name: r.name,
+          bloomberg_ticker: r.ticker,
+          sedol: r.sedol,
+          jurisdiction: r.country
+        });
+        holdings.push({...r, company_id: company.id});
+      }
+      const date = rows._importDate || new Date().toISOString().slice(0, 10);
+      const batch = 'import_' + Date.now();
+      const holdingRows = (field, suffix) => holdings.map(r => ({snapshot_id: batch + suffix, as_of_date: date, security_id: r.ticker || r.sedol, company_id: r.company_id, weight: r[field]}));
+      await api('snapshot', {name, benchmark_name: rows._benchmarkName || 'Reference benchmark', portfolio: holdingRows('portfolio_wt', '_p'), benchmark: holdingRows('reference_wt', '_b')});
       await refresh();
-      notice(`"${name}" imported — ${clean.length} companies registered and snapshot created. Dashboard is ready.`);
+      notice(`"${name}" imported — ${clean.length} companies and holdings saved. Holdings remain available for editing.`);
       render();
     }, 'Importing holdings…');
   };
 }
 
-// Expose conflict resolution and row toggle to inline onclick handlers
+// Row actions called by the holdings table click handler.
 window.resolveConflict = function(idx, action) {
   if (!_stagingRows) return;
   const r = _stagingRows[idx];
@@ -1992,23 +2027,6 @@ window.toggleExclude = function(idx) {
   _stagingRows[idx].excluded = !_stagingRows[idx].excluded;
   renderEditTable(_stagingRows);
 };
-
-function bindNewRowInputs(container, rows, idx) {
-  container.querySelectorAll('.cell-edit').forEach(input => {
-    input.addEventListener('change', () => {
-      const field = input.dataset.field;
-      rows[idx][field] = field.endsWith('_wt') ? (parseWtInput(input.value) ?? 0) : input.value.trim();
-      if (field === 'portfolio_wt' || field === 'reference_wt') {
-        rows[idx].active_wt = (rows[idx].portfolio_wt||0) - (rows[idx].reference_wt||0);
-      }
-      if ((field === 'ticker' || field === 'sedol') && (rows[idx].ticker || rows[idx].sedol)) {
-        rows[idx].error = null;
-      }
-      refreshConfirmButton(rows);
-      updateTotals(rows);
-    });
-  });
-}
 
 function updateTotals(rows) {
   const clean    = rows.filter(r => !r.excluded);
@@ -2114,11 +2132,7 @@ function renderImportedView(companies) {
     }, 'Adding company…');
   };
 
-  // Reimport button in header (if rendered)
-  $('#btn-reimport')?.addEventListener('click', () => {
-    _stagingRows = null;
-    renderUploadZone();
-  });
+
 }
 
 // ══════════════════════════════════════════════════════
@@ -2131,10 +2145,7 @@ async function viewSources() {
   const sources   = state.sources   || [];
   const theme     = (state.themes  || []).filter(t=>t.approved).at(-1);
 
-  $('#page-actions').innerHTML = `
-    <button class="btn btn-primary" id="btn-search-docs" ${companies.length===0?'disabled':''}>
-      ✦ Search for documents
-    </button>`;
+
 
   const SOURCE_TYPES = [
     { value:'annual_report',         label:'Annual report',          default:true  },
@@ -2301,16 +2312,12 @@ async function viewSources() {
         <div class="panel">
           <div class="panel-title">Source library</div>
           <div class="panel-subtitle">${sources.length} documents · passages split at 5,000 chars per page</div>
-          ${sources.length > 0 ? sourceLibrary(sources) : `
-            <div class="empty-state" style="padding:32px 16px">
-              <div class="empty-icon">📄</div>
-              <h3>No sources yet</h3>
-              <p>Run an automated search or upload documents manually.</p>
-            </div>`}
+          ${sourceLibrary(sources)}
         </div>
       </div>
     </div>`;
 
+  bindSourceLibrary();
   $('#btn-run-search').onclick = () => run(async () => {
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
     const selectedTypes = Array.from($$('input[name="source_types"]:checked')).map(cb => cb.value);
@@ -2375,114 +2382,85 @@ async function viewSources() {
   };
 }
 
+const DOCUMENT_TYPES = [
+  ['annual_report', 'Annual report'], ['regulatory_filing', 'Regulatory filing (10-K/20-F)'],
+  ['investor_presentation', 'Investor presentation'], ['earnings_call', 'Earnings call transcript'],
+  ['company_website', 'Company website page'], ['sustainability_report', 'Sustainability report']
+];
+
+function sourceFinancialValue(docs, metric) {
+  const candidates = [...docs].sort((a, b) => b.publication_date.localeCompare(a.publication_date));
+  for (const source of candidates) {
+    const facts = (source.financial_facts || []).filter(f => f.metric === metric);
+    if (!facts.length) continue;
+    const values = new Set(facts.map(f => f.display));
+    if (values.size > 1) return '<span class="text-muted text-small">Multiple reported figures — see evidence</span>';
+    const fact = facts[0];
+    return `${esc(fact.display)}<div class="text-muted text-small">${esc(metric === 'revenue' ? fact.period : 'Published ' + fact.publication_date)} · ${esc(source.filename)} · p. ${fact.page}</div>`;
+  }
+  return '<span class="text-muted text-small">Not found in documents</span>';
+}
+
+function sourceDocumentCard(doc) {
+  const knownType = DOCUMENT_TYPES.some(([type]) => type === doc.source_type);
+  return `<details class="source-document"><summary><span class="source-file-icon" aria-hidden="true">▤</span><span class="source-file-title"><strong>${esc(doc.filename)}</strong><span>${esc(doc.period)} · ${esc(doc.publication_date)}</span></span><span class="source-file-chevron" aria-hidden="true">⌄</span></summary>
+    <div class="source-document-body">
+      ${(doc.financial_facts || []).map(f => `<div class="source-financial-fact"><strong>${f.metric === 'market_cap' ? 'Market cap' : 'Revenue'}: ${esc(f.display)}</strong><span>Page ${f.page} · ${esc(f.period)}</span><q>${esc(f.quote)}</q></div>`).join('')}
+      <form class="document-edit-form" data-id="${esc(doc.id)}"><label>Document name<input name="filename" required value="${esc(doc.filename)}"></label>
+        <label>Public URL<input name="url" type="url" value="${esc(doc.url || '')}"></label>
+        <label>Source type<select name="source_type">${!knownType ? `<option value="${esc(doc.source_type)}" selected>${doc.source_type === 'synthetic_example' ? 'Synthetic example' : 'Other document'}</option>` : ''}${DOCUMENT_TYPES.map(([v,l]) => `<option value="${v}" ${v === doc.source_type ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+        <button class="btn btn-sm">Save document details</button></form>
+      ${(doc.warnings || []).map(w => `<p class="text-small">${esc(w)}</p>`).join('')}
+      ${(doc.evidence || []).map(e => `<details class="source-evidence"><summary>Page ${e.page} · View passage</summary><p class="evidence-passage">${esc(e.passage)}</p></details>`).join('')}
+    </div></details>`;
+}
+
+function sourceTypeCard(label, docs, synthetic = false) {
+  return `<section class="source-type-card${synthetic ? ' source-synthetic-card' : ''}"><div class="source-category-heading"><h4>${esc(label)}</h4><span class="source-document-count">${docs.length} ${docs.length === 1 ? 'document' : 'documents'}</span></div>${synthetic ? '<p class="text-muted text-small">Demonstration documents</p>' : ''}${docs.length ? docs.map(sourceDocumentCard).join('') : '<div class="source-category-empty">No documents uploaded</div>'}</section>`;
+}
+
 function sourceLibrary(sources) {
-  const rowMap = new Map((state.portfolio_imports?.[0]?.rows || []).map(r => [r.company_id, r]));
-  const companies = (state.companies || []);
+  return `<div class="table-wrap"><table><thead><tr><th>Company</th><th>Weight</th><th>Market cap</th><th>Revenue</th><th>Documents</th></tr></thead><tbody>
+  ${(state.companies || []).map(c => {
+    const docs = sources.filter(s => s.company_id === c.id);
+    const snapshot = (state.snapshots || []).at(-1);
+    const weights = (snapshot?.portfolio || []).filter(r => r.company_id === c.id);
+    const weight = snapshot ? weights.reduce((total, r) => total + Number(r.weight), 0) : null;
+    const synthetic = docs.filter(d => d.source_type === 'synthetic_example');
+    const other = docs.filter(d => d.source_type !== 'synthetic_example' && !DOCUMENT_TYPES.some(([t]) => t === d.source_type));
+    return `<tr class="source-company-row" data-company="${esc(c.id)}" tabindex="0" role="button" aria-expanded="false">
+      <td><span class="source-row-chevron" aria-hidden="true">▸</span> ${esc(c.name)}</td><td>${pct(weight)}</td><td>${sourceFinancialValue(docs, 'market_cap')}</td><td>${sourceFinancialValue(docs, 'revenue')}</td><td>${docs.length}</td></tr>
+      <tr class="source-expanded-row" data-company-details="${esc(c.id)}" hidden><td colspan="5"><div class="source-category-grid">
+      ${DOCUMENT_TYPES.map(([type,label]) => sourceTypeCard(label, docs.filter(d => d.source_type === type))).join('')}
+      ${synthetic.length ? sourceTypeCard('Synthetic examples', synthetic, true) : ''}
+      ${other.length ? sourceTypeCard('Other documents', other) : ''}
+      </div></td></tr>`;
+  }).join('') || '<tr><td colspan="5">Import companies to build the source library.</td></tr>'}</tbody></table></div>`;
+}
 
-  // Group all ingested sources under their respective company
-  const companyGroups = companies.map((c, idx) => {
-    const compSources = sources.filter(s => s.company_id === c.id);
-    const row = rowMap.get(c.id) || {};
-    return {
-      index: idx + 1,
-      comp: c,
-      row: row,
-      sources: compSources
-    };
+function bindSourceLibrary() {
+  $$('.source-company-row').forEach(row => {
+    const toggle = () => { const detail = [...document.querySelectorAll('[data-company-details]')].find(el => el.dataset.companyDetails === row.dataset.company); detail.hidden = !detail.hidden; row.setAttribute('aria-expanded', String(!detail.hidden)); };
+    row.onclick = toggle;
+    row.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } };
   });
+  $$('.document-edit-form').forEach(form => form.onsubmit = e => { e.preventDefault(); run(async () => {
+      await api('source/update', {id: form.dataset.id, ...Object.fromEntries(new FormData(form))});
+      await refresh();
+      const companyId = state.sources.find(s => s.id === form.dataset.id).company_id;
+      await viewSources();
+      [...document.querySelectorAll('.source-company-row')].find(r => r.dataset.company === companyId)?.click();
+      notice('Details saved.');
+    }, 'Saving details…'); });
+}
 
-  return `
-    <div style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <div style="flex:1;min-width:240px;position:relative">
-        <input type="text" id="src-lib-filter" placeholder="🔍 Search 80 portfolio companies (name, ticker, sector, country)..."
-          oninput="filterSourceLibrary(this.value)"
-          style="width:100%;padding:8px 12px;border:1px solid var(--slate-300);border-radius:6px;font-size:13px">
-      </div>
-      <button class="btn btn-sm btn-ghost" onclick="toggleAllSources()" id="btn-toggle-all-sources" style="font-size:12px">
-        Expand all
-      </button>
-    </div>
-
-    <div class="accordion-list" id="sources-accordion-list">
-      ${companyGroups.map(({ index, comp, row, sources: compSources }) => {
-        const displayName = comp.name;
-        const ticker = comp.bloomberg_ticker || row.bloomberg_ticker || '';
-        const sector = row.sector || '';
-        const country = row.country || comp.jurisdiction || '';
-        const portWt = row.portfolio_weight != null ? (row.portfolio_weight * 100).toFixed(2) + '%' : null;
-        const searchTerms = `${displayName} ${ticker} ${sector} ${country}`.toLowerCase();
-        const hasDocs = compSources.length > 0;
-
-        return `
-          <div class="accordion source-card-item" id="src-comp-${esc(comp.id)}" data-search="${esc(searchTerms)}">
-            <div class="accordion-header">
-              <div class="flex-1" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                <span class="text-muted text-small text-mono" style="min-width:28px">#${index}</span>
-                <strong style="font-size:13.5px;color:var(--slate-800)">${esc(displayName)}</strong>
-                ${ticker ? `<span class="ticker" style="font-size:11px">${esc(ticker)}</span>` : ''}
-                ${sector ? `<span class="badge neutral" style="font-size:11px">${esc(sector)}</span>` : ''}
-                ${country ? `<span class="text-muted text-small">${esc(country)}</span>` : ''}
-              </div>
-              <div class="flex items-center gap-8">
-                ${portWt ? `<span class="text-muted text-small" style="font-family:monospace">Wt: ${portWt}</span>` : ''}
-                ${hasDocs
-                  ? `<span class="badge green" style="font-size:11px">${compSources.length} ${compSources.length===1?'document':'documents'} ✓</span>`
-                  : `<span class="badge amber" style="font-size:11px">No docs</span>`}
-              </div>
-              <span class="chevron">▾</span>
-            </div>
-            <div class="accordion-body">
-              ${hasDocs ? `
-                <div style="display:flex;flex-direction:column;gap:14px">
-                  ${compSources.map((doc, docIdx) => {
-                    const fullText = (doc.evidence || []).map(e => e.passage).join('\n\n');
-                    const registryName = doc.short_registry || doc.registry || 'Official Regional Registry';
-                    const docTitle = doc.title || doc.filename;
-
-                    return `
-                      <div style="background:#f8fafc;border:1px solid var(--slate-200);border-radius:8px;padding:14px;box-shadow:0 1px 2px rgba(0,0,0,0.02)">
-                        <!-- Document Header & Source Link -->
-                        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:10px;flex-wrap:wrap">
-                          <div style="flex:1;min-width:260px">
-                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                              <span class="badge neutral" style="font-size:11px;font-weight:600">Doc ${docIdx + 1}: ${esc(doc.source_type || 'Annual Report')}</span>
-                              <strong style="font-size:13px;color:var(--slate-800)">${esc(docTitle)}</strong>
-                            </div>
-                            <div class="text-muted text-small" style="margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">
-                              <span>Period: <strong>${esc(doc.period || 'FY2025')}</strong></span>
-                              <span>Filing Date: ${esc(doc.publication_date)}</span>
-                              <span>SHA-256: <code style="font-size:11px">${esc((doc.sha256||'').slice(0, 16))}…</code></span>
-                            </div>
-                          </div>
-
-                          <!-- Direct Link to where document came from -->
-                          <div style="display:flex;gap:8px;align-items:center">
-                            ${doc.url ? `
-                              <a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer"
-                                class="btn btn-sm"
-                                style="background:#f0fdf4;border:1px solid #bbf7d0;color:#166534;font-size:11.5px;font-weight:600;display:inline-flex;align-items:center;gap:5px;padding:4px 10px;text-decoration:none">
-                                <span>🏛</span> ${esc(registryName)} ↗
-                              </a>` : ''}
-                            <button class="btn btn-sm btn-primary" onclick="openDocModal('${esc(doc.id)}')" style="font-size:11.5px;padding:4px 10px">
-                              🔍 Full Reader
-                            </button>
-                          </div>
-                        </div>
-
-                        <!-- Direct Document Passage Viewer -->
-                        <div style="background:#ffffff;border:1px solid var(--slate-200);border-radius:6px;padding:14px;font-family:Consolas, Monaco, monospace;font-size:12px;line-height:1.65;color:#1e293b;white-space:pre-wrap;max-height:300px;overflow-y:auto">
-${esc(fullText)}
-                        </div>
-                      </div>`;
-                  }).join('')}
-                </div>` : `
-                <div class="empty-state" style="padding:16px;text-align:center">
-                  <div class="text-muted text-small">No source documents uploaded yet for ${esc(displayName)}.</div>
-                </div>`}
-            </div>
-          </div>`;
-      }).join('')}
-    </div>`;
+let analysisTab = 'analysis';
+async function viewAnalysisWorkflow() {
+  if (analysisTab === 'review') await viewReview(); else await viewAnalysis();
+  setPageHeader('STEP 4', 'Analysis & Review', 'Analyze company evidence and review proposed cases');
+  $('#page-content').insertAdjacentHTML('afterbegin', `<div class="btn-group workflow-tabs"><button class="btn ${analysisTab === 'analysis' ? 'btn-primary' : ''}" id="tab-analysis">Analysis queue</button><button class="btn ${analysisTab === 'review' ? 'btn-primary' : ''}" id="tab-review">Review cases</button></div>`);
+  $('#tab-analysis').onclick = () => { analysisTab = 'analysis'; render(); };
+  $('#tab-review').onclick = () => { analysisTab = 'review'; render(); };
 }
 
 // Global modal and library helpers
@@ -2548,7 +2526,7 @@ async function viewAnalysis() {
   const theme     = (state.themes||[]).filter(t=>t.approved).at(-1);
   const companies = state.companies || [];
   const sources   = state.sources   || [];
-  const cases     = state.cases     || [];
+  const cases     = (state.cases || []).filter(c => c.theme_id === theme?.id);
   const pending   = cases.filter(c => c.review_status === 'needs_review').length;
 
   const companyProgress = companies.map(c => {
@@ -2563,20 +2541,16 @@ async function viewAnalysis() {
     return { c, hasSrc, status, color };
   });
 
-  $('#page-actions').innerHTML = `
-    <div class="text-muted text-small">${state.ai_configured
-      ? `${state.calls_used} / ${state.call_cap} AI calls used`
-      : `<span style="color:var(--amber-600)">⚠ AI not configured</span>`}
-    </div>`;
+
 
   $('#page-content').innerHTML = `
     <div class="grid-2" style="align-items:start">
 
       <!-- Company analysis queue -->
       <div class="panel">
-        <div class="panel-title">Analysis queue</div>
-        <div class="panel-subtitle">
-          ${companyProgress.length} companies · ${pending} cases awaiting review
+        <div class="section-heading card-heading">
+          <div><div class="panel-title">Analysis queue</div><span class="text-muted text-small">${companyProgress.length} companies · ${pending} cases awaiting review<br>${state.ai_configured ? `${state.calls_used} / ${state.call_cap} AI calls used` : 'AI not configured'}</span></div>
+          <button class="btn btn-primary btn-sm" id="btn-analyze-all" ${!theme || !state.ai_configured ? 'disabled' : ''}>Analyze all</button>
         </div>
         ${companyProgress.length > 0 ? `
           <div class="table-wrap">
@@ -2590,7 +2564,7 @@ async function viewAnalysis() {
                     <td>${statusDot(color, status)}</td>
                     <td>
                       ${hasSrc ? `<button class="btn btn-sm btn-primary"
-                        onclick="openAnalysisPanel('${esc(c.id)}')">
+                        data-open-analysis="${esc(c.id)}">
                         ${state.ai_configured ? '✧ Analyse' : 'Manual case'}
                       </button>` : `<button class="btn btn-sm" data-goto="sources">Upload docs</button>`}
                     </td>
@@ -2629,6 +2603,21 @@ async function viewAnalysis() {
           Manual case entry is always available in the <a href="#" data-goto="review">Review</a> view.
         </div>
       </div>` : ''}`;
+  $('#btn-analyze-all').onclick = () => run(async () => {
+    const failures = []; let completed = 0, skipped = 0;
+    for (const company of companies) {
+      const eligible = sources.filter(s => s.company_id === company.id && s.publication_date <= (theme.cutoff || new Date().toISOString().slice(0,10)));
+      const evidence = eligible.flatMap(s => s.evidence || []);
+      if (!evidence.length) { skipped++; continue; }
+      if (evidence.reduce((n,e) => n + e.passage.length, 0) > 60000) { failures.push(company.name + ': select relevant evidence manually (over 60,000 characters)'); continue; }
+      showLoading(`Analyzing ${company.name}…`);
+      try { await api('analyze', {company_id: company.id, theme_id: theme.id, evidence_ids: evidence.map(e => e.evidence_id)}); completed++; }
+      catch (e) { failures.push(company.name + ': ' + e.message); }
+    }
+    await refresh(); await render();
+    notice(`${completed} companies analyzed. ${skipped ? skipped + ' skipped (no eligible evidence). ' : ''}${failures.length ? failures.join('; ') : completed ? 'Results are ready in Review cases.' : 'Upload eligible source documents to analyze companies.'}`, failures.length ? 'warning' : 'success');
+  }, 'Analyzing companies…');
+
 }
 
 function analysisSelectPanel(selectedCompanyId, companies, sources, state) {
@@ -2763,7 +2752,7 @@ function bindAnalysisPanel(companyId) {
     const ids = [...allCheckboxes()].filter(c=>c.checked).map(c=>c.value);
     if (ids.length === 0) return notice('Select at least one evidence passage.', 'error');
     run(async () => {
-      const result = await api('analyze', { theme_id: theme.id, company_id: companyId, evidence_ids: ids });
+      await api('analyze', { theme_id: theme.id, company_id: companyId, evidence_ids: ids });
       await refresh();
       notice('Analysis complete. Case created and awaiting review.', 'success');
       setView('review');
@@ -2785,9 +2774,7 @@ async function viewReview() {
 
   const companyName = id => companies.find(c=>c.id===id)?.name || id;
 
-  $('#page-actions').innerHTML = pending.length
-    ? `<span class="badge badge-amber">${pending.length} awaiting review</span>`
-    : `<span class="badge badge-green">All cases reviewed</span>`;
+
 
   // Pick selected case
   const selectedId = cases.find(c=>c.review_status==='needs_review')?.id || cases.at(-1)?.id || '';
@@ -2805,7 +2792,7 @@ async function viewReview() {
               <thead><tr><th>Company</th><th>Exposure</th><th>Confidence</th><th>Status</th><th></th></tr></thead>
               <tbody>
                 ${cases.slice().reverse().map(c => `
-                  <tr style="cursor:pointer" onclick="openCase('${esc(c.id)}')">
+                  <tr style="cursor:pointer" data-open-case="${esc(c.id)}">
                     <td class="td-company">${esc(companyName(c.company_id))}</td>
                     <td class="td-num">${pct(c.estimate?.point)}</td>
                     <td>${confidenceBadge(c.classification_confidence)}</td>
@@ -3174,7 +3161,7 @@ async function viewDashboard() {
 
   d.companies.forEach(row => {
     if (row.company_id === 'CASH') return;
-    const c = cases.find(x => x.company_id === row.company_id && x.review_status === 'approved');
+    const c = cases.find(x => x.id === row.exposure?.case_id) || cases.filter(x => x.company_id === row.company_id && x.theme_id === theme.id && x.review_status === 'approved').at(-1);
     if (!c) return;
     const w = row.weights.portfolio;
     Object.entries(c.estimate?.subthemes||{}).forEach(([nid, v]) => {
@@ -3185,10 +3172,14 @@ async function viewDashboard() {
     });
   });
 
-  $('#page-actions').innerHTML = `
-    <button class="btn" id="btn-export-dash">↓ Export</button>`;
+
 
   $('#page-content').innerHTML = `
+    <div class="dashboard-view">
+    <div class="panel body-actions section-title-actions dashboard-toolbar">
+      <strong>Portfolio exposure · ${esc(snapshot.name || 'Holdings snapshot')}</strong>
+      <div class="btn-group"><button class="btn btn-secondary" id="btn-reference">Reference: ${esc(snapshot.benchmark_name || snapshot._benchmarkName || 'Benchmark')}</button><button class="btn btn-primary" id="btn-export-dash">↓ Export analysis</button></div>
+    </div>
     <!-- Top-level exposure metrics -->
     <div class="metric-grid">
       ${metricTile('Portfolio exposure', pct(s.portfolio.point), `Bounds: ${pctRange(s.portfolio)}`, '')}
@@ -3197,24 +3188,16 @@ async function viewDashboard() {
       ${metricTile('Coverage', pct(d.coverage.portfolio), `Benchmark: ${pct(d.coverage.benchmark)}`, '')}
     </div>
 
-    <div class="grid-2">
-      <!-- Waterfall chart -->
-      <div class="panel">
-        <div class="panel-title">Active exposure contributions</div>
-        <div class="panel-subtitle">
-          (Portfolio weight − Reference weight) × Company exposure · sorted by absolute size
-        </div>
-        ${d.companies.length > 0 ? waterfallChart(d.companies.slice(0,8), {companies}) : '<div class="empty-state"><p>No contributions available.</p></div>'}
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--slate-400);margin-top:8px;padding:0 180px 0 0">
-          <span>← Underweight detractor</span>
-          <span>Overweight contributor →</span>
-        </div>
+    <div class="grid-2 dashboard-insights">
+      <div class="panel contribution-panel">
+        <div class="section-heading"><div><div class="panel-title">Active exposure contributions</div><div class="text-muted text-small">Largest company contributions vs. the reference benchmark</div></div><span class="contribution-unit">Percentage points</span></div>
+        ${activeContributionChart(d.companies, companies)}
       </div>
 
       <!-- Sub-theme breakdown -->
       <div class="panel">
-        <div class="panel-title">Sub-theme exposure breakdown</div>
-        <div class="panel-subtitle">Portfolio weight × company Tier-2 allocation. Tier-1 totals roll up.</div>
+        <div class="panel-title">Sub-theme exposure</div>
+        <div class="panel-subtitle">Select a sub-theme to explore its companies. Tier-1 includes its Tier-2 activities.</div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -3228,7 +3211,7 @@ async function viewDashboard() {
                 const t1Pt   = children.reduce((s,n)=>s+(subthemeExposure[n.node_id]?.point||0),0);
                 return `
                   <tr style="background:var(--slate-50)">
-                    <td><strong>${esc(t1.name)}</strong></td>
+                    <td><button class="btn btn-sm subtheme-select" aria-pressed="false" data-subtheme="${esc(t1.node_id)}">${esc(t1.name)}</button></td>
                     <td class="td-num">${pct(t1Low)}</td>
                     <td class="td-num">${pct(t1High)}</td>
                     <td class="td-num">${pct(t1Pt)}</td>
@@ -3236,7 +3219,7 @@ async function viewDashboard() {
                   ${children.map(t2 => {
                     const v = subthemeExposure[t2.node_id]||{lower:0,upper:0,point:0};
                     return `<tr>
-                      <td style="padding-left:28px">↳ ${esc(t2.name)}</td>
+                      <td style="padding-left:28px"><button class="btn btn-sm subtheme-select" aria-pressed="false" data-subtheme="${esc(t2.node_id)}">↳ ${esc(t2.name)}</button></td>
                       <td class="td-num text-muted">${pct(v.lower)}</td>
                       <td class="td-num text-muted">${pct(v.upper)}</td>
                       <td class="td-num text-muted">${pct(v.point)}</td>
@@ -3250,10 +3233,14 @@ async function viewDashboard() {
     </div>
 
     <!-- Company table -->
-    <div class="panel">
-      <div class="panel-title">Company-level exposure</div>
+    <div class="panel" id="dashboard-companies">
+      <div class="section-heading"><div><div class="panel-title" id="company-exposure-title">Company-level exposure</div><div class="text-muted text-small" id="company-filter-summary" role="status" aria-live="polite">${d.companies.length} companies · All sub-themes</div></div><button class="btn btn-sm btn-secondary" id="btn-clear-subtheme" hidden>Show all companies</button></div>
+      <div class="company-filter-banner" id="company-filter-banner" hidden>
+        <div><span class="filter-eyebrow">FILTER ACTIVE</span><strong id="company-filter-name"></strong><span id="company-filter-count"></span></div>
+        <button class="btn btn-sm" id="btn-remove-filter">✕ Clear filter</button>
+      </div>
       <div class="panel-subtitle">
-        Approved results only · ${esc(snapshot?.portfolio?.[0]?.as_of_date||'')} · 
+        Approved results only · ${esc(snapshot?.portfolio?.[0]?.as_of_date||'')} ·
         Unassessed companies: lower=0%, upper=100%, point=—
       </div>
       <div class="table-wrap">
@@ -3270,11 +3257,11 @@ async function viewDashboard() {
               <th>Status</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="dashboard-company-rows">
             ${d.companies.map(row => {
               const name = companyName(row.company_id);
               const ap = row.contributions.active.point;
-              return `<tr>
+              return `<tr data-dashboard-company="${esc(row.company_id)}">
                 <td class="td-company">${esc(name)}<span class="ticker">${esc(row.company_id)}</span></td>
                 <td class="td-num">${pct(row.weights.portfolio)}</td>
                 <td class="td-num">${pct(row.weights.benchmark)}</td>
@@ -3300,7 +3287,51 @@ async function viewDashboard() {
         Bounds are assumption-based limits, not statistical confidence intervals.
         Confidence scores use a non-probabilistic ordinal rubric (high/medium/low).
       </div>
-    </div>`;
+    </div></div>`;
+
+  const allRows = [...document.querySelectorAll('[data-dashboard-company]')];
+  const emptyRow = document.createElement('tr');
+  emptyRow.innerHTML = '<td colspan="8" class="dashboard-empty">No approved companies match this selection.</td>';
+  emptyRow.hidden = true;
+  $('#dashboard-company-rows').appendChild(emptyRow);
+  const showCompanies = (title, rows, selection = null) => {
+    const ids = new Set(rows.map(r => r.company_id));
+    allRows.forEach(row => { row.hidden = !ids.has(row.dataset.dashboardCompany); });
+    emptyRow.hidden = rows.length > 0;
+    $('#company-exposure-title').textContent = 'Company-level exposure';
+    $('#company-filter-summary').textContent = `${rows.length} ${rows.length === 1 ? 'company' : 'companies'} · ${selection ? 'Sub-theme: ' + title : title === 'Company-level exposure' ? 'All sub-themes' : 'Reference: ' + title}`;
+    $('#btn-clear-subtheme').hidden = false;
+    $('#company-filter-banner').hidden = false;
+    $('#company-filter-name').textContent = (selection ? 'Sub-theme: ' : 'Benchmark: ') + title;
+    $('#company-filter-count').textContent = `${rows.length} of ${d.companies.length} companies shown`;
+    $('#dashboard-companies').classList.add('has-active-filter');
+    $$('[data-subtheme]').forEach(button => {
+      const selected = button.dataset.subtheme === selection;
+      button.setAttribute('aria-pressed', String(selected));
+      button.closest('tr').classList.toggle('subtheme-selected', selected);
+    });
+  };
+  $$('[data-subtheme]').forEach(button => button.onclick = () => {
+    const id = button.dataset.subtheme;
+    const ids = new Set([id]);
+    for (let size = 0; size !== ids.size;) {
+      size = ids.size;
+      nodes.forEach(node => { if (ids.has(node.parent_id)) ids.add(node.node_id); });
+    }
+    showCompanies(nodes.find(n => n.node_id === id)?.name || id, d.companies.filter(row => {
+      const c = cases.filter(c => c.company_id === row.company_id && c.theme_id === theme.id && c.review_status === 'approved').at(-1);
+      return c?.case?.units?.some(u => (u.node_ids || []).some(n => ids.has(n)) || Object.entries(u.allocations || {}).some(([n, share]) => ids.has(n) && share > 0));
+    }), id);
+  });
+  $('#btn-reference').onclick = () => showCompanies(snapshot.benchmark_name || 'Reference benchmark', d.companies.filter(r => r.weights.benchmark > 0));
+  $('#btn-clear-subtheme').onclick = () => {
+    showCompanies('Company-level exposure', d.companies);
+    $('#company-filter-summary').textContent = `${d.companies.length} companies · All sub-themes`;
+    $('#btn-clear-subtheme').hidden = true;
+    $('#company-filter-banner').hidden = true;
+    $('#dashboard-companies').classList.remove('has-active-filter');
+  };
+  $('#btn-remove-filter').onclick = () => $('#btn-clear-subtheme').click();
 
   $('#btn-export-dash')?.addEventListener('click', () => run(async () => {
     const r = await fetch('/api/export', {
@@ -3502,4 +3533,57 @@ function setPageHeader(eyebrow, title, subtitle) {
   if (t) t.textContent = title;
   if (s) s.textContent = subtitle || '';
   $('#page-actions').innerHTML = '';
+  $('#page-content').classList.toggle('refined-actions', title !== 'Overview');
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a'); link.href = url; link.download = filename;
+  link.click(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function downloadPortfolioTemplate() {
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ['Company', 'Bloomberg ticker', 'SEDOL', 'Country', 'Sector', 'Portfolio wt', 'Reference wt', 'Active wt']
+  ]);
+  sheet['!cols'] = [32, 24, 14, 18, 24, 18, 18, 18].map(wch => ({wch}));
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Portfolio holdings');
+  XLSX.writeFile(workbook, 'portfolio-template.xlsx');
+}
+
+function exportMindmap() {
+  let nodes;
+  try { nodes = JSON.parse($('#taxonomy-json-area').value); if (!Array.isArray(nodes)) throw Error(); }
+  catch { notice('Fix the taxonomy JSON before exporting.', 'error'); return; }
+  const roots = nodes.filter(n => !n.parent_id);
+  if (!roots.length) { notice('Add taxonomy nodes before exporting.', 'error'); return; }
+  const title = $('#theme-form [name="theme_name"]').value || 'Investment theme';
+  const width = 1000; let y = 125;
+  const xml = value => esc(value).replace(/&#39;/g, '&apos;');
+  const card = (label, x, top, w, fill) => {
+    const words = String(label || '').split(/\s+/); const lines = []; let line = '';
+    for (const word of words) { if ((line + ' ' + word).length > Math.floor(w / 8) && line) { lines.push(line); line = ''; } line += (line ? ' ' : '') + word; }
+    if (line) lines.push(line);
+    const h = Math.max(54, lines.length * 20 + 20);
+    return {h, svg: `<rect x="${x}" y="${top}" width="${w}" height="${h}" rx="9" fill="${fill}" stroke="#b3ddd8"/><text x="${x+w/2}" y="${top+25}" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#102e35">${lines.map((l,i) => `<tspan x="${x+w/2}" dy="${i ? 20 : 0}">${xml(l)}</tspan>`).join('')}</text>`};
+  };
+  let content = '';
+  const rootCard = card(title, 300, 20, 400, '#b3ddd8'); content += rootCard.svg;
+  y = Math.max(y, 20 + rootCard.h + 45);
+  for (const root of roots) {
+    const parent = card(root.name, 300, y, 400, '#e6f4f2');
+    content += `<path d="M500 ${20+rootCard.h} H30 V${y+parent.h/2} H300" fill="none" stroke="#b3ddd8" stroke-width="2"/>` + parent.svg;
+    const childTop = y + parent.h + 30;
+    const children = nodes.filter(n => n.parent_id === root.node_id);
+    let rowTop = childTop, rowHeight = 0;
+    children.forEach((child, index) => {
+      if (index && index % 3 === 0) { rowTop += rowHeight + 20; rowHeight = 0; }
+      const x = 70 + (index % 3) * 300;
+      const leaf = card(child.name, x, rowTop, 260, '#ffffff'); rowHeight = Math.max(rowHeight, leaf.h);
+      content += `<path d="M500 ${y+parent.h} V${rowTop-12} H${x+130} V${rowTop}" fill="none" stroke="#b3ddd8" stroke-width="2"/>` + leaf.svg;
+    });
+    y = children.length ? rowTop + rowHeight + 40 : childTop + 20;
+  }
+  downloadBlob(new Blob([`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${y}" viewBox="0 0 ${width} ${y}"><rect width="100%" height="100%" fill="#f5f7f8"/>${content}</svg>`], {type:'image/svg+xml'}), 'theme-mindmap.svg');
 }

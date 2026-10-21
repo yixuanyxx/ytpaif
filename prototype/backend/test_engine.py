@@ -129,9 +129,12 @@ class EngineCalculations(unittest.TestCase):
         n_cycle[0]['parent_id'] = 'hardware'
         with self.assertRaises(ValueError):
             engine.taxonomy(n_cycle)
-        # Exceeds 2 subtheme levels (grandparent check)
+        # Three tiers are supported; a fourth tier exceeds the limit.
         n_deep = copy.deepcopy(NODES)
         n_deep.append({'node_id': 'subchip', 'parent_id': 'chips', 'name': 'Subchip',
+                       'definition': 'Third tier', 'examples': []})
+        self.assertEqual(engine.taxonomy(n_deep), {'subchip'})
+        n_deep.append({'node_id': 'fourth', 'parent_id': 'subchip', 'name': 'Fourth',
                        'definition': 'Too deep', 'examples': []})
         with self.assertRaises(ValueError):
             engine.taxonomy(n_deep)

@@ -54,7 +54,7 @@ Data is stored in `prototype/database/research.sqlite` and uploaded sources in `
 ## Prototype limitations
 
 - Automated document search currently displays a simulated success message; it does not retrieve or ingest documents. Use manual uploads.
-- Confirming a portfolio registers companies. Edited holdings and file metadata remain in browser memory for the current session; this import flow does not yet save a portfolio/benchmark snapshot. Dashboard calculations require a saved snapshot, available through the snapshot API or demo data.
+- Confirming a portfolio saves companies and a portfolio/benchmark snapshot, including the benchmark name. Both sets of weights must total 100%. Editable draft rows remain in browser memory during the session; saved snapshots persist in SQLite.
 - Country is saved as company jurisdiction; sector remains in the editable session data.
 - No multi-user authentication or encrypted storage.
 
@@ -79,3 +79,11 @@ python evaluate.py labelled_examples.json
 ```
 
 Use independently reviewed development and held-out examples. UI sample evaluation data is synthetic and randomly generated.
+
+## Workflow additions
+
+- Step 1 offers a standalone SVG mind-map export. The Excel holdings template is available in Step 2.
+- Step 2 provides a portfolio-only Excel template with the expected headers on its first worksheet, ready to fill and import.
+- Step 3 groups sources by company in a table. Expand a company to see all six source categories, edit document names/URLs/categories, and view source-derived market cap and revenue with document/page citations. Extraction recognises explicit currency-qualified market-cap and total/consolidated/group revenue statements; ambiguous tables and missing figures remain unresolved. Weight is aggregated by company from the latest saved portfolio snapshot. Exposure arithmetic still uses reviewed revenue evidence.
+- Step 4 combines Analysis and Review tabs. Analyze all processes companies with eligible sources sequentially under the configured AI call cap. Companies with over 60,000 evidence characters require manual passage selection; failures are reported per company.
+- Dashboard sub-theme buttons show classified companies in the current holdings universe using approved cases for the selected theme. The reference button opens benchmark constituents and uses the saved benchmark name where available.
