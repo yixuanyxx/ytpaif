@@ -1434,3 +1434,7 @@ tr:hover td { background: var(--slate-50); }
   .sidebar-brand { padding: 20px 12px; }
   .sidebar-brand .tagline { display: none; }
 }
+
+.expected-format-heading { align-items: flex-start; margin-bottom: 18px; }
+.expected-format-heading .panel-title { margin-bottom: 4px; }
+.expected-format-heading .panel-subtitle { margin-bottom: 0; }

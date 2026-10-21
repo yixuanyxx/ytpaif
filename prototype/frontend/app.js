@@ -1454,21 +1454,6 @@ async function viewPortfolio() {
   }
 }
 
-function placePortfolioActions() {
-  const panel = $('#page-content .panel');
-  if (!panel) return;
-  const title = panel.querySelector('.panel-title');
-  const action = '<button class="btn btn-sm btn-secondary" id="btn-portfolio-template">↓ Excel template</button>';
-  if (title && !title.closest('.section-heading')) {
-    const heading = document.createElement('div');
-    heading.className = 'section-heading';
-    title.before(heading);
-    heading.appendChild(title);
-    heading.insertAdjacentHTML('beforeend', action);
-  }
-  $('#btn-portfolio-template').onclick = downloadPortfolioTemplate;
-}
-
 // ─── Phase 1: Upload drop zone ────────────────────────────────────────────────
 function renderUploadZone() {
   $('#page-content').innerHTML = `
@@ -1522,8 +1507,7 @@ function renderUploadZone() {
       </div>
 
       <div class="panel">
-        <div class="panel-title">Expected format</div>
-        <div class="panel-subtitle">Matches the Schroders sample Excel template.</div>
+        <div class="section-heading expected-format-heading"><div><div class="panel-title">Expected format</div><div class="panel-subtitle">Matches the Schroders sample Excel template.</div></div><button class="btn btn-sm btn-secondary" id="btn-portfolio-template">↓ Download Excel template</button></div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Column</th><th>Required</th><th>Notes</th></tr></thead>
@@ -1542,7 +1526,7 @@ function renderUploadZone() {
       </div>
     </div>`;
 
-  placePortfolioActions();
+  $('#btn-portfolio-template').onclick = downloadPortfolioTemplate;
   const dropZone = $('#excel-drop');
   const fileInput = $('#excel-file');
   let currentFile = null;
@@ -1813,7 +1797,6 @@ function renderEditTable(rows) {
       </div>
     </div>`;
 
-  placePortfolioActions();
   bindEditTable(rows);
 }
 
