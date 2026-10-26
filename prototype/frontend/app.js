@@ -3985,22 +3985,117 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-function downloadPortfolioTemplate() {
+async function downloadPortfolioTemplate() {
+  try {
+    const res = await fetch('/portfolio-template.xlsx');
+    if (res.ok) {
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'portfolio-template.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { a.remove(); URL.revokeObjectURL(a.href); }, 2000);
+      notice('Excel template downloaded (80 stocks).', 'info');
+      return;
+    }
+  } catch (err) {
+    // Fallback to SheetJS below
+  }
+
   if (typeof XLSX === 'undefined') {
     notice('Excel export library (SheetJS) is not loaded. Refresh and try again.', 'error');
     return;
   }
   const workbook = XLSX.utils.book_new();
-  const sheet = XLSX.utils.aoa_to_sheet([
-    ['Company', 'Bloomberg ticker', 'SEDOL', 'Country', 'Sector', 'Portfolio wt', 'Reference wt', 'Active wt'],
-    ['Taiwan Semiconductor Manufacturing', '2330 TT Equity', '6889106', 'Taiwan', 'Information Technology', 0.12, 0.08, 0.04],
-    ['Samsung Electronics', '005930 KS Equity', '6771720', 'South Korea', 'Information Technology', 0.09, 0.07, 0.02],
-    ['Tencent Holdings', '700 HK Equity', 'B01FLR7', 'China', 'Communication Services', 0.08, 0.06, 0.02]
-  ]);
-  sheet['!cols'] = [34, 20, 12, 14, 24, 14, 14, 14].map(wch => ({wch}));
+  const rows = [
+    ['Company', 'Bloomberg ticker', 'Country', 'Sector', 'SEDOL', 'Portfolio wt', 'Reference wt', 'Active wt'],
+    ['TAIWAN SEMICONDUCTOR MFG', '2330 TT Equity', 'Taiwan', 'Information Technology', '6889106', 0.13202700995950284, 0.15846209524838697, -0.026435],
+    ['SAMSUNG ELECTRONICS CO', '005930 KS Equity', 'South Korea', 'Information Technology', '6771720', 0.07997691131141527, 0.0856881555357479, -0.005711],
+    ['SK HYNIX', '000660 KS Equity', 'South Korea', 'Information Technology', '6450267', 0.06214834534827936, 0.060003628542123294, 0.002145],
+    ['COMMONWEALTH BANK OF AUS', 'CBA AU Equity', 'Australia', 'Financials', '6215035', 0.037129742748281805, 0.01398764127142287, 0.023142],
+    ['TENCENT HOLDINGS LI (CN)', '700 HK Equity', 'China', 'Communication Services', 'BMMV2K8', 0.033407921428457, 0.026245726590055155, 0.007162],
+    ['ALIBABA GRP HLDG (HK)', '9988 HK Equity', 'China', 'Consumer Discretionary', 'BK6YZP5', 0.030049383277905153, 0.017879231174776335, 0.01217],
+    ['BHP GROUP (AU)', 'BHP AU Equity', 'Australia', 'Materials', '6144690', 0.027714115349632966, 0.0173829091811839, 0.010331],
+    ['WISETECH GLOBAL', 'WTC AU Equity', 'Australia', 'Information Technology', 'BZ8GX83', 0.025066824269408886, 0.0003496337109107115, 0.024717],
+    ['DELTA ELECTRONICS', '2308 TT Equity', 'Taiwan', 'Information Technology', '6260734', 0.022701553348733222, 0.009757099432387647, 0.012944],
+    ['NATIONAL AUSTRALIA BANK', 'NAB AU Equity', 'Australia', 'Financials', '6624608', 0.02158072972699689, 0.0066166716272407534, 0.014964],
+    ['MEDIATEK INC', '2454 TT Equity', 'Taiwan', 'Information Technology', '6372480', 0.021031422410223096, 0.018623925420114026, 0.002407],
+    ['ICBC H', '1398 HK Equity', 'China', 'Financials', 'B1G1QD8', 0.020160735303116, 0.005275810959751366, 0.014885],
+    ['WESTPAC BANKING', 'WBC AU Equity', 'Australia', 'Financials', '6076146', 0.020100937983943867, 0.006510990578411249, 0.01359],
+    ['HON HAI PRECISION IND CO', '2317 TT Equity', 'Taiwan', 'Information Technology', '6438564', 0.018809525803898552, 0.007788251225262619, 0.011021],
+    ['CHINA CONSTRUCTION BK H', '939 HK Equity', 'China', 'Financials', 'B0LMTQ3', 0.0186627787317642, 0.008256252504205601, 0.010407],
+    ['DBS GROUP HOLDINGS', 'DBS SP Equity', 'Singapore', 'Financials', '6175203', 0.017653830904843428, 0.009948143093870461, 0.007706],
+    ['BANK OF CHINA H', '3988 HK Equity', 'China', 'Financials', 'B154564', 0.016969004616243177, 0.004193711755546368, 0.012775],
+    ['SAMSUNG ELECTRO-MECH. CO', '009150 KS Equity', 'South Korea', 'Information Technology', '6771689', 0.01643395768324289, 0.005226258729788511, 0.011208],
+    ['MACQUARIE GROUP', 'MQG AU Equity', 'Australia', 'Financials', 'B28YTC2', 0.01485063145648759, 0.004996240491010251, 0.009854],
+    ['RELIANCE INDUSTRIES', 'RELIANCE IN Equity', 'India', 'Energy', '6099626', 0.014802695655419442, 0.005621023307567729, 0.009182],
+    ['XIAOMI CORP B', '1810 HK Equity', 'China', 'Information Technology', 'BG0ZMJ9', 0.014492980395070763, 0.00412196269670719, 0.010371],
+    ['ICICI BANK', 'ICICIBC IN Equity', 'India', 'Financials', 'BSZ2BY7', 0.012873570384580516, 0.005825361659618134, 0.007048],
+    ['OCBC BANK', 'OCBC SP Equity', 'Singapore', 'Financials', 'B0F9V20', 0.01281640925065769, 0.006469491725184806, 0.006347],
+    ['HYUNDAI MOTOR CO', '005380 KS Equity', 'South Korea', 'Consumer Discretionary', '6451055', 0.012713682720465167, 0.0033057808335284836, 0.009408],
+    ['CHROMA ATE', '2360 TT Equity', 'Taiwan', 'Information Technology', '6212100', 0.012407815666613484, 0.002099250191412255, 0.010309],
+    ['TATA CONSULTANCY', 'TCS IN Equity', 'India', 'Information Technology', 'B01NPJ1', 0.012273539764643881, 0.0014179625984166526, 0.010856],
+    ['RIO TINTO LTD (AU)', 'RIO AU Equity', 'Australia', 'Materials', '6220103', 0.012096747282908113, 0.0034108050297995554, 0.008686],
+    ['UNITED MICROELECTRONICS', '2303 TT Equity', 'Taiwan', 'Information Technology', '6916628', 0.01209335982611403, 0.0043119253784086806, 0.007781],
+    ['ANZ GROUP HOLDINGS', 'ANZ AU Equity', 'Australia', 'Financials', '6065586', 0.012032301104044255, 0.006276305677959009, 0.005756],
+    ['KING YUAN ELECTRONICS CO', '2449 TT Equity', 'Taiwan', 'Information Technology', '6352493', 0.01198529467751132, 0.0008485890087860246, 0.011137],
+    ['SK SQUARE CO', '402340 KS Equity', 'South Korea', 'Industrials', 'BMG3GS6', 0.010801839562765028, 0.006322762183883508, 0.004479],
+    ['MEITUAN B', '3690 HK Equity', 'China', 'Consumer Discretionary', 'BGJW376', 0.010106841338477866, 0.0035969360504638967, 0.00651],
+    ['BHARTI AIRTEL', 'BHARTI IN Equity', 'India', 'Communication Services', '6442327', 0.009972023688309272, 0.004117291162218235, 0.005855],
+    ['HDFC BANK', 'HDFCB IN Equity', 'India', 'Financials', 'BK1N461', 0.009765613790758722, 0.006617162660834665, 0.003148],
+    ['AIA GROUP', '1299 HK Equity', 'Hong Kong', 'Financials', 'B4TX8S1', 0.009428742822467745, 0.007212140619730103, 0.002217],
+    ['BAIDU (HK)', '9888 HK Equity', 'China', 'Communication Services', 'B0J2D41', 0.00921001788809293, 0.0017605481386984243, 0.007449],
+    ['INFOSYS', 'INFO IN Equity', 'India', 'Information Technology', '6205122', 0.008977883448166855, 0.0025583342085379727, 0.00642],
+    ['LENOVO GROUP', '992 HK Equity', 'China', 'Information Technology', '6218089', 0.008631431627219003, 0.0027027308040515744, 0.005929],
+    ['HONGKONG EXCH & CLEARING', '388 HK Equity', 'Hong Kong', 'Financials', '6267359', 0.008295527348308485, 0.004602662848856099, 0.003693],
+    ['GIGABYTE TECHNOLOGY CO', '2376 TT Equity', 'Taiwan', 'Information Technology', '6129181', 0.008207146243715224, 0.000520075179331728, 0.007687],
+    ['KB FINANCIAL GROUP', '105560 KS Equity', 'South Korea', 'Financials', 'B3DF0Y6', 0.007596948629872584, 0.0033284271168893603, 0.004269],
+    ['GOLD CIRCUIT ELECTRONICS', '2368 TT Equity', 'Taiwan', 'Information Technology', '6107585', 0.007316487152936129, 0.0010200041723392732, 0.006296],
+    ['GDS HOLDINGS A (HK)', '9698 HK Equity', 'China', 'Information Technology', 'BMG40P4', 0.007141720433007053, 0.00030932532376505496, 0.006832],
+    ['ASE TECHNOLOGY HOLDING', '3711 TT Equity', 'Taiwan', 'Information Technology', 'BFXZDY1', 0.006695203146259276, 0.006201025058611076, 0.000494],
+    ['CSL', 'CSL AU Equity', 'Australia', 'Health Care', '6185495', 0.0066893583000743355, 0.004685152520744937, 0.002004],
+    ['WESFARMERS', 'WES AU Equity', 'Australia', 'Consumer Discretionary', '6948836', 0.006502624515613661, 0.004735847233505517, 0.001767],
+    ['SINGAPORE TELECOM', 'ST SP Equity', 'Singapore', 'Communication Services', 'B02PY11', 0.006311337878978507, 0.0019464815303348029, 0.004365],
+    ['LITE-ON TECHNOLOGY CORP', '2301 TT Equity', 'Taiwan', 'Information Technology', '6519481', 0.006035946502836597, 0.001465467855619646, 0.00457],
+    ['UNIMICRON TECHNOLOGY', '3037 TT Equity', 'Taiwan', 'Information Technology', '6137720', 0.006023703720845953, 0.004469987635607133, 0.001554],
+    ['NETEASE', '9999 HK Equity', 'China', 'Communication Services', 'BM93SF4', 0.005546391509208402, 0.003303625109243932, 0.002243],
+    ['GOODMAN GROUP', 'GMG AU Equity', 'Australia', 'Real Estate', 'B03FYZ4', 0.005339002017631201, 0.002898204494838649, 0.002441],
+    ['ASIA VITAL COMPONENTS', '3017 TT Equity', 'Taiwan', 'Information Technology', '6544892', 0.00501581771847506, 0.0029000981638621103, 0.002116],
+    ['QUANTA COMPUTER', '2382 TT Equity', 'Taiwan', 'Information Technology', '6141011', 0.004330163371067832, 0.0023773844850782638, 0.001953],
+    ['NAN YA PLASTIC', '1303 TT Equity', 'Taiwan', 'Materials', '6621580', 0.003561365844542218, 0.0033995219892908953, 0.000162],
+    ['HANMI SEMICONDUCTOR CO', '042700 KS Equity', 'South Korea', 'Information Technology', 'B0CSXQ8', 0.0032454278180821857, 0.0006501598567389134, 0.002595],
+    ['GLOBAL UNICHIP CORP', '3443 TT Equity', 'Taiwan', 'Information Technology', 'B056381', 0.0029526823909095208, 0.0018712747304241073, 0.001081],
+    ['INFRATIL', 'IFT NZ Equity', 'New Zealand', 'Utilities', '6459286', 0.0028515143545357847, 0.0005575815734836679, 0.002294],
+    ['ELITE MATERIAL CO', '2383 TT Equity', 'Taiwan', 'Information Technology', '6316121', 0.002625127016190328, 0.0040814979914643125, -0.001456],
+    ['MPI CORP', '6223 TT Equity', 'Taiwan', 'Information Technology', '6574457', 0.0022583515303799847, 0.0011821503435305854, 0.001076],
+    ['HCL TECHNOLOGIES', 'HCLT IN Equity', 'India', 'Information Technology', '6294896', 0.00150000000000224, 0.0008732206238358145, 0.000627],
+    ['SAMSUNG SDS CO', '018260 KS Equity', 'South Korea', 'Information Technology', 'BRS2KY0', 0.0015, 0.0005011119154699452, 0.000999],
+    ['NAVER', '035420 KS Equity', 'South Korea', 'Communication Services', '6560393', 0.0015, 0.0016019726695149612, -0.000102],
+    ['KUAISHOU TECHNOLOGY B', '1024 HK Equity', 'China', 'Communication Services', 'BLC90T0', 0.0015, 0.0008496927221118365, 0.00065],
+    ['KING SLIDE WORKS CO', '2059 TT Equity', 'Taiwan', 'Information Technology', 'B01H720', 0.0015, 0.0019074670505242475, -0.000407],
+    ['PING AN INSURANCE H', '2318 HK Equity', 'China', 'Financials', 'B01FLR7', 0.0015, 0.0036177613584334307, -0.002118],
+    ['ACCTON TECHNOLOGY CORP', '2345 TT Equity', 'Taiwan', 'Information Technology', '6005214', 0.0015, 0.002617562596203993, -0.001118],
+    ['ZHONGJI INNO A(HK-C)', '300308 CH Equity', 'China', 'Information Technology', 'BFFJRM7', 0.0015, 0.0006400664039582244, 0.00086],
+    ['WISTRON CORP', '3231 TT Equity', 'Taiwan', 'Information Technology', '6672481', 0.0015, 0.0014300440657945307, 7e-05],
+    ['ALCHIP TECHNOLOGIES', '3661 TT Equity', 'Taiwan', 'Information Technology', 'B4TPSL0', 0.0015, 0.0007867780384290225, 0.000713],
+    ['BIZLINK HOLDING', '3665 TT Equity', 'Taiwan', 'Information Technology', 'B5SG8Y4', 0.0015, 0.0010898342276995032, 0.00041],
+    ['ZHEN DING TECHNOLOGY', '4958 TT Equity', 'Taiwan', 'Information Technology', 'B734XQ4', 0.0015, 0.001116838551963948, 0.000383],
+    ['ASPEED TECHNOLOGY', '5274 TT Equity', 'Taiwan', 'Information Technology', 'B80VKP3', 0.0015, 0.001622062122303099, -0.000122],
+    ['WIWYNN CORPORATION', '6669 TT Equity', 'Taiwan', 'Information Technology', 'BF4QXG5', 0.0015, 0.0016373739921111486, -0.000137],
+    ['CAMBRICON TECH A (HK-C)', '688256 CH Equity', 'China', 'Information Technology', 'BNHPMD5', 0.0015, 0.00045007102508054573, 0.00105],
+    ['DELTA ELECTRONICS THAI', 'DELTA TB Equity', 'Thailand', 'Information Technology', 'BRJS8F4', 0.0015, 0.001946504736685634, -0.000447],
+    ['KEPPEL', 'KEP SP Equity', 'Singapore', 'Industrials', 'B1VQ5C0', 0.0015, 0.0009717875950411087, 0.000528],
+    ['PERSISTENT SYSTEMS', 'PSYS IN Equity', 'India', 'Information Technology', 'BLC87W9', 0.0015, 0.0004671150880437531, 0.001033],
+    ['TECH MAHINDRA', 'TECHM IN Equity', 'India', 'Information Technology', 'BWFGD63', 0.0015, 0.0006820142186362377, 0.000818],
+    ['WIPRO', 'WPRO IN Equity', 'India', 'Information Technology', '6206051', 0.0015, 0.0003108705632368097, 0.001189],
+    ['XERO (AU)', 'XRO AU Equity', 'Australia', 'Information Technology', 'B8P4LP4', 0.0015, 0.0005063747309191467, 0.000994]
+  ];
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  sheet['!cols'] = [32, 20, 16, 24, 12, 16, 16, 16].map(wch => ({wch}));
   XLSX.utils.book_append_sheet(workbook, sheet, 'Portfolio holdings');
   XLSX.writeFile(workbook, 'portfolio-template.xlsx');
-  notice('Excel template downloaded.', 'info');
+  notice('Excel template downloaded (80 stocks).', 'info');
 }
 
 function exportMindmap() {

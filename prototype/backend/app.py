@@ -1532,13 +1532,22 @@ class Handler(BaseHTTPRequestHandler):
             path = up(self.path).path
             if path == '/api/state':
                 return self.respond(state())
-            assets = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/xlsx.full.min.js': 'js/xlsx.full.min.js'}
+            assets = {
+                '/': 'index.html',
+                '/app.js': 'app.js',
+                '/style.css': 'style.css',
+                '/xlsx.full.min.js': 'js/xlsx.full.min.js',
+                '/portfolio-template.xlsx': 'portfolio-template.xlsx'
+            }
             if path not in assets:
                 return self.respond({'error': 'Not found'}, 404)
-            mime = {'/': 'text/html; charset=utf-8',
-                    '/app.js': 'text/javascript; charset=utf-8',
-                    '/style.css': 'text/css; charset=utf-8',
-                    '/xlsx.full.min.js': 'text/javascript; charset=utf-8'}[path]
+            mime = {
+                '/': 'text/html; charset=utf-8',
+                '/app.js': 'text/javascript; charset=utf-8',
+                '/style.css': 'text/css; charset=utf-8',
+                '/xlsx.full.min.js': 'text/javascript; charset=utf-8',
+                '/portfolio-template.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            }[path]
             asset_file = FRONTEND / assets[path]
             if not asset_file.is_file():
                 asset_file = ROOT.parent / 'static' / assets[path]
