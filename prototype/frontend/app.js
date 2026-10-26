@@ -3757,54 +3757,171 @@ function exportMindmap() {
     notice('Add taxonomy nodes before exporting.', 'error');
     return;
   }
-  const title = $('#theme-form [name="theme_name"]')?.value || 'Investment theme';
-  const width = 1100;
-  let y = 130;
-  const xml = value => esc(value).replace(/&#39;/g, '&apos;');
-  const card = (label, x, top, w, fill) => {
-    const words = String(label || '').split(/\s+/);
-    const lines = [];
-    let line = '';
-    for (const word of words) {
-      if ((line + ' ' + word).length > Math.floor(w / 8) && line) {
-        lines.push(line);
-        line = '';
-      }
-      line += (line ? ' ' : '') + word;
-    }
-    if (line) lines.push(line);
-    const h = Math.max(54, lines.length * 20 + 20);
+  const themeName = $('#theme-form [name="theme_name"]')?.value || 'Investment theme';
+
+  // Sizing constants matching the website's CSS (.mm-theme, .mm-node, .mm-connector)
+  const cardW = 210;
+  const t2CardH = 58;
+  const t1CardH = 68;
+  const rootCardH = 76;
+  const gapX = 80;        // horizontal gap for connector line
+  const gapY_T2 = 14;     // vertical gap between Tier-2 cards
+  const gapY_T1 = 28;     // vertical gap between Tier-1 blocks
+  const padX = 40;
+  const padY = 40;
+
+  // Measure each Tier-1 subtree height
+  const t1Blocks = roots.map(root => {
+    const children = nodes.filter(n => n.parent_id === root.node_id);
+    const childrenH = children.length
+      ? children.length * t2CardH + (children.length - 1) * gapY_T2
+      : t1CardH;
+    const blockH = Math.max(t1CardH, childrenH);
     return {
-      h,
-      svg: `<rect x="${x}" y="${top}" width="${w}" height="${h}" rx="9" fill="${fill}" stroke="#b3ddd8"/>` +
-           `<text x="${x + w / 2}" y="${top + 25}" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#102e35">` +
-           `${lines.map((l, i) => `<tspan x="${x + w / 2}" dy="${i ? 20 : 0}">${xml(l)}</tspan>`).join('')}</text>`
+      root,
+      children,
+      childrenH,
+      blockH
     };
+  });
+
+  const totalTreeH = t1Blocks.reduce((sum, b) => sum + b.blockH, 0) + (t1Blocks.length - 1) * gapY_T1;
+  const svgH = Math.max(padY * 2 + totalTreeH, 300);
+  const svgW = padX * 2 + cardW * 3 + gapX * 2;
+
+  // X Coordinates
+  const xRoot = padX;
+  const xT1 = xRoot + cardW + gapX;
+  const xT2 = xT1 + cardW + gapX;
+
+  // Root Card Y (vertically centered against entire tree)
+  const rootCenterY = padY + totalTreeH / 2;
+  const rootY = rootCenterY - rootCardH / 2;
+
+  const xml = str => esc(str).replace(/&#39;/g, '&apos;');
+
+  // Text truncation / wrapping helper for SVG text
+  const wrapText = (text, maxChars = 22, maxLines = 2) => {
+    const words = String(text || '').split(/\s+/);
+    const lines = [];
+    let cur = '';
+    for (const w of words) {
+      if ((cur + ' ' + w).trim().length > maxChars && cur) {
+        lines.push(cur.trim());
+        cur = w;
+      } else {
+        cur = (cur ? cur + ' ' : '') + w;
+      }
+    }
+    if (cur) lines.push(cur.trim());
+    return lines.slice(0, maxLines);
   };
 
-  let content = '';
-  const rootCard = card(title, 350, 20, 400, '#b3ddd8');
-  content += rootCard.svg;
-  y = Math.max(y, 20 + rootCard.h + 45);
+  let pathsSvg = '';
+  let cardsSvg = '';
 
-  for (const root of roots) {
-    const parent = card(root.name, 350, y, 400, '#e6f4f2');
-    content += `<path d="M550 ${20 + rootCard.h} H40 V${y + parent.h / 2} H350" fill="none" stroke="#b3ddd8" stroke-width="2"/>` + parent.svg;
-    const childTop = y + parent.h + 30;
-    const children = nodes.filter(n => n.parent_id === root.node_id);
-    let rowTop = childTop, rowHeight = 0;
-    children.forEach((child, index) => {
-      if (index && index % 3 === 0) {
-        rowTop += rowHeight + 20;
-        rowHeight = 0;
+  // 1. Root / Theme Card (Dark Teal Gradient)
+  const rootTitleLines = wrapText(themeName, 20, 2);
+  cardsSvg += `
+    <g class="theme-card">
+      <defs>
+        <linearGradient id="themeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#115e59"/>
+          <stop offset="100%" stop-color="#042f2e"/>
+        </linearGradient>
+        <filter id="cardShadow" x="-5%" y="-5%" width="115%" height="120%" filterUnits="userSpaceOnUse">
+          <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.08"/>
+        </filter>
+      </defs>
+      <rect x="${xRoot}" y="${rootY}" width="${cardW}" height="${rootCardH}" rx="14" fill="url(#themeGrad)" stroke="#134e4a" stroke-width="1.5" filter="url(#cardShadow)"/>
+      <rect x="${xRoot + 14}" y="${rootY + 12}" width="54" height="18" rx="9" fill="rgba(255,255,255,0.2)"/>
+      <text x="${xRoot + 41}" y="${rootY + 24.5}" fill="#ffffff" font-size="9" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" letter-spacing="1">THEME</text>
+      ${rootTitleLines.map((l, i) => `<text x="${xRoot + 14}" y="${rootY + 46 + i * 16}" fill="#ffffff" font-size="13.5" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">${xml(l)}</text>`).join('')}
+    </g>`;
+
+  // Spine X from Theme to Tier 1
+  const spine1X = xRoot + cardW + gapX / 2;
+
+  // Trunk from Theme out to spine
+  pathsSvg += `<path d="M ${xRoot + cardW} ${rootCenterY} H ${spine1X}" stroke="#0d9488" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+
+  let curY = padY;
+  const t1Centers = [];
+
+  t1Blocks.forEach((block) => {
+    const t1CenterY = curY + block.blockH / 2;
+    const t1Y = t1CenterY - t1CardH / 2;
+    t1Centers.push(t1CenterY);
+
+    // Branch from Spine1 into Tier 1 card
+    pathsSvg += `<path d="M ${spine1X} ${t1CenterY} H ${xT1}" stroke="#0d9488" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+
+    // Tier 1 Card
+    const t1Lines = wrapText(block.root.name, 22, 2);
+    cardsSvg += `
+      <g class="tier1-card">
+        <rect x="${xT1}" y="${t1Y}" width="${cardW}" height="${t1CardH}" rx="12" fill="#f0fdfa" stroke="#99f6e4" stroke-width="1.5" filter="url(#cardShadow)"/>
+        <rect x="${xT1}" y="${t1Y + 3}" width="4" height="${t1CardH - 6}" rx="2" fill="#0d9488"/>
+        <rect x="${xT1 + 12}" y="${t1Y + 10}" width="50" height="17" rx="8.5" fill="#ccfbf1"/>
+        <text x="${xT1 + 37}" y="${t1Y + 22}" fill="#0f766e" font-size="9" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" letter-spacing="0.5">TIER 1</text>
+        <text x="${xT1 + cardW - 14}" y="${t1Y + 22}" fill="#0d9488" font-size="10.5" font-weight="600" text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">${block.children.length} ${block.children.length === 1 ? 'activity' : 'activities'}</text>
+        ${t1Lines.map((l, i) => `<text x="${xT1 + 14}" y="${t1Y + 44 + i * 15}" fill="#0f172a" font-size="13" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">${xml(l)}</text>`).join('')}
+      </g>`;
+
+    // If has children: draw connectors and Tier 2 cards
+    if (block.children.length > 0) {
+      const spine2X = xT1 + cardW + gapX / 2;
+      const t2StartTop = t1CenterY - block.childrenH / 2;
+      const t2Centers = [];
+
+      // Trunk from Tier 1 to Spine 2
+      pathsSvg += `<path d="M ${xT1 + cardW} ${t1CenterY} H ${spine2X}" stroke="#0d9488" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+
+      block.children.forEach((child, cIdx) => {
+        const t2Y = t2StartTop + cIdx * (t2CardH + gapY_T2);
+        const t2CenterY = t2Y + t2CardH / 2;
+        t2Centers.push(t2CenterY);
+
+        // Branch from Spine 2 into Tier 2 card
+        pathsSvg += `<path d="M ${spine2X} ${t2CenterY} H ${xT2}" stroke="#0d9488" stroke-width="2" fill="none" stroke-linecap="round"/>`;
+
+        // Tier 2 Card
+        const t2Lines = wrapText(child.name, 22, 2);
+        cardsSvg += `
+          <g class="tier2-card">
+            <rect x="${xT2}" y="${t2Y}" width="${cardW}" height="${t2CardH}" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" filter="url(#cardShadow)"/>
+            <rect x="${xT2}" y="${t2Y + 3}" width="4" height="${t2CardH - 6}" rx="2" fill="#2dd4bf"/>
+            <rect x="${xT2 + 12}" y="${t2Y + 8}" width="48" height="15" rx="7.5" fill="#f1f5f9"/>
+            <text x="${xT2 + 36}" y="${t2Y + 19}" fill="#475569" font-size="8.5" font-weight="700" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" letter-spacing="0.5">TIER 2</text>
+            ${t2Lines.map((l, i) => `<text x="${xT2 + 14}" y="${t2Y + 39 + i * 14}" fill="#1e293b" font-size="12" font-weight="650" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">${xml(l)}</text>`).join('')}
+          </g>`;
+      });
+
+      // Spine 2 vertical line
+      if (t2Centers.length > 1) {
+        const minT2Y = Math.min(...t2Centers);
+        const maxT2Y = Math.max(...t2Centers);
+        pathsSvg += `<path d="M ${spine2X} ${minT2Y} V ${maxT2Y}" stroke="#0d9488" stroke-width="2" fill="none" stroke-linecap="round"/>`;
       }
-      const x = 70 + (index % 3) * 320;
-      const leaf = card(child.name, x, rowTop, 290, '#ffffff');
-      rowHeight = Math.max(rowHeight, leaf.h);
-      content += `<path d="M550 ${y + parent.h} V${rowTop - 12} H${x + 145} V${rowTop}" fill="none" stroke="#b3ddd8" stroke-width="2"/>` + leaf.svg;
-    });
-    y = children.length ? rowTop + rowHeight + 40 : childTop + 20;
+    }
+
+    curY += block.blockH + gapY_T1;
+  });
+
+  // Spine 1 vertical line connecting all Tier 1 centers
+  if (t1Centers.length > 1) {
+    const minT1Y = Math.min(...t1Centers);
+    const maxT1Y = Math.max(...t1Centers);
+    pathsSvg += `<path d="M ${spine1X} ${minT1Y} V ${maxT1Y}" stroke="#0d9488" stroke-width="2" fill="none" stroke-linecap="round"/>`;
   }
-  downloadBlob(new Blob([`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${y}" viewBox="0 0 ${width} ${y}"><rect width="100%" height="100%" fill="#f5f7f8"/>${content}</svg>`], {type:'image/svg+xml'}), 'theme-mindmap.svg');
+
+  const svgContent = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">
+  <rect width="100%" height="100%" fill="#f8fafc"/>
+  ${pathsSvg}
+  ${cardsSvg}
+</svg>`;
+
+  downloadBlob(new Blob([svgContent], { type: 'image/svg+xml' }), `${themeName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-mindmap.svg`);
   notice('Mind map exported as SVG.', 'info');
 }
