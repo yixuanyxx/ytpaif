@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 import uuid
+import re
 import zipfile
 import engine
 import financials
@@ -422,11 +423,16 @@ def source_search(d):
                 'annual_report': reg['annual_report'],
                 'regulatory_filing': reg['regulatory_filing'],
                 'investor_presentation': f"{cname} Investor Presentation ({period or 'FY2025'})",
+                'earnings_call': f"{cname} Q4/Full Year {period or 'FY2025'} Earnings Conference Call Transcript",
                 'transcripts': f"{cname} Earnings Call Transcript ({period or 'FY2025'})",
                 'sustainability_report': f"{cname} Sustainability & ESG Report 2025",
                 'news_announcements': f"{cname} Corporate Announcement"
             }
-            cand_types = [t for t in source_types if t in templates][:2] or ['annual_report']
+            stick_earnings = bool(d.get('stick_to_earnings_call'))
+            if stick_earnings:
+                cand_types = ['earnings_call']
+            else:
+                cand_types = [t for t in source_types if t in templates][:2] or ['annual_report']
             for st in cand_types:
                 cand_pub = '2026-03-31'
                 eligible = bool(cand_pub <= cutoff)
@@ -483,27 +489,51 @@ def ingest_candidates(d):
         seen_companies.add(cid)
         cname = comp.get('name', 'Company')
         ticker = comp.get('bloomberg_ticker', '')
+        sedol = comp.get('sedol', '')
         period = cand.get('period', 'FY2025')
+        pub_date = cand.get('publication_date') or '2026-03-31'
         reg = regional_registry_info(comp, period)
-        title = cand.get('title') or reg['annual_report']
+        source_type = cand.get('source_type', 'annual_report')
+        title = cand.get('title') or (reg['annual_report'] if source_type != 'earnings_call' else f"{cname} Q4/{period} Earnings Call Transcript")
         url = cand.get('url') or reg['url']
         registry = cand.get('registry') or reg['registry']
         short_reg = cand.get('short_registry') or reg['short_registry']
-        text = (
-            f"STATUTORY DISCLOSURE & AUDITED ANNUAL FINANCIAL REPORT ({period})\n"
-            f"REGULATORY FILING REGISTRY: {registry.upper()}\n"
-            f"COMPANY NAME:             {cname}\n"
-            f"BLOOMBERG TICKER:         {ticker}\n"
-            f"INTERNAL ID:              {cid}\n"
-            f"FILING TITLE:             {title}\n"
-            f"REPORTING PERIOD:         {period} | PUBLICATION DATE: {pub_date}\n"
-            f"OFFICIAL REPOSITORY URL:  {url}\n\n"
-            f"BUSINESS OVERVIEW & OPERATIONS:\n"
-            f"{cname} is an active commercial enterprise incorporated in {reg['jurisdiction']}. "
-            f"During fiscal period {period}, the company engaged in principal operational activities including product design, manufacturing, hardware/software infrastructure, and enterprise commercial solutions. "
-            f"Financial results disclose total external net revenue across primary operating segments. "
-            f"Audited segment disclosures provide breakdowns of disclosed revenue contributions and qualifying business lines."
-        )
+        
+        if source_type == 'earnings_call':
+            text = (
+                f"EARNINGS CONFERENCE CALL TRANSCRIPT & MANAGEMENT DISCUSSION ({period})\n"
+                f"OFFICIAL SOURCE:          CORPORATE INVESTOR RELATIONS & TRANSCRIPTS\n"
+                f"COMPANY NAME:             {cname}\n"
+                f"BLOOMBERG TICKER:         {ticker}\n"
+                f"SEDOL (LONDON STK EXCH):  {sedol or 'N/A'}\n"
+                f"INTERNAL ID:              {cid}\n"
+                f"EVENT TITLE:              {title}\n"
+                f"FISCAL PERIOD:            {period} | TRANSCRIPT DATE: {pub_date}\n"
+                f"REPRESENTATIVES:          Chief Executive Officer, Chief Financial Officer, Head of Investor Relations\n\n"
+                f"EXECUTIVE SUMMARY & OPERATIONAL HIGHLIGHTS:\n"
+                f"Thank you for joining our {period} earnings conference call. "
+                f"During this period, {cname} sustained strong commercial momentum across our core operational divisions in {reg['jurisdiction']}. "
+                f"Total consolidated net external revenue reached target levels. Operating segment revenues reflect direct deliveries to strategic infrastructure, "
+                f"specialized hardware manufacturing, advanced supply chain solutions, and enterprise market applications. "
+                f"In our business segment breakdown, our primary commercial units reported solid order backlogs and revenue contributions qualifying under primary operational categories."
+            )
+        else:
+            text = (
+                f"STATUTORY DISCLOSURE & AUDITED ANNUAL FINANCIAL REPORT ({period})\n"
+                f"REGULATORY FILING REGISTRY: {registry.upper()}\n"
+                f"COMPANY NAME:             {cname}\n"
+                f"BLOOMBERG TICKER:         {ticker}\n"
+                f"SEDOL (LONDON STK EXCH):  {sedol or 'N/A'}\n"
+                f"INTERNAL ID:              {cid}\n"
+                f"FILING TITLE:             {title}\n"
+                f"REPORTING PERIOD:         {period} | PUBLICATION DATE: {pub_date}\n"
+                f"OFFICIAL REPOSITORY URL:  {url}\n\n"
+                f"BUSINESS OVERVIEW & OPERATIONS:\n"
+                f"{cname} is an active commercial enterprise incorporated in {reg['jurisdiction']}. "
+                f"During fiscal period {period}, the company engaged in principal operational activities including product design, manufacturing, hardware/software infrastructure, and enterprise commercial solutions. "
+                f"Financial results disclose total external net revenue across primary operating segments. "
+                f"Audited segment disclosures provide breakdowns of disclosed revenue contributions and qualifying business lines."
+            )
         source = source_ingest({
             'company_id': cid,
             'publication_date': pub_date,
@@ -511,10 +541,10 @@ def ingest_candidates(d):
             'title': title,
             'registry': registry,
             'short_registry': short_reg,
-            'filename': f"{cname.replace(' ', '_')}_{short_reg.replace(' ', '_').replace('/', '_')}_{period}.txt",
+            'filename': f"{cname.replace(' ', '_')}_{source_type}_{period}.txt",
             'content': base64.b64encode(text.encode('utf-8')).decode('ascii'),
             'url': url,
-            'source_type': cand.get('source_type', 'annual_report')
+            'source_type': source_type
         })
         ingested.append(source)
     return {'ingested_count': len(ingested), 'sources': ingested}
@@ -918,6 +948,186 @@ def analyze(d):
     finally:
         put('runs', run_rec)
 
+# ── Batch Analysis (Analyse All) ──────────────────────────────────────────────
+
+def analyze_all(d):
+    theme_id = d.get('theme_id')
+    if not theme_id:
+        theme = (all_records('themes') or [{}])[-1]
+        theme_id = theme.get('id')
+    if not theme_id:
+        raise ValueError('No theme selected for batch analysis')
+    theme = get('themes', theme_id)
+    companies = all_records('companies')
+    sources = all_records('sources')
+    cases = all_records('cases')
+
+    existing_cids = {c['company_id'] for c in cases if c.get('theme_id') == theme_id}
+    ready_companies = [c for c in companies if c['id'] not in existing_cids and any(s['company_id'] == c['id'] for s in sources)]
+
+    results = []
+    errors = []
+    for comp in ready_companies:
+        comp_sources, valid_eids = evidence_for(comp['id'], theme_id)
+        if not valid_eids:
+            continue
+        selected = []
+        char_count = 0
+        for s in comp_sources:
+            for e in s.get('evidence', []):
+                if char_count + len(e.get('passage', '')) <= 55000:
+                    selected.append(e['evidence_id'])
+                    char_count += len(e.get('passage', ''))
+        if not selected:
+            continue
+        try:
+            case = analyze({
+                'theme_id': theme_id,
+                'company_id': comp['id'],
+                'evidence_ids': selected
+            })
+            results.append({'company_id': comp['id'], 'company_name': comp['name'], 'case_id': case['id'], 'status': 'success'})
+        except Exception as e:
+            errors.append({'company_id': comp['id'], 'company_name': comp['name'], 'error': str(e)})
+
+    return {'analysed_count': len(results), 'results': results, 'errors': errors}
+
+# ── AI Checker Model (Claude Sonnet) ──────────────────────────────────────────
+
+def check_case(d):
+    case_id = d.get('case_id')
+    if not case_id:
+        raise ValueError('case_id is required')
+    case = get('cases', case_id)
+    company = get('companies', case['company_id'])
+    theme = get('themes', case['theme_id'])
+    sources, valid_evidence = evidence_for(case['company_id'], case['theme_id'])
+
+    endpoint = os.environ.get('CHECKER_LLM_ENDPOINT') or 'https://api.anthropic.com/v1/messages'
+    key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
+    model = os.environ.get('CHECKER_LLM_MODEL') or 'claude-sonnet-5'
+
+    if not key:
+        raise ValueError('CHECKER_LLM_API_KEY (Claude key) is not configured in .env')
+
+    used_eids = set(case['case'].get('denominator_evidence_ids', []))
+    for u in case['case'].get('units', []):
+        used_eids.update(u.get('evidence_ids', []))
+
+    passages = [e for s in sources for e in s['evidence'] if e['evidence_id'] in used_eids]
+    if not passages:
+        passages = [e for s in sources for e in s.get('evidence', [])][:4]
+
+    tax_summary = [{'node_id': n['node_id'], 'name': n.get('name'), 'definition': n.get('definition', '')}
+                   for n in theme.get('nodes', [])]
+
+    audit_payload = {
+        'company': {'name': company.get('name'), 'ticker': company.get('bloomberg_ticker'), 'sedol': company.get('sedol')},
+        'theme': {'name': theme.get('theme_name'), 'description': theme.get('theme_description')},
+        'case_units': case['case'].get('units', []),
+        'total_revenue': case['case'].get('total_revenue'),
+        'period': case['case'].get('period'),
+        'currency': case['case'].get('currency'),
+        'scale': case['case'].get('scale'),
+        'estimate': case.get('estimate', {}),
+        'classification_confidence': case.get('classification_confidence'),
+        'confidence_basis': case.get('confidence_basis'),
+        'passages': [{'page': p.get('page'), 'passage': p.get('passage', '')[:1000]} for p in passages[:6]],
+        'taxonomy': tax_summary
+    }
+
+    system_prompt = (
+        "You are an independent AI Compliance and Investment Auditor specializing in Asian equities excluding Japan. "
+        "Your role is to independently verify and critique the AI-generated thematic revenue exposure classification case below. "
+        "Evaluate carefully: "
+        "1. Extraction accuracy: Are segment revenues and denominators accurately cited and substantiated by the evidence passages? "
+        "2. Taxonomy validity: Are classifications mapped to valid Tier-2 taxonomy nodes without overlap? "
+        "3. Confidence assessment: Is the reported confidence level (high/medium/low) and rubric explanation justified? "
+        "Return a strictly valid JSON object ONLY (no markdown fences, no explanatory text outside JSON) with this exact schema: "
+        "{\n"
+        "  \"verdict\": \"VERIFIED\" or \"FLAGGED\",\n"
+        "  \"agreement_score\": 1 to 5,\n"
+        "  \"confidence_assessment\": \"agreed\" or \"too_high\" or \"too_low\",\n"
+        "  \"summary\": \"Concise 2-3 sentence audit summary\",\n"
+        "  \"extraction_audit\": \"Assessment of reported revenue figures and citations\",\n"
+        "  \"classification_audit\": \"Assessment of mapped taxonomy sub-themes and exclusions\",\n"
+        "  \"confidence_audit\": \"Assessment of the confidence rating and justification\",\n"
+        "  \"recommendation\": \"Approve as-is\" or \"Analyst review recommended\" or \"Reject\"\n"
+        "}"
+    )
+
+    user_prompt = f"Audit the following case:\n{json.dumps(audit_payload, indent=2)}"
+
+    candidate_models = [model]
+    for alt in ('claude-sonnet-5', 'claude-sonnet-5-5', 'claude-sonnet-4-6'):
+        if alt not in candidate_models:
+            candidate_models.append(alt)
+
+    last_err = None
+    output_obj = None
+
+    for cand_model in candidate_models:
+        try:
+            if 'anthropic.com' in endpoint:
+                headers = {
+                    'x-api-key': key,
+                    'anthropic-version': '2023-06-01',
+                    'Content-Type': 'application/json'
+                }
+                body = {
+                    'model': cand_model,
+                    'max_tokens': 2000,
+                    'system': system_prompt,
+                    'messages': [{'role': 'user', 'content': user_prompt}]
+                }
+                req = Request(endpoint, data=json.dumps(body).encode(), headers=headers)
+                with urlopen(req, timeout=60) as resp:
+                    resp_data = json.load(resp)
+                raw_text = ''.join([c.get('text', '') for c in resp_data.get('content', []) if c.get('type') == 'text'])
+            else:
+                headers = {
+                    'Authorization': f'Bearer {key}',
+                    'Content-Type': 'application/json'
+                }
+                body = {
+                    'model': cand_model,
+                    'messages': [
+                        {'role': 'system', 'content': system_prompt},
+                        {'role': 'user', 'content': user_prompt}
+                    ],
+                    'response_format': {'type': 'json_object'}
+                }
+                req = Request(endpoint, data=json.dumps(body).encode(), headers=headers)
+                with urlopen(req, timeout=60) as resp:
+                    resp_data = json.load(resp)
+                raw_text = resp_data['choices'][0]['message']['content']
+
+            raw_text = raw_text.strip()
+            json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if json_match:
+                raw_text = json_match.group(0)
+            output_obj = json.loads(raw_text)
+            output_obj['checker_model'] = cand_model
+            output_obj['checked_at'] = now()
+            break
+        except HTTPError as e:
+            last_err = f"HTTP {e.code}"
+            if e.code in (400, 404) and cand_model != candidate_models[-1]:
+                continue
+            raise ValueError(f"Claude Checker API error: {last_err}") from None
+        except Exception as e:
+            last_err = str(e)
+            if cand_model != candidate_models[-1]:
+                continue
+            raise ValueError(f"Claude Checker error: {last_err}") from None
+
+    if not output_obj:
+        raise ValueError(f"Claude Checker failed: {last_err}")
+
+    case['checker_result'] = output_obj
+    put('cases', case)
+    return output_obj
+
 # ── Export ────────────────────────────────────────────────────────────────────
 
 def export(theme_id, snapshot_id=None):
@@ -1163,12 +1373,16 @@ def state():
     call_cap = int(cap_val) if cap_val is not None and cap_val != '' else DEFAULT_LLM_MAX_CALLS
     key = os.environ.get('LLM_API_KEY') or os.environ.get('GEMINI_API_KEY', '')
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
+    checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
+    checker_model = os.environ.get('CHECKER_LLM_MODEL', 'claude-sonnet-5')
     return {
         **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in all_records(k)] if k == 'sources' else all_records(k)) for k in
            ('themes', 'companies', 'sources', 'cases', 'reviews', 'runs', 'snapshots',
             'portfolio_imports', 'search_runs')},
         'ai_configured': bool(key),
         'ai_model': model if key else '',
+        'checker_configured': bool(checker_key),
+        'checker_model': checker_model if checker_key else '',
         'call_cap': call_cap,
         'calls_used': len(all_records('model_calls')),
         'max_tiers': engine.MAX_TIERS,
@@ -1269,6 +1483,8 @@ def dispatch(path, d):
     if path == '/api/theme/delete':     return theme_delete(d)
     if path == '/api/generate':         return generate(d)
     if path == '/api/analyze':          return analyze(d)
+    if path == '/api/analyze_all':      return analyze_all(d)
+    if path in ('/api/case/check', '/api/check'): return check_case(d)
     if path == '/api/company':          return company_create(d)
     if path in ('/api/source/search', '/api/search'): return source_search(d)
     if path == '/api/source/ingest_candidates':       return ingest_candidates(d)

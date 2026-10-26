@@ -510,6 +510,7 @@ async function viewTheme(overrideThemeId) {
             <span>Sub-theme taxonomy</span>
             <span class="badge badge-neutral" id="taxonomy-counts">${tier1.length} Tier-1 · ${nodes.length - tier1.length} Tier-2 activities</span>
           </div>
+          <button type="button" class="btn btn-sm btn-secondary" id="btn-map-export">↓ Export mind map</button>
         </div>
         <div class="panel-subtitle">
           Two levels: Theme → Tier-1 (broad area) → Tier-2 (specific activity, classification target). Click any node to edit or delete it, or add new nodes at any level.
@@ -518,6 +519,7 @@ async function viewTheme(overrideThemeId) {
       </div>
     </div>`;
 
+  $('#btn-map-export').onclick = exportMindmap;
   updateTaxonomyMindmap();
   $('#taxonomy-json-area').addEventListener('input', updateTaxonomyMindmap);
   $('#theme-form [name="theme_name"]').addEventListener('input', updateTaxonomyMindmap);
@@ -1502,8 +1504,13 @@ function renderUploadZone() {
       </div>
 
       <div class="panel">
-        <div class="panel-title">Expected format</div>
-        <div class="panel-subtitle">Matches the Schroders sample Excel template.</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <div>
+            <div class="panel-title">Expected format</div>
+            <div class="panel-subtitle">Matches the Schroders sample Excel template.</div>
+          </div>
+          <button type="button" class="btn btn-sm btn-secondary" id="btn-portfolio-template">↓ Download Excel template</button>
+        </div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Column</th><th>Required</th><th>Notes</th></tr></thead>
@@ -1522,6 +1529,7 @@ function renderUploadZone() {
       </div>
     </div>`;
 
+  $('#btn-portfolio-template').onclick = downloadPortfolioTemplate;
   const dropZone = $('#excel-drop');
   const fileInput = $('#excel-file');
   let currentFile = null;
@@ -2147,11 +2155,12 @@ async function viewSources() {
 
   const companyList = companies.map(c => {
     const co = sources.filter(s=>s.company_id===c.id);
-    return `<label style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--slate-100);margin-bottom:6px">
+    const sedolText = c.sedol ? ` · SEDOL: ${c.sedol}` : '';
+    return `<label class="company-search-item" data-cid="${esc(c.id)}" data-name="${esc(c.name.toLowerCase())}" data-ticker="${esc((c.bloomberg_ticker||'').toLowerCase())}" data-sedol="${esc((c.sedol||'').toLowerCase())}" style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--slate-100);margin-bottom:6px">
       <input type="checkbox" name="company_ids" value="${esc(c.id)}" checked style="width:auto">
       <div class="flex-1">
         <div style="font-weight:600;font-size:13px">${esc(c.name)}</div>
-        <div class="text-muted text-small">${esc(c.bloomberg_ticker||c.sedol||c.id)}</div>
+        <div class="text-muted text-small">${esc(c.bloomberg_ticker||c.id)}${esc(sedolText)}</div>
       </div>
       ${co.length > 0 ? badge(co.length+' docs','green') : badge('No docs','amber')}
     </label>`;
@@ -2173,11 +2182,31 @@ async function viewSources() {
         </div>
 
         <div class="form-section-title">Companies to search</div>
-        <div id="company-checklist" style="max-height:280px;overflow-y:auto;margin-bottom:16px">
+        <div class="form-group mb-8">
+          <label class="field-label">Search universe by SEDOL (London Stock Exchange), Ticker or Name</label>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="src-global-search" placeholder="Type SEDOL (e.g. 6889106), ticker, or name..." style="flex:1">
+            <select id="src-sedol-select" style="max-width:220px">
+              <option value="">— Select by SEDOL —</option>
+              ${companies.filter(c=>c.sedol).map(c=>`<option value="${esc(c.id)}">${esc(c.sedol)} · ${esc(c.name)}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div id="company-checklist" style="max-height:260px;overflow-y:auto;margin-bottom:16px">
           ${companies.length > 0 ? companyList : `<div class="text-muted text-small">No companies registered. <a href="#" data-goto="portfolio">Import a portfolio first.</a></div>`}
         </div>
 
         <div class="form-section">
+          <div style="margin-bottom:12px;padding:10px 12px;background:var(--teal-50);border-radius:6px;border:1px solid var(--teal-200)">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--teal-900);cursor:pointer">
+              <input type="checkbox" id="src-stick-earnings-call" style="width:auto">
+              <span>Stick to latest earnings call document</span>
+            </label>
+            <div class="text-muted text-small" style="margin-left:22px;margin-top:2px">
+              Restricts source discovery to the latest quarterly earnings conference call transcript for direct management commentary.
+            </div>
+          </div>
+
           <div class="form-section-title">Source types</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
             ${SOURCE_TYPES.map(t => `
@@ -2311,18 +2340,48 @@ async function viewSources() {
       </div>
     </div>`;
 
+  // Real-time filtering by SEDOL, ticker or company name
+  const filterChecklist = (query) => {
+    query = (query || '').toLowerCase().trim();
+    $$('.company-search-item').forEach(item => {
+      const match = !query || item.dataset.name.includes(query) || item.dataset.ticker.includes(query) || item.dataset.sedol.includes(query);
+      item.style.display = match ? 'flex' : 'none';
+    });
+  };
+  $('#src-global-search')?.addEventListener('input', e => filterChecklist(e.target.value));
+  $('#src-sedol-select')?.addEventListener('change', e => {
+    const cid = e.target.value;
+    if (!cid) { filterChecklist(''); return; }
+    const comp = companies.find(c => c.id === cid);
+    if (comp) {
+      $('#src-global-search').value = comp.sedol || comp.name;
+      filterChecklist(comp.sedol || comp.name);
+    }
+  });
+
+  // Stick to earnings call toggle
+  $('#src-stick-earnings-call')?.addEventListener('change', e => {
+    if (e.target.checked) {
+      $$('input[name="source_types"]').forEach(cb => {
+        cb.checked = (cb.value === 'earnings_call');
+      });
+    }
+  });
+
   $('#btn-run-search').onclick = () => run(async () => {
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
     const selectedTypes = Array.from($$('input[name="source_types"]:checked')).map(cb => cb.value);
     const period = $('#src-period')?.value || 'FY2025';
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
     const autoIngest = $('#src-auto-ingest')?.checked ?? true;
+    const stickEarnings = $('#src-stick-earnings-call')?.checked ?? false;
     const res = await api('source/search', {
       company_ids: selectedCompanyIds.length ? selectedCompanyIds : (state.companies || []).map(c => c.id),
-      source_types: selectedTypes,
+      source_types: stickEarnings ? ['earnings_call'] : selectedTypes,
       period: period,
       cutoff: cutoff,
-      auto_ingest: autoIngest
+      auto_ingest: autoIngest,
+      stick_to_earnings_call: stickEarnings
     });
     await refresh();
     render();
@@ -2563,10 +2622,18 @@ async function viewAnalysis() {
     return { c, hasSrc, status, color };
   });
 
+  const readyCount = companyProgress.filter(p => p.hasSrc && p.status === 'Ready to analyse').length;
+
   $('#page-actions').innerHTML = `
-    <div class="text-muted text-small">${state.ai_configured
-      ? `${state.calls_used} / ${state.call_cap} AI calls used`
-      : `<span style="color:var(--amber-600)">⚠ AI not configured</span>`}
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      ${readyCount > 0 && theme ? `
+        <button class="btn btn-primary" id="btn-analyze-all" ${!state.ai_configured ? 'disabled title="Configure AI API key in .env to enable"' : ''}>
+          ✧ Analyse all ready companies (${readyCount})
+        </button>` : ''}
+      <div class="text-muted text-small">${state.ai_configured
+        ? `${state.calls_used} / ${state.call_cap} AI calls used`
+        : `<span style="color:var(--amber-600)">⚠ AI not configured</span>`}
+      </div>
     </div>`;
 
   $('#page-content').innerHTML = `
@@ -2629,6 +2696,17 @@ async function viewAnalysis() {
           Manual case entry is always available in the <a href="#" data-goto="review">Review</a> view.
         </div>
       </div>` : ''}`;
+
+  const btnAll = $('#btn-analyze-all');
+  if (btnAll) {
+    btnAll.onclick = () => run(async () => {
+      showLoading(`Running batch AI extraction & classification across ${readyCount} companies...`);
+      const res = await api('analyze_all', { theme_id: theme.id });
+      await refresh();
+      notice(`Batch analysis complete: ${res.analysed_count} companies processed and sent to Review.`, 'success');
+      render();
+    }, 'Batch analyzing…');
+  }
 }
 
 function analysisSelectPanel(selectedCompanyId, companies, sources, state) {
@@ -2881,6 +2959,8 @@ window.openCase = function(caseId) {
   const panel = $('#case-detail-panel');
   if (!panel) return;
 
+  const chk = c.checker_result;
+
   panel.innerHTML = `
     <div class="panel">
       <div class="flex justify-between items-center mb-12">
@@ -2929,6 +3009,62 @@ window.openCase = function(caseId) {
             </div>`).join('')}
         </div>` : ''}
 
+      <!-- AI Checker Model (Claude Sonnet 5) -->
+      <div class="form-section mt-16" style="background:var(--slate-50);border:1px solid var(--slate-200);border-radius:8px;padding:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+          <div>
+            <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px">
+              <span>🛡️ AI Checker Verification (Claude Sonnet 5)</span>
+              <span class="badge ${chk ? (chk.verdict==='VERIFIED'?'badge-green':'badge-amber') : 'badge-neutral'}">
+                ${chk ? `${esc(chk.verdict)}` : 'Not yet audited'}
+              </span>
+            </div>
+            <div class="text-muted text-small" style="margin-top:2px">
+              Independent secondary LLM auditor cross-checks revenue extractions, Tier-2 classifications, and confidence calibration.
+            </div>
+          </div>
+          <button type="button" class="btn btn-sm ${chk ? 'btn-secondary' : 'btn-primary'}" id="btn-run-checker">
+            ${chk ? '↻ Re-run AI Checker' : '✧ Run AI Checker (Claude Sonnet 5)'}
+          </button>
+        </div>
+
+        ${chk ? `
+          <div style="background:white;border:1px solid var(--slate-200);border-radius:6px;padding:12px;margin-top:10px">
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
+              <div style="background:var(--slate-50);padding:8px;border-radius:4px">
+                <span style="font-size:10px;color:var(--slate-400);text-transform:uppercase;font-weight:700">Agreement Score</span>
+                <div style="font-size:16px;font-weight:700;color:var(--teal-800)">${chk.agreement_score ? `${chk.agreement_score} / 5` : '—'}</div>
+              </div>
+              <div style="background:var(--slate-50);padding:8px;border-radius:4px">
+                <span style="font-size:10px;color:var(--slate-400);text-transform:uppercase;font-weight:700">Confidence Calibration</span>
+                <div style="font-size:14px;font-weight:600;color:var(--slate-800);text-transform:capitalize">${esc(chk.confidence_assessment || 'Agreed')}</div>
+              </div>
+              <div style="background:var(--slate-50);padding:8px;border-radius:4px">
+                <span style="font-size:10px;color:var(--slate-400);text-transform:uppercase;font-weight:700">Recommendation</span>
+                <div style="font-size:14px;font-weight:600;color:${chk.recommendation==='Approve as-is'?'var(--teal-700)':'var(--amber-700)'}">${esc(chk.recommendation || 'Review')}</div>
+              </div>
+            </div>
+            
+            <div style="font-size:13px;line-height:1.5;color:var(--slate-700);margin-bottom:10px">
+              <strong>Audit Summary:</strong> ${esc(chk.summary || '')}
+            </div>
+
+            <div style="display:grid;gap:6px;font-size:12px;color:var(--slate-600)">
+              ${chk.extraction_audit ? `<div><strong>• Fact Extraction Audit:</strong> ${esc(chk.extraction_audit)}</div>` : ''}
+              ${chk.classification_audit ? `<div><strong>• Taxonomy Alignment Audit:</strong> ${esc(chk.classification_audit)}</div>` : ''}
+              ${chk.confidence_audit ? `<div><strong>• Confidence Rubric Audit:</strong> ${esc(chk.confidence_audit)}</div>` : ''}
+            </div>
+            <div class="text-muted text-small" style="margin-top:8px;font-size:11px">
+              Audited by ${esc(chk.checker_model || 'Claude Sonnet 5')} at ${esc(chk.checked_at || '')}
+            </div>
+          </div>
+        ` : `
+          <div style="padding:12px;background:white;border:1px dashed var(--slate-300);border-radius:6px;font-size:12px;color:var(--slate-500);text-align:center">
+            Click "Run AI Checker" to dispatch an independent audit verification to Claude Sonnet before approving.
+          </div>
+        `}
+      </div>
+
       <!-- Review form -->
       ${c.review_status === 'needs_review' ? `
         <div class="form-section">
@@ -2966,6 +3102,17 @@ window.openCase = function(caseId) {
 
     <!-- Revised manual case -->
     ${c.review_status !== 'needs_review' ? manualCaseFormHtml(c) : ''}`;
+
+  const btnChecker = $('#btn-run-checker');
+  if (btnChecker) {
+    btnChecker.onclick = () => run(async () => {
+      showLoading('Running AI Checker audit with Claude Sonnet 5...');
+      const chkRes = await api('case/check', { case_id: caseId });
+      await refresh();
+      notice(`Claude Sonnet audit: ${chkRes.verdict} (${chkRes.agreement_score}/5 agreement).`, chkRes.verdict === 'VERIFIED' ? 'success' : 'warning');
+      openCase(caseId);
+    }, 'Auditing case…');
+  }
 
   $('#review-form')?.addEventListener('submit', e => {
     e.preventDefault();
@@ -3186,7 +3333,12 @@ async function viewDashboard() {
   });
 
   $('#page-actions').innerHTML = `
-    <button class="btn" id="btn-export-dash">↓ Export</button>`;
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm btn-secondary" id="btn-reference" title="Filter to reference benchmark constituents">
+        Benchmark: ${esc(snapshot.benchmark_name || 'MSCI Asia ex Japan')}
+      </button>
+      <button class="btn btn-sm" id="btn-export-dash">↓ Export</button>
+    </div>`;
 
   $('#page-content').innerHTML = `
     <!-- Top-level exposure metrics -->
@@ -3214,7 +3366,7 @@ async function viewDashboard() {
       <!-- Sub-theme breakdown -->
       <div class="panel">
         <div class="panel-title">Sub-theme exposure breakdown</div>
-        <div class="panel-subtitle">Portfolio weight × company Tier-2 allocation. Tier-1 totals roll up.</div>
+        <div class="panel-subtitle">Portfolio weight × company Tier-2 allocation. Click any sub-theme row to filter companies.</div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -3227,16 +3379,16 @@ async function viewDashboard() {
                 const t1High = children.reduce((s,n)=>s+(subthemeExposure[n.node_id]?.upper||0),0);
                 const t1Pt   = children.reduce((s,n)=>s+(subthemeExposure[n.node_id]?.point||0),0);
                 return `
-                  <tr style="background:var(--slate-50)">
-                    <td><strong>${esc(t1.name)}</strong></td>
+                  <tr data-subtheme="${esc(t1.node_id)}" style="background:var(--slate-50);cursor:pointer" title="Click to filter companies by ${esc(t1.name)}">
+                    <td><strong>${esc(t1.name)}</strong> <span class="text-muted text-small">(Tier 1)</span></td>
                     <td class="td-num">${pct(t1Low)}</td>
                     <td class="td-num">${pct(t1High)}</td>
                     <td class="td-num">${pct(t1Pt)}</td>
                   </tr>
                   ${children.map(t2 => {
                     const v = subthemeExposure[t2.node_id]||{lower:0,upper:0,point:0};
-                    return `<tr>
-                      <td style="padding-left:28px">↳ ${esc(t2.name)}</td>
+                    return `<tr data-subtheme="${esc(t2.node_id)}" style="cursor:pointer" title="Click to filter companies by ${esc(t2.name)}">
+                      <td style="padding-left:28px">↳ ${esc(t2.name)} <span class="text-muted text-small">(Tier 2)</span></td>
                       <td class="td-num text-muted">${pct(v.lower)}</td>
                       <td class="td-num text-muted">${pct(v.upper)}</td>
                       <td class="td-num text-muted">${pct(v.point)}</td>
@@ -3250,12 +3402,22 @@ async function viewDashboard() {
     </div>
 
     <!-- Company table -->
-    <div class="panel">
+    <div class="panel" id="dashboard-companies">
       <div class="panel-title">Company-level exposure</div>
       <div class="panel-subtitle">
         Approved results only · ${esc(snapshot?.portfolio?.[0]?.as_of_date||'')} · 
         Unassessed companies: lower=0%, upper=100%, point=—
       </div>
+
+      <div class="company-filter-banner" id="company-filter-banner" hidden style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:12px 0;border:1px solid var(--teal-200);border-left:4px solid var(--teal-500);border-radius:8px;background:var(--teal-50)">
+        <div>
+          <span style="font-size:10px;font-weight:700;letter-spacing:.08em;color:var(--teal-600)">ACTIVE FILTER</span>
+          <div id="company-filter-name" style="font-size:14px;font-weight:600;color:var(--teal-900)"></div>
+          <div id="company-filter-count" style="font-size:11px;color:var(--slate-500)"></div>
+        </div>
+        <button type="button" class="btn btn-sm" id="btn-remove-filter">✕ Clear filter</button>
+      </div>
+
       <div class="table-wrap">
         <table>
           <thead>
@@ -3270,11 +3432,11 @@ async function viewDashboard() {
               <th>Status</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="dashboard-company-rows">
             ${d.companies.map(row => {
               const name = companyName(row.company_id);
               const ap = row.contributions.active.point;
-              return `<tr>
+              return `<tr data-dashboard-company="${esc(row.company_id)}">
                 <td class="td-company">${esc(name)}<span class="ticker">${esc(row.company_id)}</span></td>
                 <td class="td-num">${pct(row.weights.portfolio)}</td>
                 <td class="td-num">${pct(row.weights.benchmark)}</td>
@@ -3301,6 +3463,56 @@ async function viewDashboard() {
         Confidence scores use a non-probabilistic ordinal rubric (high/medium/low).
       </div>
     </div>`;
+
+  const allCompRows = [...document.querySelectorAll('[data-dashboard-company]')];
+  const filterCompanies = (title, matchingIds, label) => {
+    const idSet = new Set(matchingIds);
+    let count = 0;
+    allCompRows.forEach(tr => {
+      const show = idSet.has(tr.dataset.dashboardCompany);
+      tr.style.display = show ? '' : 'none';
+      if (show) count++;
+    });
+    $('#company-filter-banner').hidden = false;
+    $('#company-filter-name').textContent = `${label}: ${title}`;
+    $('#company-filter-count').textContent = `${count} of ${d.companies.length} companies match`;
+  };
+
+  const clearFilter = () => {
+    allCompRows.forEach(tr => tr.style.display = '');
+    $('#company-filter-banner').hidden = true;
+    $$('[data-subtheme]').forEach(r => r.style.outline = '');
+  };
+
+  $('#btn-remove-filter').onclick = clearFilter;
+
+  $('#btn-reference').onclick = () => {
+    const benchmarkIds = d.companies.filter(r => r.weights.benchmark > 0).map(r => r.company_id);
+    filterCompanies(snapshot.benchmark_name || 'MSCI Asia ex Japan', benchmarkIds, 'Benchmark');
+  };
+
+  $$('[data-subtheme]').forEach(rowEl => {
+    rowEl.onclick = () => {
+      const nid = rowEl.dataset.subtheme;
+      $$('[data-subtheme]').forEach(r => r.style.outline = '');
+      rowEl.style.outline = '2px solid var(--teal-500)';
+
+      const ids = new Set([nid]);
+      for (let sz = 0; sz !== ids.size;) {
+        sz = ids.size;
+        nodes.forEach(n => { if (ids.has(n.parent_id)) ids.add(n.node_id); });
+      }
+
+      const matchingCids = d.companies.filter(row => {
+        const c = cases.filter(c => c.company_id === row.company_id && c.theme_id === theme.id && c.review_status === 'approved').at(-1);
+        if (!c) return false;
+        return c.case?.units?.some(u => (u.node_ids || []).some(n => ids.has(n)) || Object.entries(u.allocations || {}).some(([n, s]) => ids.has(n) && s > 0));
+      }).map(r => r.company_id);
+
+      const targetNode = nodes.find(n => n.node_id === nid);
+      filterCompanies(targetNode?.name || nid, matchingCids, 'Sub-theme');
+    };
+  });
 
   $('#btn-export-dash')?.addEventListener('click', () => run(async () => {
     const r = await fetch('/api/export', {
@@ -3502,4 +3714,97 @@ function setPageHeader(eyebrow, title, subtitle) {
   if (t) t.textContent = title;
   if (s) s.textContent = subtitle || '';
   $('#page-actions').innerHTML = '';
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function downloadPortfolioTemplate() {
+  if (typeof XLSX === 'undefined') {
+    notice('Excel export library (SheetJS) is not loaded. Refresh and try again.', 'error');
+    return;
+  }
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ['Company', 'Bloomberg ticker', 'SEDOL', 'Country', 'Sector', 'Portfolio wt', 'Reference wt', 'Active wt'],
+    ['Taiwan Semiconductor Manufacturing', '2330 TT Equity', '6889106', 'Taiwan', 'Information Technology', 0.12, 0.08, 0.04],
+    ['Samsung Electronics', '005930 KS Equity', '6771720', 'South Korea', 'Information Technology', 0.09, 0.07, 0.02],
+    ['Tencent Holdings', '700 HK Equity', 'B01FLR7', 'China', 'Communication Services', 0.08, 0.06, 0.02]
+  ]);
+  sheet['!cols'] = [34, 20, 12, 14, 24, 14, 14, 14].map(wch => ({wch}));
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Portfolio holdings');
+  XLSX.writeFile(workbook, 'portfolio-template.xlsx');
+  notice('Excel template downloaded.', 'info');
+}
+
+function exportMindmap() {
+  let nodes;
+  try {
+    nodes = JSON.parse($('#taxonomy-json-area').value);
+    if (!Array.isArray(nodes)) throw Error();
+  } catch {
+    notice('Fix the taxonomy JSON before exporting.', 'error');
+    return;
+  }
+  const roots = nodes.filter(n => !n.parent_id);
+  if (!roots.length) {
+    notice('Add taxonomy nodes before exporting.', 'error');
+    return;
+  }
+  const title = $('#theme-form [name="theme_name"]')?.value || 'Investment theme';
+  const width = 1100;
+  let y = 130;
+  const xml = value => esc(value).replace(/&#39;/g, '&apos;');
+  const card = (label, x, top, w, fill) => {
+    const words = String(label || '').split(/\s+/);
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+      if ((line + ' ' + word).length > Math.floor(w / 8) && line) {
+        lines.push(line);
+        line = '';
+      }
+      line += (line ? ' ' : '') + word;
+    }
+    if (line) lines.push(line);
+    const h = Math.max(54, lines.length * 20 + 20);
+    return {
+      h,
+      svg: `<rect x="${x}" y="${top}" width="${w}" height="${h}" rx="9" fill="${fill}" stroke="#b3ddd8"/>` +
+           `<text x="${x + w / 2}" y="${top + 25}" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#102e35">` +
+           `${lines.map((l, i) => `<tspan x="${x + w / 2}" dy="${i ? 20 : 0}">${xml(l)}</tspan>`).join('')}</text>`
+    };
+  };
+
+  let content = '';
+  const rootCard = card(title, 350, 20, 400, '#b3ddd8');
+  content += rootCard.svg;
+  y = Math.max(y, 20 + rootCard.h + 45);
+
+  for (const root of roots) {
+    const parent = card(root.name, 350, y, 400, '#e6f4f2');
+    content += `<path d="M550 ${20 + rootCard.h} H40 V${y + parent.h / 2} H350" fill="none" stroke="#b3ddd8" stroke-width="2"/>` + parent.svg;
+    const childTop = y + parent.h + 30;
+    const children = nodes.filter(n => n.parent_id === root.node_id);
+    let rowTop = childTop, rowHeight = 0;
+    children.forEach((child, index) => {
+      if (index && index % 3 === 0) {
+        rowTop += rowHeight + 20;
+        rowHeight = 0;
+      }
+      const x = 70 + (index % 3) * 320;
+      const leaf = card(child.name, x, rowTop, 290, '#ffffff');
+      rowHeight = Math.max(rowHeight, leaf.h);
+      content += `<path d="M550 ${y + parent.h} V${rowTop - 12} H${x + 145} V${rowTop}" fill="none" stroke="#b3ddd8" stroke-width="2"/>` + leaf.svg;
+    });
+    y = children.length ? rowTop + rowHeight + 40 : childTop + 20;
+  }
+  downloadBlob(new Blob([`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${y}" viewBox="0 0 ${width} ${y}"><rect width="100%" height="100%" fill="#f5f7f8"/>${content}</svg>`], {type:'image/svg+xml'}), 'theme-mindmap.svg');
+  notice('Mind map exported as SVG.', 'info');
 }
