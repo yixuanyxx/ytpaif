@@ -8,9 +8,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+from test_fixtures import demo
 
 class AppFlowTest(unittest.TestCase):
     def setUp(self):
+        self.audit_sync_mock = patch('audit_store.sync_once', return_value={'configured': True, 'sent': 3})
+        self.audit_sync_mock.start()
+        self.addCleanup(self.audit_sync_mock.stop)
         self.temp = tempfile.TemporaryDirectory()
         os.environ['THEME_DATA_DIR'] = self.temp.name
         # Add prototype to sys.path so app is imported from prototype
@@ -20,7 +24,7 @@ class AppFlowTest(unittest.TestCase):
             sys.path.insert(0, proto_dir)
         import app
         self.app = importlib.reload(app)
-        self.theme = self.app.demo()
+        self.theme = demo(self.app)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -30,7 +34,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertAlmostEqual(d['summary']['portfolio']['point'], 0.18)
         self.assertAlmostEqual(d['summary']['benchmark']['point'], 0.14)
         self.assertAlmostEqual(d['summary']['active']['point'], 0.04)
-        self.assertEqual(self.app.demo()['id'], self.theme['id'])
+        self.assertEqual(demo(self.app)['id'], self.theme['id'])
         data = self.app.export(self.theme['id'])
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             self.assertIn('evidence.csv', z.namelist())
@@ -167,6 +171,56 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn('results', res)
         self.assertGreaterEqual(len(res['results']), 1)
         self.assertTrue(res['results'][0]['eligible'])
+
+    def test_no_synthetic_runtime_entrypoints(self):
+        with self.assertRaises(ValueError):
+            self.app.dispatch('/api/demo', {})
+        before = len(self.app.all_records('sources'))
+        with self.assertRaises(ValueError):
+            self.app.dispatch('/api/source/ingest_candidates', {'candidates': [{'company_id': 'DEMO_A'}]})
+        self.assertEqual(len(self.app.all_records('sources')), before)
+
+    def test_search_does_not_invent_documents(self):
+        comp = self.app.company_create({'name': 'No documents', 'bloomberg_ticker': 'REAL'})
+        before = len(self.app.all_records('sources'))
+        result = self.app.source_search({'company_ids': [comp['id']], 'auto_ingest': True})
+        self.assertEqual(result['results'], [])
+        self.assertEqual(result['ingested_count'], 0)
+        self.assertEqual(len(self.app.all_records('sources')), before)
+
+    def test_latest_earnings_only_respects_cutoff_and_overrides_types(self):
+        original = self.app.all_records('sources')[0]
+        for sid, kind, published in [('old_call', 'earnings_call', '2025-09-01'),
+                                     ('latest_call', 'earnings_call', '2025-12-01'),
+                                     ('future_call', 'earnings_call', '2027-01-01'),
+                                     ('annual', 'annual_report', '2025-12-31')]:
+            self.app.put('sources', {**original, 'id': sid, 'company_id': 'DEMO_A',
+                                    'title': sid, 'source_type': kind, 'publication_date': published})
+        res = self.app.source_search({'company_ids': ['DEMO_A'],
+            'source_types': ['annual_report'], 'stick_to_earnings_call': True,
+            'cutoff': '2026-01-01'})
+        self.assertEqual(len(res['results']), 1)
+        self.assertEqual(res['results'][0]['title'], 'latest_call')
+        self.assertEqual(res['results'][0]['source_type'], 'earnings_call')
+
+    def test_batch_processes_ready_companies_and_reports_failures(self):
+        template = self.app.all_records('sources')[0]
+        for cid in ('READY_A', 'READY_B', 'TOO_LONG', 'NO_EVIDENCE', 'FUTURE'):
+            self.app.company_create({'id': cid, 'name': cid, 'bloomberg_ticker': cid})
+            self.app.put('sources', {**template, 'id': 'source_' + cid, 'company_id': cid,
+                'publication_date': '2099-01-01' if cid == 'FUTURE' else '2025-01-01',
+                'evidence': [] if cid == 'NO_EVIDENCE' else [{
+                    'evidence_id': 'e_' + cid,
+                    'passage': 'x' * (60001 if cid == 'TOO_LONG' else 100)}]})
+        def analyze(payload):
+            if payload['company_id'] == 'READY_B':
+                raise ValueError('Provider unavailable')
+            return {'id': 'case_ready'}
+        with patch.object(self.app, 'analyze', side_effect=analyze) as mocked:
+            res = self.app.analyze_all({'theme_id': self.theme['id']})
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(res['analysed_count'], 1)
+        self.assertEqual({e['company_id'] for e in res['errors']}, {'READY_B', 'TOO_LONG'})
 
     def test_generate_handles_counts_gracefully(self):
         # Non-int or 'auto'
