@@ -20,6 +20,7 @@ import re
 import zipfile
 import engine
 import financials
+import audit_store
 
 ROOT = Path(__file__).resolve().parent
 
@@ -85,6 +86,7 @@ def db():
     c.execute('PRAGMA journal_mode=WAL')
     c.execute('''CREATE TABLE IF NOT EXISTS records
                  (kind TEXT, id TEXT, payload TEXT, PRIMARY KEY(kind,id))''')
+    audit_store.initialize(c)
     try:
         with c:
             yield c
@@ -93,8 +95,13 @@ def db():
 
 def put(kind, record):
     with db() as c:
+        previous = c.execute('SELECT payload FROM records WHERE kind=? AND id=?', (kind, record['id'])).fetchone()
         c.execute('INSERT OR REPLACE INTO records VALUES (?,?,?)',
                   (kind, record['id'], json.dumps(record, allow_nan=False)))
+        if kind != 'cache':
+            audit_store.enqueue(c, 'record.updated' if previous else 'record.created',
+                                {'before': json.loads(previous[0]) if previous else None, 'after': record},
+                                kind, record['id'])
     return record
 
 def all_records(kind):
@@ -159,10 +166,12 @@ def theme_create(d):
 
 def theme_delete(d):
     rid = d.get('id')
-    if not find('themes', rid):
-        raise ValueError('Theme not found')
     with db() as c:
+        previous = c.execute('SELECT payload FROM records WHERE kind=? AND id=?', ('themes', rid)).fetchone()
+        if not previous:
+            raise ValueError('Theme not found')
         c.execute('DELETE FROM records WHERE kind=? AND id=?', ('themes', rid))
+        audit_store.enqueue(c, 'record.deleted', {'before': json.loads(previous[0]), 'after': None}, 'themes', rid)
     return {'deleted': rid}
 
 # ── Company / Security ────────────────────────────────────────────────────────
@@ -281,112 +290,11 @@ def evidence_for(company_id, theme_id):
                if s['company_id'] == company_id and s['publication_date'] <= cutoff]
     return sources, {e['evidence_id'] for s in sources for e in s['evidence']}
 
-def regional_registry_info(comp, period='FY2025'):
-    ticker = comp.get('bloomberg_ticker', '')
-    cname = comp.get('name', 'Company')
-    cid = comp.get('id', '')
-    jurisdiction = comp.get('jurisdiction', '')
-    parts = ticker.split()
-    code = parts[0] if parts else cid
-    suffix = parts[1] if len(parts) > 1 else ''
-
-    if suffix in ('TT', 'TWO') or 'Taiwan' in jurisdiction:
-        return {
-            'jurisdiction': 'Taiwan',
-            'registry': 'Taiwan MOPS (Market Observation Post System)',
-            'short_registry': 'TWSE / MOPS',
-            'url': f"https://mops.twse.com.tw/mops/web/t51sb10?stkno={code}",
-            'annual_report': f"{cname} Annual Shareholders' Report ({period})",
-            'regulatory_filing': f"{cname} MOPS Material Information & Segment Filing ({period})"
-        }
-    elif suffix in ('KS', 'KQ') or 'Korea' in jurisdiction:
-        return {
-            'jurisdiction': 'South Korea',
-            'registry': 'Korea DART (Data Analysis, Retrieval, and Transfer System / FSS)',
-            'short_registry': 'KRX / DART',
-            'url': f"https://dart.fss.or.kr/dsab001/main.do?textCrpNm={code}",
-            'annual_report': f"{cname} Annual Business Report / 사업보고서 ({period})",
-            'regulatory_filing': f"{cname} DART Statutory Audit & Segment Disclosure ({period})"
-        }
-    elif suffix == 'AU' or 'Australia' in jurisdiction:
-        return {
-            'jurisdiction': 'Australia',
-            'registry': 'ASX Market Announcements / ASIC',
-            'short_registry': 'ASX Announcements',
-            'url': f"https://www.asx.com.au/asx/markets/companyInfo.do?by=asxCode&asxCode={code}",
-            'annual_report': f"{cname} Annual Report & Full Year Statutory Accounts ({period})",
-            'regulatory_filing': f"{cname} ASX Appendix 4E Preliminary Final Report ({period})"
-        }
-    elif suffix in ('HK', 'CH') or 'Hong Kong' in jurisdiction or 'China' in jurisdiction:
-        clean_code = code.zfill(5) if code.isdigit() else code
-        if suffix == 'CH' or 'HK-C' in cname or 'A (HK-C)' in cname:
-            return {
-                'jurisdiction': 'Mainland China',
-                'registry': 'CNINFO (Information Disclosure for Listed Companies)',
-                'short_registry': 'CNINFO (SSE/SZSE)',
-                'url': f"http://www.cninfo.com.cn/new/disclosure/stock?stockCode={code}&orgId=",
-                'annual_report': f"{cname} Annual Report / 年度报告 ({period})",
-                'regulatory_filing': f"{cname} Audited Financial Disclosures ({period})"
-            }
-        else:
-            return {
-                'jurisdiction': 'Hong Kong / China',
-                'registry': 'HKEXnews Regulatory Disclosure Platform',
-                'short_registry': 'HKEXnews',
-                'url': f"https://www.hkexnews.hk/listedco/listconews/advancedsearch/search_active_main.aspx?stock_code={clean_code}",
-                'annual_report': f"{cname} Audited Annual Report & Accounts ({period})",
-                'regulatory_filing': f"{cname} HKEX Final Results Announcement ({period})"
-            }
-    elif suffix == 'SP' or 'Singapore' in jurisdiction:
-        return {
-            'jurisdiction': 'Singapore',
-            'registry': 'SGX Net Corporate Announcement System',
-            'short_registry': 'SGX Net',
-            'url': f"https://www.sgx.com/securities/company-announcements?security={code}",
-            'annual_report': f"{cname} Annual Report & Financial Statements ({period})",
-            'regulatory_filing': f"{cname} SGX Full Year Results Announcement ({period})"
-        }
-    elif suffix == 'IN' or 'India' in jurisdiction:
-        return {
-            'jurisdiction': 'India',
-            'registry': 'National Stock Exchange (NSE) / BSE Corporate Filings',
-            'short_registry': 'NSE Corporate Filings',
-            'url': f"https://www.nseindia.com/companies-listing/corporate-filings-annual-reports?symbol={code}",
-            'annual_report': f"{cname} Integrated Annual Report & Financial Results ({period})",
-            'regulatory_filing': f"{cname} SEBI Statutory Segment Filing ({period})"
-        }
-    elif suffix == 'NZ' or 'New Zealand' in jurisdiction:
-        return {
-            'jurisdiction': 'New Zealand',
-            'registry': 'NZX Market Disclosures Platform',
-            'short_registry': 'NZX Disclosures',
-            'url': f"https://www.nzx.com/companies/{code}",
-            'annual_report': f"{cname} Annual Report & Full Year Results ({period})",
-            'regulatory_filing': f"{cname} NZX Full Year Results ({period})"
-        }
-    elif suffix == 'TB' or 'Thailand' in jurisdiction:
-        return {
-            'jurisdiction': 'Thailand',
-            'registry': 'SET Community Disclosure / SEC Thailand',
-            'short_registry': 'SETTRADE / SET',
-            'url': f"https://www.set.or.th/en/market/product/stock/quote/{code}/company-summary",
-            'annual_report': f"{cname} Form 56-1 One Report / Annual Report ({period})",
-            'regulatory_filing': f"{cname} SET Audited Financial Disclosures ({period})"
-        }
-    else:
-        return {
-            'jurisdiction': jurisdiction or 'Asia-Pacific',
-            'registry': 'National Regulatory Authority',
-            'short_registry': 'Official Registry',
-            'url': f"https://www.google.com/search?q={cname}+annual+report+investor+relations",
-            'annual_report': f"{cname} Audited Annual Report ({period})",
-            'regulatory_filing': f"{cname} Statutory Disclosure Filing ({period})"
-        }
-
 def source_search(d):
     """Find company source documents matching criteria (YTP-17)."""
     company_ids = d.get('company_ids') or ([d['company_id']] if 'company_id' in d else [])
-    source_types = d.get('source_types', ['annual_report', 'regulatory_filing'])
+    stick_earnings = bool(d.get('stick_to_earnings_call'))
+    source_types = ['earnings_call'] if stick_earnings else d.get('source_types', ['annual_report', 'regulatory_filing'])
     cutoff = d.get('cutoff') or date.today().isoformat()
     period = d.get('period', '')
     results = []
@@ -396,6 +304,12 @@ def source_search(d):
         except ValueError:
             continue
         existing = [s for s in all_records('sources') if s['company_id'] == cid]
+        if stick_earnings:
+            existing = sorted(
+                [s for s in existing if s.get('source_type') == 'earnings_call'
+                 and s.get('publication_date') and s['publication_date'] <= cutoff],
+                key=lambda s: (s['publication_date'], s.get('retrieved_at', '')), reverse=True
+            )[:1]
         if existing:
             for s in existing:
                 st = s.get('source_type', 'annual_report')
@@ -416,39 +330,6 @@ def source_search(d):
                     'eligible': eligible,
                     'ineligible_reason': 'Published after cutoff' if not eligible else None
                 })
-        else:
-            reg = regional_registry_info(comp, period or 'FY2025')
-            cname = comp.get('name', 'Company')
-            templates = {
-                'annual_report': reg['annual_report'],
-                'regulatory_filing': reg['regulatory_filing'],
-                'investor_presentation': f"{cname} Investor Presentation ({period or 'FY2025'})",
-                'earnings_call': f"{cname} Q4/Full Year {period or 'FY2025'} Earnings Conference Call Transcript",
-                'transcripts': f"{cname} Earnings Call Transcript ({period or 'FY2025'})",
-                'sustainability_report': f"{cname} Sustainability & ESG Report 2025",
-                'news_announcements': f"{cname} Corporate Announcement"
-            }
-            stick_earnings = bool(d.get('stick_to_earnings_call'))
-            if stick_earnings:
-                cand_types = ['earnings_call']
-            else:
-                cand_types = [t for t in source_types if t in templates][:2] or ['annual_report']
-            for st in cand_types:
-                cand_pub = '2026-03-31'
-                eligible = bool(cand_pub <= cutoff)
-                results.append({
-                    'company_id': cid,
-                    'company_name': cname,
-                    'title': templates.get(st, f"{cname} Filing"),
-                    'source_type': st,
-                    'registry': reg['registry'],
-                    'short_registry': reg['short_registry'],
-                    'url': reg['url'],
-                    'publication_date': cand_pub,
-                    'period': period or 'FY2025',
-                    'eligible': eligible,
-                    'ineligible_reason': 'Published after cutoff' if not eligible else None
-                })
     run_record = {
         'id': ident('searchrun'),
         'created_at': now(),
@@ -460,94 +341,8 @@ def source_search(d):
         'results': results
     }
     put('search_runs', run_record)
-    ingested = []
-    if d.get('auto_ingest'):
-        ingested_res = ingest_candidates({'candidates': results})
-        ingested = ingested_res.get('sources', [])
-    return {'search_run': run_record, 'results': results, 'ingested_count': len(ingested)}
-
-def ingest_candidates(d):
-    """Ingest candidate search results into the source library with evidence passages."""
-    candidates = d.get('candidates', [])
-    if not candidates and d.get('search_run_id'):
-        sr = get('search_runs', d['search_run_id'])
-        candidates = sr.get('results', [])
-    if not candidates:
-        runs = all_records('search_runs')
-        if runs:
-            candidates = runs[-1].get('results', [])
-    ingested = []
-    seen_companies = set()
-    for cand in candidates:
-        cid = cand.get('company_id')
-        if not cid or cid in seen_companies:
-            continue
-        try:
-            comp = get('companies', cid)
-        except ValueError:
-            continue
-        seen_companies.add(cid)
-        cname = comp.get('name', 'Company')
-        ticker = comp.get('bloomberg_ticker', '')
-        sedol = comp.get('sedol', '')
-        period = cand.get('period', 'FY2025')
-        pub_date = cand.get('publication_date') or '2026-03-31'
-        reg = regional_registry_info(comp, period)
-        source_type = cand.get('source_type', 'annual_report')
-        title = cand.get('title') or (reg['annual_report'] if source_type != 'earnings_call' else f"{cname} Q4/{period} Earnings Call Transcript")
-        url = cand.get('url') or reg['url']
-        registry = cand.get('registry') or reg['registry']
-        short_reg = cand.get('short_registry') or reg['short_registry']
-        
-        if source_type == 'earnings_call':
-            text = (
-                f"EARNINGS CONFERENCE CALL TRANSCRIPT & MANAGEMENT DISCUSSION ({period})\n"
-                f"OFFICIAL SOURCE:          CORPORATE INVESTOR RELATIONS & TRANSCRIPTS\n"
-                f"COMPANY NAME:             {cname}\n"
-                f"BLOOMBERG TICKER:         {ticker}\n"
-                f"SEDOL (LONDON STK EXCH):  {sedol or 'N/A'}\n"
-                f"INTERNAL ID:              {cid}\n"
-                f"EVENT TITLE:              {title}\n"
-                f"FISCAL PERIOD:            {period} | TRANSCRIPT DATE: {pub_date}\n"
-                f"REPRESENTATIVES:          Chief Executive Officer, Chief Financial Officer, Head of Investor Relations\n\n"
-                f"EXECUTIVE SUMMARY & OPERATIONAL HIGHLIGHTS:\n"
-                f"Thank you for joining our {period} earnings conference call. "
-                f"During this period, {cname} sustained strong commercial momentum across our core operational divisions in {reg['jurisdiction']}. "
-                f"Total consolidated net external revenue reached target levels. Operating segment revenues reflect direct deliveries to strategic infrastructure, "
-                f"specialized hardware manufacturing, advanced supply chain solutions, and enterprise market applications. "
-                f"In our business segment breakdown, our primary commercial units reported solid order backlogs and revenue contributions qualifying under primary operational categories."
-            )
-        else:
-            text = (
-                f"STATUTORY DISCLOSURE & AUDITED ANNUAL FINANCIAL REPORT ({period})\n"
-                f"REGULATORY FILING REGISTRY: {registry.upper()}\n"
-                f"COMPANY NAME:             {cname}\n"
-                f"BLOOMBERG TICKER:         {ticker}\n"
-                f"SEDOL (LONDON STK EXCH):  {sedol or 'N/A'}\n"
-                f"INTERNAL ID:              {cid}\n"
-                f"FILING TITLE:             {title}\n"
-                f"REPORTING PERIOD:         {period} | PUBLICATION DATE: {pub_date}\n"
-                f"OFFICIAL REPOSITORY URL:  {url}\n\n"
-                f"BUSINESS OVERVIEW & OPERATIONS:\n"
-                f"{cname} is an active commercial enterprise incorporated in {reg['jurisdiction']}. "
-                f"During fiscal period {period}, the company engaged in principal operational activities including product design, manufacturing, hardware/software infrastructure, and enterprise commercial solutions. "
-                f"Financial results disclose total external net revenue across primary operating segments. "
-                f"Audited segment disclosures provide breakdowns of disclosed revenue contributions and qualifying business lines."
-            )
-        source = source_ingest({
-            'company_id': cid,
-            'publication_date': pub_date,
-            'period': period,
-            'title': title,
-            'registry': registry,
-            'short_registry': short_reg,
-            'filename': f"{cname.replace(' ', '_')}_{source_type}_{period}.txt",
-            'content': base64.b64encode(text.encode('utf-8')).decode('ascii'),
-            'url': url,
-            'source_type': source_type
-        })
-        ingested.append(source)
-    return {'ingested_count': len(ingested), 'sources': ingested}
+    return {'search_run': run_record, 'results': results, 'ingested_count': 0,
+            'message': 'Search covers uploaded documents only. Upload real filings to add evidence.'}
 
 
 # ── Case ──────────────────────────────────────────────────────────────────────
@@ -682,6 +477,8 @@ def llm(task, payload, run_rec):
     request = Request(endpoint, data=json.dumps(body).encode(),
                       headers={'Authorization': 'Bearer ' + key,
                                'Content-Type': 'application/json'})
+    with db() as c:
+        audit_store.enqueue(c, 'model.request', {'model': model, 'endpoint': endpoint, 'body': body}, 'model_calls', call['id'])
     max_attempts = 4
     for attempt in range(max_attempts):
         try:
@@ -971,11 +768,15 @@ def analyze_all(d):
         comp_sources, valid_eids = evidence_for(comp['id'], theme_id)
         if not valid_eids:
             continue
+        if sum(len(e.get('passage', '')) for s in comp_sources for e in s.get('evidence', [])) > 60000:
+            errors.append({'company_id': comp['id'], 'company_name': comp['name'],
+                           'error': 'Evidence exceeds 60,000 characters; select passages manually.'})
+            continue
         selected = []
         char_count = 0
         for s in comp_sources:
             for e in s.get('evidence', []):
-                if char_count + len(e.get('passage', '')) <= 55000:
+                if char_count + len(e.get('passage', '')) <= 60000:
                     selected.append(e['evidence_id'])
                     char_count += len(e.get('passage', ''))
         if not selected:
@@ -1063,6 +864,8 @@ def check_case(d):
         if alt not in candidate_models:
             candidate_models.append(alt)
 
+    with db() as c:
+        audit_store.enqueue(c, 'model.check_request', {'model': model, 'system': system_prompt, 'user': user_prompt}, 'cases', case_id)
     last_err = None
     output_obj = None
 
@@ -1375,7 +1178,10 @@ def state():
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
     checker_model = os.environ.get('CHECKER_LLM_MODEL', 'claude-sonnet-5')
+    with db() as c:
+        audit_status = audit_store.status(c)
     return {
+        'audit_sync': audit_status,
         **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in all_records(k)] if k == 'sources' else all_records(k)) for k in
            ('themes', 'companies', 'sources', 'cases', 'reviews', 'runs', 'snapshots',
             'portfolio_imports', 'search_runs')},
@@ -1391,94 +1197,9 @@ def state():
 
 # ── Demo ──────────────────────────────────────────────────────────────────────
 
-def demo():
-    existing = [t for t in all_records('themes') if t.get('theme_name') == 'AI Infrastructure · demonstration']
-    if existing:
-        return existing[0]
-    nodes = [
-        {'node_id': 'compute',      'parent_id': None,      'name': 'Compute Hardware',
-         'definition': 'Dedicated AI chips and systems', 'examples': ['AI accelerators']},
-        {'node_id': 'compute_design','parent_id': 'compute', 'name': 'AI Chip Design',
-         'definition': 'Companies designing AI-specific chips', 'examples': ['GPU designers']},
-        {'node_id': 'compute_fab',  'parent_id': 'compute', 'name': 'AI Chip Fabrication',
-         'definition': 'Foundries manufacturing AI chips', 'examples': ['TSMC AI orders']},
-        {'node_id': 'datacenter',   'parent_id': None,      'name': 'Data Centre Infrastructure',
-         'definition': 'Infrastructure explicitly serving AI workloads', 'examples': ['AI server racks']},
-        {'node_id': 'dc_power',     'parent_id': 'datacenter','name': 'Power & Cooling',
-         'definition': 'Power delivery and cooling for AI data centres', 'examples': ['Liquid cooling systems']},
-        {'node_id': 'dc_server',    'parent_id': 'datacenter','name': 'Server Hardware',
-         'definition': 'AI-optimised server platforms', 'examples': ['AI inference servers']},
-    ]
-    theme = theme_create({
-        'theme_name': 'AI Infrastructure · demonstration',
-        'theme_description': 'Synthetic worked examples from the specification; no real-company investment conclusions.',
-        'included_activities': 'Dedicated AI hardware and supported AI infrastructure',
-        'excluded_activities': 'General enterprise computing; indirect beneficiaries',
-        'positive_examples': 'AI accelerators / dedicated AI server revenue qualifies',
-        'negative_examples': 'General cloud revenue without an AI allocation does not qualify',
-        'nodes': nodes
-    })
-    for cid, exposure in [('DEMO_A', .5), ('DEMO_B', .1), ('DEMO_MIXED', None)]:
-        put('companies', {
-            'id': cid,
-            'name': {'DEMO_A': 'Company A', 'DEMO_B': 'Company B', 'DEMO_MIXED': 'Mixed business'}[cid] + ' (synthetic)',
-            'bloomberg_ticker': cid, 'sedol': '', 'jurisdiction': 'Example', 'created_at': now()
-        })
-        text = 'SYNTHETIC DEMONSTRATION. Consolidated external FY2025 revenue is USD 100 million. '
-        if exposure is not None:
-            text += f'Qualifying AI hardware revenue is USD {exposure*100:g} million; remaining revenue is unrelated consumer services.'
-        else:
-            text += 'AI hardware revenue 20 million; mixed data centre revenue 40 million with undisclosed AI share; excluded consumer services revenue 40 million.'
-        source = source_ingest({
-            'company_id': cid, 'publication_date': '2026-01-01', 'period': 'FY2025',
-            'filename': cid + '.txt',
-            'content': base64.b64encode(text.encode()).decode(),
-            'url': '', 'source_type': 'synthetic_example'
-        })
-        eid = source['evidence'][0]['evidence_id']
-        def unit(uid, revenue, lo, hi, point, relationship, leaf=None):
-            return {
-                'unit_id': uid, 'activity': uid, 'revenue': revenue,
-                'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'external': True,
-                'evidence_ids': [eid], 'overlap_group': None,
-                'lower': lo, 'upper': hi, 'point': point,
-                'relationship_type': relationship,
-                'rationale': 'Synthetic source explicitly describes activity',
-                'scope_check': 'Consumer services fall outside approved AI infrastructure scope' if relationship == 'excluded' else '',
-                'method': 'disclosed' if point is not None else 'insufficient_evidence',
-                'assumption': '', 'allocations': {leaf: 1} if leaf else {}
-            }
-        if exposure is not None:
-            units = [unit('hardware', exposure*100, 1, 1, 1, 'direct', 'compute_fab'),
-                     unit('other', (1-exposure)*100, 0, 0, 0, 'excluded')]
-        else:
-            units = [unit('hardware', 20, 1, 1, 1, 'direct', 'compute_design'),
-                     unit('mixed', 40, 0, 1, None, 'insufficient_evidence', 'dc_server'),
-                     unit('other', 40, 0, 0, 0, 'excluded')]
-        case = save_case({
-            'company_id': cid, 'theme_id': theme['id'],
-            'case': {'total_revenue': 100, 'denominator_evidence_ids': [eid],
-                     'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'units': units},
-            'classification_confidence': 'high',
-            'exposure_quality': 'high' if exposure is not None else 'low',
-            'confidence_basis': 'Synthetic disclosed figures; mixed business retains an unknown allocation'
-        })
-        review({'case_id': case['id'], 'decision': 'approved',
-                'reviewer': 'Demo fixture', 'reason': 'Verified synthetic worked example'})
-
-    def row(cid, w, label):
-        return {'snapshot_id': label, 'as_of_date': '2026-10-03',
-                'company_id': cid, 'security_id': cid + '_ORD', 'weight': w}
-    snapshot_create({
-        'name': 'Specification example · synthetic',
-        'portfolio': [row('DEMO_A', .2, 'demo_p'), row('DEMO_B', .8, 'demo_p')],
-        'benchmark': [row('DEMO_A', .1, 'demo_b'), row('DEMO_B', .9, 'demo_b')]
-    })
-    return theme
-
 # ── HTTP dispatch ─────────────────────────────────────────────────────────────
 
-def dispatch(path, d):
+def _dispatch(path, d):
     if path == '/api/theme':            return theme_create(d)
     if path == '/api/theme/delete':     return theme_delete(d)
     if path == '/api/generate':         return generate(d)
@@ -1487,17 +1208,56 @@ def dispatch(path, d):
     if path in ('/api/case/check', '/api/check'): return check_case(d)
     if path == '/api/company':          return company_create(d)
     if path in ('/api/source/search', '/api/search'): return source_search(d)
-    if path == '/api/source/ingest_candidates':       return ingest_candidates(d)
     if path == '/api/source':           return source_ingest(d)
     if path in ('/api/portfolio/import', '/api/portfolio_import'): return portfolio_import(d)
     if path == '/api/case':             return save_case(d)
     if path == '/api/review':           return review(d)
     if path == '/api/snapshot':         return snapshot_create(d)
     if path == '/api/dashboard':        return dashboard(d['theme_id'], d.get('snapshot_id'))
-    if path == '/api/demo':             return demo()
     if path == '/api/evaluate':         return evaluate_examples(d.get('examples', []))
     if path == '/api/source/update': return source_update(d)
     raise ValueError('Unknown API endpoint')
+
+def audited_action(path, data, action, requested_view=None):
+    view = audit_store.resolve_view(path, requested=requested_view)
+    if view == 'dashboard':
+        return action()
+    view_token = audit_store.view_name.set(view)
+    token = audit_store.request_id.set(str(uuid.uuid4()))
+    try:
+        with db() as c:
+            audit_store.enqueue(c, 'request.input', {'path': path, 'input': data})
+        try:
+            result = action()
+        except Exception as error:
+            with db() as c:
+                audit_store.enqueue(c, 'request.failed', {'path': path, 'error_type': type(error).__name__,
+                                                         'error': str(error)})
+            raise
+        output = {'bytes': len(result), 'sha256': hashlib.sha256(result).hexdigest()} if isinstance(result, bytes) else result
+        with db() as c:
+            audit_store.enqueue(c, 'request.output', {'path': path, 'output': output})
+        if path == '/api/theme' and isinstance(result, dict):
+            try:
+                sync = audit_store.sync_once(DATA / 'research.sqlite', request_id_filter=audit_store.request_id.get())
+                with db() as c:
+                    pending = c.execute("SELECT count(*) FROM audit_outbox WHERE synced_at IS NULL AND json_extract(body, '$.request_id')=?",
+                                        (audit_store.request_id.get(),)).fetchone()[0]
+                state = 'synced' if sync.get('configured') and pending == 0 else 'pending'
+                audit_result = {'state': state, 'configured': sync.get('configured', False),
+                                'error': sync.get('error')}
+            except Exception as error:
+                audit_result = {'state': 'pending', 'error': type(error).__name__}
+            result = {**result, 'audit_sync': audit_result}
+        return result
+    finally:
+        audit_store.request_id.reset(token)
+        audit_store.view_name.reset(view_token)
+
+
+def dispatch(path, d, requested_view=None):
+    return audited_action(path, d, lambda: _dispatch(path, d), requested_view)
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
@@ -1568,11 +1328,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('JSON object required')
             if self.path == '/api/export':
                 return self.respond(
-                    export(d['theme_id'], d.get('snapshot_id')),
+                    audited_action(self.path, d, lambda: export(d['theme_id'], d.get('snapshot_id')), self.headers.get('X-Theme-Lab-View')),
                     mime='application/zip',
                     extra={'Content-Disposition': 'attachment; filename=theme-analysis.zip'}
                 )
-            self.respond(dispatch(self.path, d))
+            self.respond(dispatch(self.path, d, self.headers.get('X-Theme-Lab-View')))
         except (ValueError, KeyError, TypeError, ImportError) as error:
             self.respond({'error': str(error)}, 400)
         except Exception:
@@ -1585,10 +1345,13 @@ if __name__ == '__main__':
     print(f'Theme Lab v1: http://127.0.0.1:{port}', flush=True)
     print('Local access only. Ctrl+C stops the application.', flush=True)
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    audit_stop = audit_store.start_worker(DATA / 'research.sqlite')
     while True:
         try:
             server.serve_forever()
         except KeyboardInterrupt:
+            audit_stop.set()
+            server.server_close()
             break
         except Exception as e:
             print(f'Server warning: {e}', flush=True)
