@@ -10,6 +10,7 @@ let state = null;
 let currentView = 'dashboard';
 let selectedDashboardThemeId = '';
 let selectedDashboardPortfolioId = '';
+let selectedSourcePortfolioId = '';
 let dashboardRenderVersion = 0;
 const VIEW_STORAGE_KEY = 'theme-lab-current-view';
 const VALID_VIEWS = new Set([
@@ -1729,7 +1730,6 @@ function renderEditTable(rows) {
       <div style="padding:12px 20px;border-top:1px solid var(--slate-50);background:var(--slate-50);
         display:flex;align-items:center;justify-content:space-between;font-size:12px">
         <span class="text-muted">${rows.length} rows · ${rows.filter(r=>r.excluded).length} excluded</span>
-        <button class="btn btn-sm" id="btn-add-row">+ Add row</button>
       </div>
     </div>`;
 
@@ -1882,19 +1882,6 @@ function bindEditTable(rows) {
     });
   });
 
-  // Add row
-  $('#btn-add-row').onclick = () => {
-    const newRow = {
-      name:'', ticker:'', sedol:'', country:'', sector:'',
-      portfolio_wt:0, reference_wt:0, active_wt:0,
-      error:'No security identifier (ticker or SEDOL)',
-      conflict:false, excluded:false
-    };
-    rows.push(newRow);
-    renderEditTable(rows);
-    $('#holdings-tbody').lastElementChild?.querySelector('input')?.focus();
-  };
-
   // Confirm import
   $('#btn-confirm-import').onclick = () => {
     const name = rows._importName || 'Portfolio import';
@@ -2037,11 +2024,27 @@ function renderExistingPortfolioCards() {
 async function viewSources() {
   setPageHeader('STEP 3', 'Source Documents',
     'Find and upload company filings');
-  const companies = state.companies || [];
-  const sources   = state.sources   || [];
+  const portfolios = state.portfolio_imports || [];
+  const portfolio = portfolios.find(p => p.id === selectedSourcePortfolioId) || portfolios.at(-1);
+  selectedSourcePortfolioId = portfolio?.id || '';
+  const portfolioRows = portfolio?.rows || [];
+  const companyIds = new Set(portfolioRows.map(row => row.company_id).filter(id => id && id !== 'CASH'));
+  const companies = (state.companies || []).filter(company => companyIds.has(company.id));
+  const sources = (state.sources || []).filter(source => companyIds.has(source.company_id));
   const theme     = (state.themes  || []).filter(t=>t.approved).at(-1);
 
   $('#page-actions').innerHTML = '';
+  const portfolioSelectorHtml = `
+    <div class="dashboard-selectors" style="grid-template-columns:minmax(220px, 1fr)">
+      <label class="dashboard-selector">
+        <span>Portfolio</span>
+        <select id="source-portfolio-select" ${portfolios.length ? '' : 'disabled'}>
+          ${portfolios.length
+            ? portfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolio?.id ? 'selected' : ''}>${esc(p.name)}${p.holdings_date ? ` · ${esc(p.holdings_date)}` : ''}</option>`).join('')
+            : '<option value="">No portfolios imported</option>'}
+        </select>
+      </label>
+    </div>`;
 
   const SOURCE_TYPES = [
     { value:'annual_report',         label:'Annual report',          default:true  },
@@ -2065,12 +2068,14 @@ async function viewSources() {
     </label>`;
   }).join('');
 
-  const latestSearchRun = (state.search_runs && state.search_runs.length > 0)
-    ? state.search_runs[state.search_runs.length - 1]
-    : null;
-  const candidateResults = latestSearchRun?.results || [];
+  const latestSearchRun = (state.search_runs || []).at(-1) || null;
+  const portfolioCompanyIds = new Set(companies.map(company => company.id));
+  const candidateResults = (latestSearchRun?.results || [])
+    .filter(result => portfolioCompanyIds.has(result.company_id));
+  const candidateCompanyCount = new Set(candidateResults.map(result => result.company_id)).size;
 
   $('#page-content').innerHTML = `
+    ${portfolioSelectorHtml}
     <div class="grid-1-2" style="align-items:start">
 
       <!-- Search config -->
@@ -2150,7 +2155,7 @@ async function viewSources() {
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap">
               <div>
                 <div class="panel-title">Document search results</div>
-                <div class="panel-subtitle">${candidateResults.length} candidate filings identified across regional exchanges (${latestSearchRun.company_ids?.length || 0} companies)</div>
+                <div class="panel-subtitle">${candidateResults.length} candidate filings identified across regional exchanges (${candidateCompanyCount} companies)</div>
               </div>
             </div>
             <div class="table-wrap" style="max-height:240px;overflow-y:auto">
@@ -2180,7 +2185,7 @@ async function viewSources() {
               <div class="form-group span-2">
                 <label class="field-label">Company <span class="required">*</span></label>
                 <select name="company_id" required>
-                  <option value="">— select company —</option>
+                  <option value="">${companies.length ? '— select company —' : 'No companies in selected portfolio'}</option>
                   ${companies.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
                 </select>
               </div>
@@ -2220,15 +2225,20 @@ async function viewSources() {
         <div class="panel">
           <div class="panel-title">Source library</div>
           <div class="panel-subtitle">${sources.length} documents · passages split at 5,000 chars per page</div>
-          ${companies.length > 0 ? sourceLibrary(sources) : `
+          ${companies.length > 0 ? sourceLibrary(sources, companies, portfolio) : `
             <div class="empty-state" style="padding:32px 16px">
               <div class="empty-icon">📄</div>
-              <h3>No sources yet</h3>
-              <p>Upload actual company documents to begin analysis.</p>
+              <h3>No portfolio companies</h3>
+              <p>${portfolio ? 'The selected portfolio has no saved company holdings.' : 'Import a portfolio to choose its companies for source search.'}</p>
             </div>`}
         </div>
       </div>
     </div>`;
+
+  $('#source-portfolio-select')?.addEventListener('change', event => {
+    selectedSourcePortfolioId = event.target.value;
+    viewSources();
+  });
 
   // Real-time filtering by SEDOL, ticker or company name
   const filterChecklist = (query) => {
@@ -2265,7 +2275,7 @@ async function viewSources() {
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
     const stickEarnings = $('#src-stick-earnings-call')?.checked ?? false;
     const res = await api('source/search', {
-      company_ids: selectedCompanyIds.length ? selectedCompanyIds : (state.companies || []).map(c => c.id),
+      company_ids: selectedCompanyIds,
       source_types: stickEarnings ? ['earnings_call'] : selectedTypes,
       period: period,
       cutoff: cutoff,
@@ -2329,9 +2339,8 @@ const SIX_SOURCE_TYPES = [
   { type: 'company_website',       label: 'Company Website / IR Page',      icon: '🌐', sub: 'Official Online Disclosures' },
 ];
 
-function sourceLibrary(sources) {
-  const rowMap = new Map((state.portfolio_imports?.[0]?.rows || []).map(r => [r.company_id, r]));
-  const companies = (state.companies || []);
+function sourceLibrary(sources, companies, portfolio) {
+  const rowMap = new Map((portfolio?.rows || []).map(r => [r.company_id, r]));
   const cases = (state.cases || []);
 
   const companyGroups = companies.map((c, idx) => {
