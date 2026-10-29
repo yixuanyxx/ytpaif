@@ -1421,9 +1421,17 @@ tr:hover td { background: var(--slate-50); }
   color: var(--red-600, #dc2626);
 }
 .alert-modal-actions-pair {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
   gap: 10px;
 }
-.alert-modal-actions-pair .btn { min-width: 100px; }
+.alert-modal-actions-pair .btn {
+  flex: 0 0 110px;
+  justify-content: center;
+  box-sizing: border-box;
+}
 
 /* Source library table and queue styles */
 .source-master-row:hover td { background: #f0fdfa !important; }

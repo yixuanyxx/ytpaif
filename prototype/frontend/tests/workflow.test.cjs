@@ -187,6 +187,7 @@ test('Portfolio Import defaults to Excel import, lists saved portfolios, and ope
   assert.match(node('#page-content').innerHTML,/Existing portfolios <span class="badge badge-neutral">1<\/span>/);
   assert.match(node('#page-content').innerHTML,/Asia Core/);
   assert.match(node('#page-content').innerHTML,/asia-core\.xlsx/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/btn-add-row|\+ Add row/);
   assert.match(node('#page-content').innerHTML,/data-open-portfolio="portfolio-1"/);
   assert.match(node('#page-content').innerHTML,/data-del-portfolio="portfolio-1"/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Company universe/);
@@ -222,6 +223,15 @@ test('Deleting an existing portfolio confirms and removes it from the portfolio 
   assert.equal(run('JSON.stringify(calls)'), '[{"path":"portfolio/delete","data":{"id":"portfolio-1"}}]');
   assert.doesNotMatch(node('#page-content').innerHTML,/Asia Core/);
 });
+test('Delete confirmation buttons are centered and consistently aligned',()=>{
+  const stylesheet = fs.readFileSync(path.join(__dirname,'../style.css'),'utf8');
+  const pairStyles = stylesheet.match(/\.alert-modal-actions-pair\s*\{([^}]+)\}/)?.[1] || '';
+  const buttonStyles = stylesheet.match(/\.alert-modal-actions-pair \.btn\s*\{([^}]+)\}/)?.[1] || '';
+  assert.match(pairStyles,/justify-content:\s*center/);
+  assert.match(pairStyles,/align-items:\s*center/);
+  assert.match(buttonStyles,/flex:\s*0 0 110px/);
+  assert.match(buttonStyles,/justify-content:\s*center/);
+});
 test('Portfolio upload retains the original file bytes for the import request',async()=>{
   const {run} = setup();
   const encoded = await run(`fileToBase64({
@@ -248,6 +258,43 @@ test('Dashboard hides bounds and export; Source Documents has no search header a
   assert.doesNotMatch(node('#page-actions').innerHTML,/Search for documents/);
   assert.match(node('#page-content').innerHTML,/btn-run-search/);
 });
+test('Source Documents portfolio selector scopes companies, documents and search request',async()=>{
+  const {run,node,context} = setup();
+  run(`state = {
+    companies:[
+      {id:'company-a',name:'TSMC',bloomberg_ticker:'2330 TT',sedol:'6889106'},
+      {id:'company-b',name:'Samsung',bloomberg_ticker:'005930 KS',sedol:'6771720'}
+    ],
+    sources:[
+      {id:'source-a',company_id:'company-a',source_type:'annual_report'},
+      {id:'source-b',company_id:'company-b',source_type:'annual_report'}
+    ],
+    cases:[],themes:[],search_runs:[],
+    portfolio_imports:[
+      {id:'portfolio-a',name:'Asia Core',rows:[{company_id:'company-a',portfolio_weight:1}]},
+      {id:'portfolio-b',name:'Korea Growth',rows:[{company_id:'company-b',portfolio_weight:1}]}
+    ]
+  };
+  const searchCalls=[];
+  api=async(path,data)=>{searchCalls.push({path,data});return {results:[]};};
+  refresh=async()=>{};
+  render=async()=>{};`);
+  await run('viewSources()');
+  assert.match(node('#page-content').innerHTML,/id="source-portfolio-select"/);
+  assert.match(node('#page-content').innerHTML,/Korea Growth/);
+  assert.match(node('#page-content').innerHTML,/Samsung/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
+
+  await node('#source-portfolio-select').change({target:{value:'portfolio-a'}});
+  assert.match(node('#page-content').innerHTML,/TSMC/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Samsung/);
+
+  context.document.querySelectorAll = selector =>
+    selector === 'input[name="company_ids"]:checked' ? [{value:'company-a'}] : [];
+  await node('#btn-run-search').onclick();
+  assert.equal(run('searchCalls[0].path'),'source/search');
+  assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.company_ids'))),['company-a']);
+});
 test('Evaluate page and navigation entry are removed',()=>{
   const {run} = setup();
   const sidebar = fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');
@@ -262,7 +309,9 @@ test('Obsolete standalone Review route is removed; unified Analysis & Review rem
   assert.equal(run("typeof viewAnalysis"),'function');
 });
 test('Step 3 filters immediately by SEDOL, ticker, name and dropdown; clearing restores all', async()=>{
-  const {run,node,rows} = setup(); await run('viewSources()');
+  const {run,node,rows} = setup();
+  run(`state.portfolio_imports=[{id:'p',name:'Both',rows:[{company_id:'a'},{company_id:'b'}]}]`);
+  await run('viewSources()');
   const search = node('#src-global-search');
   for (const query of ['6889106','2330','TSMC']) {
     search.input({target:{value:query}});
@@ -274,11 +323,16 @@ test('Step 3 filters immediately by SEDOL, ticker, name and dropdown; clearing r
   assert.equal(search.value,''); assert.ok(rows.every(r=>r.style.display==='flex'));
 });
 test('Step 3 renders six source categories even before uploads, and counts distinct types', async()=>{
-  const {run,node} = setup(); await run('viewSources()');
+  const {run,node} = setup();
+  run(`state.portfolio_imports=[{id:'p',name:'Both',rows:[{company_id:'a'},{company_id:'b'}]}]`);
+  await run('viewSources()');
   assert.match(node('#page-content').innerHTML,/Market Cap/);
   assert.match(node('#page-content').innerHTML,/Net Revenue/);
   assert.match(node('#page-content').innerHTML,/Expand all 6 sources/);
-  const html = run(`sourceLibrary([{company_id:'a',source_type:'annual_report'}, {company_id:'a',source_type:'annual_report'}])`);
+  const html = run(`sourceLibrary(
+    [{company_id:'a',source_type:'annual_report'}, {company_id:'a',source_type:'annual_report'}],
+    [{id:'a',name:'TSMC'}], {rows:[{company_id:'a'}]}
+  )`);
   assert.match(html,/1 \/ 6/); assert.doesNotMatch(html,/2 \/ 6/);
   for(const label of ['Annual Report','Earnings Call Transcript','Investor Presentation','Sustainability / ESG Report','Company Website / IR Page','Regulatory Filing']) assert.ok(html.includes(label));
 });
