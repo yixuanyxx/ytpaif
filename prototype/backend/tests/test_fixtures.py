@@ -1,6 +1,29 @@
 """Synthetic fixtures restricted to isolated automated tests."""
 import base64
 
+class MemoryStore:
+    def __init__(self):
+        self.records = {}
+
+    def all_records(self, kind):
+        return list(self.records.get(kind, {}).values())
+
+    def find(self, kind, record_id):
+        return self.records.get(kind, {}).get(record_id) if record_id else None
+
+    def get(self, kind, record_id):
+        record = self.find(kind, record_id)
+        if record is None:
+            raise ValueError(f'Unknown {kind} ID')
+        return record
+
+    def put(self, kind, record):
+        self.records.setdefault(kind, {})[record['id']] = record
+        return record
+
+    def delete(self, kind, record_id):
+        del self.records[kind][record_id]
+
 def demo(app):
     existing = [t for t in app.all_records('themes') if t.get('theme_name') == 'AI Infrastructure' and t.get('theme_description', '').startswith('Synthetic worked examples')]
     if existing:
@@ -85,4 +108,3 @@ def demo(app):
         'benchmark': [row('DEMO_A', .1, 'demo_b'), row('DEMO_B', .9, 'demo_b')]
     })
     return theme
-

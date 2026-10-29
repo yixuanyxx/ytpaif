@@ -1,22 +1,17 @@
 import base64
+import hashlib
 import importlib
 import io
 import json
 import os
 from pathlib import Path
-import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
-from test_fixtures import demo
+from test_fixtures import MemoryStore, demo
 
 class AppFlowTest(unittest.TestCase):
     def setUp(self):
-        self.audit_sync_mock = patch('audit_store.sync_once', return_value={'configured': True, 'sent': 3})
-        self.audit_sync_mock.start()
-        self.addCleanup(self.audit_sync_mock.stop)
-        self.temp = tempfile.TemporaryDirectory()
-        os.environ['THEME_DATA_DIR'] = self.temp.name
         # Add prototype to sys.path so app is imported from prototype
         import sys
         proto_dir = str(Path(__file__).resolve().parent)
@@ -24,10 +19,11 @@ class AppFlowTest(unittest.TestCase):
             sys.path.insert(0, proto_dir)
         import app
         self.app = importlib.reload(app)
+        self.app.store = MemoryStore()
+        self.source_upload_mock = patch.object(self.app.supabase_store, 'upload_source')
+        self.source_upload_mock.start()
+        self.addCleanup(self.source_upload_mock.stop)
         self.theme = demo(self.app)
-
-    def tearDown(self):
-        self.temp.cleanup()
 
     def test_demo_reproducible_and_export(self):
         d = self.app.dashboard(self.theme['id'])
@@ -45,6 +41,10 @@ class AppFlowTest(unittest.TestCase):
             manifest = json.loads(z.read('run_manifest.json'))
             self.assertEqual(manifest['theme']['id'], self.theme['id'])
             self.assertEqual(len(manifest['reviews']), 3)
+
+    def test_evaluate_endpoint_is_removed(self):
+        with self.assertRaisesRegex(ValueError, 'Unknown API endpoint'):
+            self.app.dispatch('/api/evaluate', {})
 
     def test_review_immutable_and_reconciliation_gate(self):
         c = self.app.all_records('cases')[0]
@@ -113,6 +113,16 @@ class AppFlowTest(unittest.TestCase):
         self.assertNotEqual(fresh['id'], self.theme['id'])
         self.assertEqual(len(self.app.all_records('themes')), count_before + 1)
 
+    def test_theme_definition_inputs_without_values_are_stored_as_null(self):
+        theme = self.app.theme_create({
+            'theme_name': 'Sparse Theme',
+        })
+        for field in ('theme_description', 'included_activities', 'excluded_activities',
+                      'negative_examples', 'additional_information', 'cutoff',
+                      'geographic_scope', 'exposure_basis', 'reporting_period'):
+            self.assertIsNone(theme[field], field)
+        self.assertIsNone(theme['positive_examples'])
+
     def test_theme_delete_removes_from_list(self):
         fresh = self.app.theme_create({
             'theme_name': 'Disposable', 'theme_description': 'Temp',
@@ -123,6 +133,48 @@ class AppFlowTest(unittest.TestCase):
         self.assertNotIn(fresh['id'], remaining)
         with self.assertRaises(ValueError):
             self.app.dispatch('/api/theme/delete', {'id': 'theme_does_not_exist'})
+
+    def test_portfolio_delete_removes_import_and_unshared_snapshot(self):
+        imported = self.app.dispatch('/api/portfolio/import', {
+            'name': 'Disposable portfolio',
+            'rows': [{
+                'company_name': 'TSMC', 'bloomberg_ticker': '2330 TT',
+                'portfolio_wt': 1, 'reference_wt': 1,
+            }],
+        })
+        portfolio = imported['import']
+        snapshot_id = imported['snapshot']['id']
+        with patch.object(self.app.supabase_store, 'delete_portfolio_file') as delete_file:
+            result = self.app.dispatch('/api/portfolio/delete', {'id': portfolio['id']})
+        self.assertEqual(result, {'deleted': portfolio['id'], 'warning': None})
+        self.assertEqual(self.app.all_records('portfolio_imports'), [])
+        self.assertNotIn(snapshot_id, [snapshot['id'] for snapshot in self.app.all_records('snapshots')])
+        delete_file.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'Portfolio not found'):
+            self.app.dispatch('/api/portfolio/delete', {'id': portfolio['id']})
+
+    def test_portfolio_delete_removes_uploaded_file_and_preserves_shared_snapshot(self):
+        imported = self.app.dispatch('/api/portfolio/import', {
+            'name': 'Excel portfolio',
+            'rows': [{
+                'company_name': 'TSMC', 'bloomberg_ticker': '2330 TT',
+                'portfolio_wt': 1, 'reference_wt': 1,
+            }],
+            'file_name': 'holdings.xlsx',
+            'file_content': base64.b64encode(b'workbook bytes').decode('ascii'),
+        })
+        portfolio = imported['import']
+        self.app.put('portfolio_imports', {
+            **portfolio, 'id': 'another-import', 'name': 'Another portfolio',
+        })
+        with patch.object(self.app.supabase_store, 'delete_portfolio_file') as delete_file:
+            result = self.app.dispatch('/api/portfolio/delete', {'id': portfolio['id']})
+        self.assertIsNone(result['warning'])
+        delete_file.assert_called_once_with(portfolio['file_storage_path'])
+        self.assertEqual(self.app.get('snapshots', imported['snapshot']['id'])['id'],
+                         imported['snapshot']['id'])
+        self.assertEqual([p['id'] for p in self.app.all_records('portfolio_imports')],
+                         ['another-import'])
 
     def test_company_creation_and_id_preservation(self):
         # Explicit ID preserved
@@ -160,6 +212,28 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertTrue(short_txt['warnings'])
         self.assertFalse(short_txt['evidence'])
+
+    def test_source_ingest_stores_company_metadata_and_validates_cutoff(self):
+        source = self.app.source_ingest({
+            'company_id': 'DEMO_A', 'filename': 'metadata.txt',
+            'content': base64.b64encode(
+                b'Annual report evidence with enough text to create a source passage and validate stored document metadata.'
+            ).decode(),
+            'publication_date': '2026-01-02', 'period': 'FY2025',
+            'cutoff': '2026-10-01', 'url': 'https://example.test/annual-report',
+            'source_type': 'annual_report',
+        })
+        self.assertEqual(source['company_name'], 'Company A (synthetic)')
+        self.assertEqual(source['bloomberg_ticker'], 'DEMO_A')
+        self.assertEqual(source['sedol'], '')
+        self.assertEqual(source['cutoff'], '2026-10-01')
+        with self.assertRaisesRegex(ValueError, 'isoformat|format'):
+            self.app.source_ingest({
+                'company_id': 'DEMO_A', 'filename': 'invalid-date.txt',
+                'content': base64.b64encode(b'Valid enough source document content').decode(),
+                'publication_date': '2026-01-03', 'period': 'FY2025',
+                'cutoff': 'not-a-date', 'url': '',
+            })
 
     def test_source_search(self):
         res = self.app.dispatch('/api/search', {
@@ -224,6 +298,7 @@ class AppFlowTest(unittest.TestCase):
 
     def test_generate_handles_counts_gracefully(self):
         # Non-int or 'auto'
+        themes_before = self.app.all_records('themes')
         fake_nodes = [
             {'node_id': 't1', 'parent_id': None, 'name': 'T1', 'definition': 'D1', 'examples': []},
             {'node_id': 't2', 'parent_id': 't1', 'name': 'T2', 'definition': 'D2', 'examples': []}
@@ -232,6 +307,7 @@ class AppFlowTest(unittest.TestCase):
             res = self.app.generate({'tier1_count': 'auto', 'tier2_count': 'auto',
                                      'theme_name': 'Test', 'included_activities': 'Act'})
             self.assertEqual(len(res['nodes']), 2)
+        self.assertEqual(self.app.all_records('themes'), themes_before)
 
     def test_failed_model_does_not_create_zero_case(self):
         evidence = self.app.all_records('sources')[0]['evidence'][0]['evidence_id']
@@ -284,21 +360,6 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(self.app.get('runs', c['run_id'])['status'], 'needs_review')
         self.assertEqual(len(self.app.all_records('model_outputs')), 2)
 
-    def test_evaluate_endpoint(self):
-        sample_rows = [{
-            'actual': 'hardware', 'predicted': 'hardware',
-            'confidence_band': 'high', 'point': 0.5, 'reference_point': 0.5,
-            'lower': 0.4, 'upper': 0.6, 'reference_lower': 0.4, 'reference_upper': 0.6
-        }]
-        res = self.app.dispatch('/api/evaluate', {'examples': sample_rows})
-        self.assertIn('answered_accuracy', res)
-        self.assertIn('exposure_mean_absolute_error_pp', res)
-        self.assertEqual(res['answered_accuracy'], 1.0)
-        self.assertEqual(res['exposure_mean_absolute_error_pp'], 0.0)
-        # Empty set raises clear error
-        with self.assertRaises(ValueError):
-            self.app.dispatch('/api/evaluate', {'examples': []})
-
     def test_portfolio_import_and_snapshot_creation(self):
         rows = [
             {'company_name': 'TSMC', 'bloomberg_ticker': '2330 TT', 'sedol': '6889106',
@@ -321,6 +382,31 @@ class AppFlowTest(unittest.TestCase):
         self.assertIsNotNone(dash)
         self.assertIn('summary', dash)
         self.assertIn('portfolio', dash['summary'])
+        self.assertEqual(len(self.app.all_records('portfolio_imports')), 1)
+
+    def test_portfolio_import_saves_uploaded_excel_to_storage_and_record(self):
+        rows = [{
+            'company_name': 'TSMC', 'bloomberg_ticker': '2330 TT',
+            'portfolio_wt': 1, 'reference_wt': 1,
+        }]
+        file_bytes = b'workbook bytes'
+        with patch.object(self.app.supabase_store, 'upload_portfolio_file') as upload:
+            result = self.app.dispatch('/api/portfolio/import', {
+                'name': 'Excel Portfolio',
+                'holdings_date': '2026-10-03',
+                'rows': rows,
+                'file_name': 'holdings.xlsx',
+                'file_content': base64.b64encode(file_bytes).decode('ascii'),
+            })
+        record = result['import']
+        upload.assert_called_once_with(
+            record['file_storage_path'], file_bytes,
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        self.assertRegex(record['file_storage_path'], r'^portfolios/import_[0-9a-f]+\.xlsx$')
+        self.assertEqual(record['file_name'], 'holdings.xlsx')
+        self.assertEqual(record['file_size'], len(file_bytes))
+        self.assertEqual(record['file_sha256'], hashlib.sha256(file_bytes).hexdigest())
         self.assertEqual(len(self.app.all_records('portfolio_imports')), 1)
 
     def test_taxonomy_approval_requires_leaves(self):

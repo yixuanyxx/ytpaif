@@ -5,20 +5,262 @@ const vm = require('node:vm');
 const path = require('node:path');
 function setup() {
   const elements = new Map();
+  const storage = new Map();
+  const portfolioCards = [];
+  const deletePortfolioButtons = [];
+  const loadThemeButtons = [];
+  const deleteThemeButtons = [];
   const node = id => {
     if (!elements.has(id)) elements.set(id, {innerHTML:'', textContent:'', value:'', style:{}, dataset:{},
       addEventListener(type, fn) { this[type] = fn; }, classList:{add(){},remove(){},toggle(){}}});
     return elements.get(id);
   };
   const rows = ['6889106', '6771720'].map((sedol, i) => ({style:{}, dataset:{sedol, name:['tsmc','samsung'][i],ticker:['2330 tt','005930 ks'][i]}}));
-  const context = vm.createContext({console, setTimeout, clearTimeout, FormData:class { constructor(form){return Object.entries(form.fields || {});} }, window:{}, document:{
+  const context = vm.createContext({console, setTimeout, clearTimeout, btoa:globalThis.btoa,
+    localStorage:{
+      getItem(key) { return storage.has(key) ? storage.get(key) : null; },
+      setItem(key, value) { storage.set(key, String(value)); }
+    },
+    FormData:class { constructor(form){return Object.entries(form.fields || {});} }, window:{}, document:{
     addEventListener(){}, querySelector:node, getElementById:id=>node('#'+id),
-    querySelectorAll:selector=>selector === '.company-search-item' ? rows : []
+    querySelectorAll:selector=>selector === '.company-search-item' ? rows :
+      selector === '[data-open-portfolio]' ? portfolioCards :
+      selector === '[data-del-portfolio]' ? deletePortfolioButtons :
+      selector === '[data-load-theme]' ? loadThemeButtons :
+      selector === '[data-del-theme]' ? deleteThemeButtons : []
   }});
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8'), context);
   vm.runInContext(`state = {companies:[{id:'a',name:'TSMC',sedol:'6889106'}, {id:'b',name:'Samsung',sedol:'6771720'}],sources:[],themes:[],cases:[]}`,context);
-  return {context,node,rows,run:code=>vm.runInContext(code,context)};
+  return {context,node,rows,portfolioCards,deletePortfolioButtons,loadThemeButtons,deleteThemeButtons,storage,
+    run:code=>vm.runInContext(code,context)};
 }
+test('The selected page is restored after reloading the app',()=>{
+  const first = setup();
+  first.run(`setView('sources')`);
+  assert.equal(first.storage.get('theme-lab-current-view'),'sources');
+  const reloaded = setup();
+  reloaded.storage.set('theme-lab-current-view','sources');
+  reloaded.run('restoreSavedView()');
+  assert.equal(reloaded.run('currentView'),'sources');
+});
+test('Portfolio Exposure Dashboard replaces Overview as the landing page',async()=>{
+  const {run,node} = setup();
+  await run('render()');
+  assert.equal(node('#page-title').textContent,'Portfolio Exposure Dashboard');
+  assert.match(node('#page-content').innerHTML,/No approved theme/);
+  const sidebar = fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');
+  assert.match(sidebar,/data-view="dashboard">\s*<div class="step-num">◈<\/div>\s*<div class="step-text">\s*<strong>Portfolio Exposure Dashboard<\/strong>/);
+  assert.doesNotMatch(sidebar,/data-view="overview"|<strong>Overview<\/strong>/);
+  assert.doesNotMatch(sidebar,/Local workspace|Revenue exposure research|ai-status-label/);
+  assert.equal((sidebar.match(/data-view="dashboard"/g)||[]).length,1);
+});
+test('Dashboard selectors load theme and portfolio choices and refresh the selected snapshot',async()=>{
+  const {run,node} = setup();
+  run(`state = {
+    themes: [
+      {id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[]},
+      {id:'theme-2',theme_name:'Clean Energy',approved:true,nodes:[]}
+    ],
+    portfolio_imports: [
+      {id:'portfolio-1',name:'Core',holdings_date:'2026-10-01',snapshot_id:'snapshot-1'},
+      {id:'portfolio-2',name:'Growth',holdings_date:'2026-10-02',snapshot_id:'snapshot-2'}
+    ],
+    snapshots: [
+      {id:'snapshot-1',benchmark_name:'Index A',portfolio:[]},
+      {id:'snapshot-2',benchmark_name:'Index B',portfolio:[]}
+    ],
+    companies:[],sources:[],cases:[]
+  };
+  const summaryMetric = {point:0,lower:0,upper:0};
+  const dashboardData = {
+    summary:{portfolio:summaryMetric,benchmark:summaryMetric,active:summaryMetric},
+    coverage:{portfolio:0,benchmark:0},companies:[]
+  };
+  const dashboardCalls=[];
+  api=async (_path, data)=>{dashboardCalls.push(data);return dashboardData;};`);
+  await run('viewDashboard()');
+  assert.match(node('#page-content').innerHTML,/AI Infrastructure/);
+  assert.match(node('#page-content').innerHTML,/Clean Energy/);
+  assert.match(node('#page-content').innerHTML,/Core/);
+  assert.match(node('#page-content').innerHTML,/Growth/);
+  assert.equal(run('dashboardCalls[0].theme_id'),'theme-2');
+  assert.equal(run('dashboardCalls[0].snapshot_id'),'snapshot-2');
+
+  node('#dashboard-theme-select').change({target:{value:'theme-1'}});
+  await run('new Promise(resolve=>setTimeout(resolve,0))');
+  assert.equal(run('dashboardCalls.at(-1).theme_id'),'theme-1');
+  assert.equal(run('dashboardCalls.at(-1).snapshot_id'),'snapshot-2');
+
+  node('#dashboard-portfolio-select').change({target:{value:'portfolio-1'}});
+  await run('new Promise(resolve=>setTimeout(resolve,0))');
+  assert.equal(run('dashboardCalls.at(-1).snapshot_id'),'snapshot-1');
+});
+test('Dashboard shows a loading spinner until its data request completes',async()=>{
+  const {run,node} = setup();
+  run(`state = {
+    themes:[{id:'theme-1',theme_name:'AI',approved:true,nodes:[]}],
+    portfolio_imports:[{id:'portfolio-1',name:'Core',snapshot_id:'snapshot-1'}],
+    snapshots:[{id:'snapshot-1',portfolio:[]}],
+    companies:[],sources:[],cases:[]
+  };
+  let resolveDashboard;
+  api=()=>new Promise(resolve=>{resolveDashboard=resolve;});`);
+
+  const render = run('viewDashboard()');
+  assert.match(node('#page-content').innerHTML,/dashboard-loading/);
+  assert.match(node('#page-content').innerHTML,/dashboard-loading-spinner/);
+  assert.match(node('#page-content').innerHTML,/Loading portfolio exposure/);
+  run(`resolveDashboard({
+    summary:{portfolio:{point:0},benchmark:{point:0},active:{point:0}},
+    coverage:{portfolio:0,benchmark:0},companies:[]
+  })`);
+  await render;
+  assert.doesNotMatch(node('#page-content').innerHTML,/dashboard-loading/);
+  assert.match(node('#page-content').innerHTML,/Company-level exposure/);
+});
+test('Theme Definition opens as a new theme with New Theme beside the saved themes heading',async()=>{
+  const {run,node} = setup();
+  run(`state.themes=[{id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[]}]`);
+  await run('viewTheme()');
+  assert.match(node('#page-content').innerHTML,/New theme scope/);
+  assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value=""/);
+  assert.match(node('#page-content').innerHTML,/Saved themes <span class="badge badge-neutral">1<\/span>[\s\S]*id="btn-new-theme"/);
+  assert.equal(node('#page-actions').innerHTML,'');
+});
+test('Generate taxonomy updates the mind map draft without saving a theme',async()=>{
+  const {run,node} = setup();
+  node('#theme-form').fields={theme_name:'AI Infrastructure'};
+  run(`state.ai_configured=true;
+    buildTaxonomyEditor=()=>'<textarea id="taxonomy-json-area"></textarea><div id="taxonomy-mindmap"></div>';
+    updateTaxonomyMindmap=()=>{};
+    const calls=[];
+    api=async(path,data)=>{calls.push({path,data});return {nodes:[
+      {node_id:'compute',parent_id:null,name:'Compute',definition:'Compute',examples:[]}
+    ]};};
+    refresh=async()=>{};
+    render=async()=>{};`);
+  await run('viewTheme()');
+  node('#btn-gen-taxonomy').click();
+  await run('new Promise(resolve=>setTimeout(resolve,0))');
+  assert.equal(JSON.parse(node('#taxonomy-json-area').value)[0].name,'Compute');
+  assert.equal(run('JSON.stringify(calls.map(call=>call.path))'),'["generate"]');
+  assert.equal(node('#notice-area').innerHTML,'');
+});
+test('Selecting a saved theme or New theme clears the top banner',async()=>{
+  const {run,node,loadThemeButtons} = setup();
+  run(`state.themes=[{id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[]}]`);
+  loadThemeButtons.push({
+    dataset:{loadTheme:'theme-1'},
+    addEventListener(type, handler) { this[type] = handler; }
+  });
+  await run('viewTheme()');
+  run(`notice('Previous theme notice','info')`);
+  loadThemeButtons[0].onclick();
+  assert.equal(node('#notice-area').innerHTML,'');
+  assert.match(node('#page-content').innerHTML,/Edit theme scope/);
+  run(`notice('Previous new-theme notice','info')`);
+  node('#btn-new-theme').click();
+  assert.equal(node('#notice-area').innerHTML,'');
+  assert.match(node('#page-content').innerHTML,/New theme scope/);
+});
+test('Portfolio Import defaults to Excel import, lists saved portfolios, and opens holdings',async()=>{
+  const {run,node,portfolioCards,deletePortfolioButtons} = setup();
+  run(`state = {
+    companies:[{id:'company-1',name:'TSMC',bloomberg_ticker:'2330 TT',sedol:'6889106'}],
+    sources:[],
+    portfolio_imports:[{
+      id:'portfolio-1',name:'Asia Core',holdings_date:'2026-10-01',file_name:'asia-core.xlsx',
+      benchmark_name:'MSCI Asia ex Japan',snapshot_id:'snapshot-1',
+      rows:[{company_id:'company-1',company_name:'TSMC',bloomberg_ticker:'2330 TT',
+        sedol:'6889106',country:'Taiwan',sector:'Semiconductors',
+        portfolio_weight:0.2,reference_weight:0.1,active_weight:0.1}]
+    }]
+  };`);
+  portfolioCards.push({
+    dataset:{openPortfolio:'portfolio-1'},
+    addEventListener(type, handler) { this[type] = handler; }
+  });
+  await run('viewPortfolio()');
+  assert.equal(node('#page-actions').innerHTML,'');
+  assert.match(node('#page-content').innerHTML,/Import portfolio Excel/);
+  assert.match(node('#page-content').innerHTML,/Existing portfolios/);
+  assert.match(node('#page-content').innerHTML,/Existing portfolios <span class="badge badge-neutral">1<\/span>/);
+  assert.match(node('#page-content').innerHTML,/Asia Core/);
+  assert.match(node('#page-content').innerHTML,/asia-core\.xlsx/);
+  assert.match(node('#page-content').innerHTML,/data-open-portfolio="portfolio-1"/);
+  assert.match(node('#page-content').innerHTML,/data-del-portfolio="portfolio-1"/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Company universe/);
+  portfolioCards[0].click();
+  assert.match(node('#page-content').innerHTML,/TSMC/);
+  assert.match(node('#page-content').innerHTML,/Portfolio wt/);
+  assert.equal(node('#page-content').innerHTML.includes('20.0%'),true);
+  node('#btn-back-portfolios').onclick();
+  assert.match(node('#page-content').innerHTML,/Import portfolio Excel/);
+  assert.match(node('#page-content').innerHTML,/Asia Core/);
+});
+test('Deleting an existing portfolio confirms and removes it from the portfolio list',async()=>{
+  const {run,node,deletePortfolioButtons} = setup();
+  run(`state={portfolio_imports:[{id:'portfolio-1',name:'Asia Core',snapshot_id:'snapshot-1',rows:[]}],
+    snapshots:[],companies:[],sources:[],themes:[],cases:[]};
+    showConfirm=async(message,options)=>{globalThis.confirmation={message,options};return true};
+    const calls=[];
+    api=async(path,data)=>{
+      calls.push({path,data});
+      state.portfolio_imports=state.portfolio_imports.filter(item=>item.id!==data.id);
+      return {deleted:data.id}
+    };
+    refresh=async()=>{};
+    render=async()=>{};`);
+  deletePortfolioButtons.push({
+    dataset:{delPortfolio:'portfolio-1'},
+    addEventListener(type, handler) { this[type] = handler; }
+  });
+  await run('viewPortfolio()');
+  await deletePortfolioButtons[0].click();
+  assert.equal(run('confirmation.options.title'),'Delete portfolio');
+  assert.match(run('confirmation.message'),/Asia Core/);
+  assert.equal(run('JSON.stringify(calls)'), '[{"path":"portfolio/delete","data":{"id":"portfolio-1"}}]');
+  assert.doesNotMatch(node('#page-content').innerHTML,/Asia Core/);
+});
+test('Portfolio upload retains the original file bytes for the import request',async()=>{
+  const {run} = setup();
+  const encoded = await run(`fileToBase64({
+    arrayBuffer:async()=>new Uint8Array([0,1,255]).buffer
+  })`);
+  assert.equal(encoded,'AAH/');
+});
+test('Dashboard hides bounds and export; Source Documents has no search header action',async()=>{
+  const {run,node} = setup();
+  run(`state = {
+    themes:[{id:'theme-1',theme_name:'AI',approved:true,nodes:[]}],
+    portfolio_imports:[{id:'portfolio-1',name:'Core',snapshot_id:'snapshot-1',rows:[]}],
+    snapshots:[{id:'snapshot-1',benchmark_name:'Index',portfolio:[]}],
+    companies:[],sources:[],cases:[]
+  };
+  const metric={point:0,lower:0,upper:0};
+  api=async()=>({summary:{portfolio:metric,benchmark:metric,active:metric},
+    coverage:{portfolio:0,benchmark:0},companies:[]});`);
+  await run('viewDashboard()');
+  assert.doesNotMatch(node('#page-actions').innerHTML,/Export/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/\b(bounds|lower|upper)\b/i);
+  await run('viewSources()');
+  assert.equal(node('#page-actions').innerHTML,'');
+  assert.doesNotMatch(node('#page-actions').innerHTML,/Search for documents/);
+  assert.match(node('#page-content').innerHTML,/btn-run-search/);
+});
+test('Evaluate page and navigation entry are removed',()=>{
+  const {run} = setup();
+  const sidebar = fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');
+  assert.equal(run("VALID_VIEWS.has('evaluate')"),false);
+  assert.equal(run("typeof viewEvaluate"),'undefined');
+  assert.doesNotMatch(sidebar,/data-view="evaluate"|<strong>Evaluate<\/strong>/);
+});
+test('Obsolete standalone Review route is removed; unified Analysis & Review remains',()=>{
+  const {run} = setup();
+  assert.equal(run("VALID_VIEWS.has('review')"),false);
+  assert.equal(run("typeof viewReview"),'undefined');
+  assert.equal(run("typeof viewAnalysis"),'function');
+});
 test('Step 3 filters immediately by SEDOL, ticker, name and dropdown; clearing restores all', async()=>{
   const {run,node,rows} = setup(); await run('viewSources()');
   const search = node('#src-global-search');

@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Theme Lab · Thematic Exposure Engine</title>
-  <link rel="stylesheet" href="/style.css?v=20261019k">
+  <link rel="stylesheet" href="/style.css?v=20261029f">
   <!-- SheetJS for client-side Excel parsing (no server round-trip) -->
   <script src="/xlsx.full.min.js"></script>
-  <script src="/app.js?v=20261019k" defer></script>
+  <script src="/app.js?v=20261029k" defer></script>
 </head>
 <body>
 
@@ -24,11 +24,11 @@
   <div class="sidebar-section-label">Workflow</div>
 
   <nav id="sidebar-nav">
-    <button class="nav-step active" data-view="overview">
+    <button class="nav-step active" data-view="dashboard">
       <div class="step-num">◈</div>
       <div class="step-text">
-        <strong>Overview</strong>
-        <small>Dashboard summary</small>
+        <strong>Portfolio Exposure Dashboard</strong>
+        <small>Portfolio and benchmark</small>
       </div>
     </button>
 
@@ -66,32 +66,10 @@
       <span class="step-badge warn" id="badge-review" hidden>0</span>
     </button>
 
-    <button class="nav-step" data-view="dashboard">
-      <div class="step-num">5</div>
-      <div class="step-text">
-        <strong>Dashboard</strong>
-        <small>Portfolio exposure</small>
-      </div>
-    </button>
-
     <div style="height:1px;background:rgba(255,255,255,.07);margin:12px 0"></div>
 
-    <button class="nav-step" data-view="evaluate">
-      <div class="step-num">✓</div>
-      <div class="step-text">
-        <strong>Evaluate</strong>
-        <small>Accuracy &amp; validation</small>
-      </div>
-    </button>
   </nav>
 
-  <div class="sidebar-bottom">
-    <div><span class="status-dot"></span> Local workspace</div>
-    <div style="margin-top:6px;line-height:1.7">
-      Revenue exposure research<br>
-      <span id="ai-status-label">AI: not configured</span>
-    </div>
-  </div>
 </aside>
 
 <!-- ===== MAIN ===== -->
@@ -100,7 +78,7 @@
   <div class="page-header">
     <div class="page-header-left">
       <div class="eyebrow" id="page-eyebrow">THEMATIC EXPOSURE ENGINE</div>
-      <h1 id="page-title">Overview</h1>
+      <h1 id="page-title">Portfolio Exposure Dashboard</h1>
       <div class="subtitle" id="page-subtitle"></div>
     </div>
     <div class="page-header-right" id="page-actions"></div>
