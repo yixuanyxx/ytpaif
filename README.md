@@ -15,14 +15,14 @@ python app.py
 ```
 
 Open http://127.0.0.1:8766. Set `PORT` in `prototype/backend/.env` to override the port.
+Before starting the app, configure Supabase and run the schema and migration steps below.
 
 ## Directory Structure
 
 ```text
 prototype/
 ├── frontend/       # Web UI, bundled Excel parser, upload template and tests/
-└── backend/        # Python server, engine, audit sync, tests/ and config
-    └── database/   # Local SQLite database and uploaded sources/
+└── backend/        # Python server, engine, Supabase schema/migrations, tests/ and config
 ```
 
 ## Workflow
@@ -32,7 +32,7 @@ prototype/
 3. Review the loaded holdings table. Edit company names, identifiers, country, sector, portfolio weights, and reference weights inline. Active weights are calculated automatically. Search, add rows, exclude rows, and resolve identity conflicts before clicking **Confirm & import**. The table remains available for further editing during the session.
 4. Upload company PDF or UTF-8 TXT evidence, with publication date and fiscal period. PDFs are limited to 500 pages; files are limited to 20 MB.
 5. Select evidence for AI analysis or enter a manual revenue case. Review and approve cases before they feed the dashboard.
-6. View portfolio and benchmark exposure, export the analysis ZIP, or evaluate independently labelled JSON examples.
+6. View portfolio and benchmark exposure and export the analysis ZIP.
 
 ### Portfolio file format
 
@@ -44,23 +44,22 @@ Excel parsing runs in the browser using the bundled SheetJS CE 0.20.3 library in
 
 ## Implementation
 
-- `backend/app.py`: local Python HTTP server, API, SQLite persistence, source extraction, AI integration, review records, and ZIP exports.
+- `backend/app.py`: local Python HTTP server, API, Supabase persistence, source extraction, AI integration, review records, and ZIP exports.
 - `backend/engine.py`: deterministic taxonomy validation, revenue exposure calculations, and portfolio aggregation.
 - `frontend/index.html`, `frontend/app.js`, `frontend/style.css`: frontend and workflow views.
-- `backend/evaluate.py`: classification metrics, abstention, exposure error, and reference-range overlap.
 
-Data is stored in `prototype/backend/database/research.sqlite` and uploaded sources in `prototype/backend/database/sources/` by default. An existing `prototype/database/` is also supported. Set `THEME_DATA_DIR` in `.env` to use another location. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
+Runtime records and uploaded source files are stored in Supabase. The backend requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`; credentials stay server-side. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
 
 ## Prototype limitations
 
 - Document search filters uploaded documents only. Use manual uploads for actual filings.
-- Confirming a portfolio saves companies and a portfolio/benchmark snapshot, including the benchmark name. Both sets of weights must total 100%. Editable draft rows remain in browser memory during the session; saved snapshots persist in SQLite.
+- Confirming a portfolio saves companies and a portfolio/benchmark snapshot, including the benchmark name. Both sets of weights must total 100%. Editable draft rows remain in browser memory during the session; saved snapshots persist in Supabase.
 - Country and sector are saved with company records and portfolio imports.
 - No multi-user authentication or encrypted storage.
 
 ## Working dataset
 
-Use `docs/Example 80 Stock Portfolio.xlsx` as the working portfolio. Demo loading and generated evaluation samples are unavailable. Upload actual company documents before analysis; source search filters uploaded documents and does not retrieve filings from the web. Synthetic examples exist only in isolated automated test fixtures.
+Use `docs/Example 80 Stock Portfolio.xlsx` as the working portfolio. Demo loading is unavailable. Upload actual company documents before analysis; source search filters uploaded documents and does not retrieve filings from the web. Synthetic examples exist only in isolated automated test fixtures.
 
 ## Enable AI
 
@@ -72,14 +71,6 @@ python app.py
 
 The adapter defaults to Google AI Studio Gemini (`gemini-3.5-flash-lite`) with a 100-call budget, and supports configurable overrides via `LLM_ENDPOINT`, `LLM_MODEL`, and `LLM_MAX_CALLS`. Manual analysis remains available without AI configuration.
 
-## Evaluation CLI
-
-```sh
-python evaluate.py labelled_examples.json
-```
-
-Use independently reviewed development and held-out examples. The UI requires an uploaded labelled JSON dataset; generated sample evaluation data is disabled.
-
 ## Workflow additions
 
 - Step 1 offers a standalone SVG mind-map export. The Excel holdings template is available in Step 2.
@@ -88,13 +79,13 @@ Use independently reviewed development and held-out examples. The UI requires an
 - Step 4 combines Analysis and Review tabs. Analyze all processes companies with eligible sources sequentially under the configured AI call cap. Companies with over 60,000 evidence characters require manual passage selection; failures are reported per company.
 - Dashboard sub-theme buttons show classified companies in the current holdings universe using approved cases for the selected theme. The reference button opens benchmark constituents and uses the saved benchmark name where available.
 
-## Supabase audit copy
+## Supabase setup
 
-SQLite remains the working database. Optional Supabase replication records submitted inputs, outputs, model calls and record changes using a durable local queue. Configure `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or the legacy `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`. Keep credentials in backend configuration.
+1. Configure `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`. Never put the secret key in frontend code.
+2. Ensure the existing `themes`, `portfolios`, and `source_documents` tables and private `source-documents` / `portfolio-files` buckets are configured.
+3. If a database error reports `42P01` for `public.audit_events`, remove any remaining public-schema trigger that references the obsolete audit table. This does not remove analyst reviews or the AI Checker feature.
 
-The sync worker writes directly to `overview`, `theme_definition`, `portfolio_import`, `source_documents`, `analysis_review` and `evaluate`. Each table contains input/output event rows linked by `request_id`; Dashboard is excluded. The Supabase tables must already exist with the matching audit-event columns. Save/Update theme attempts an immediate sync; other queued events retry in the background.
-
-From `prototype/backend/`, run `python sync_audit.py --backfill` to queue existing records as current-state baselines, or `python sync_audit.py --replay` to resend retained events without duplicating event IDs.
+The app uses Supabase for runtime persistence and does not require a local SQLite database. Request/model audit-event logging has been removed. New portfolio imports keep their original Excel file in the private `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in `portfolios`.
 
 ## Tests
 

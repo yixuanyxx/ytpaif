@@ -6,10 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
-import sqlite3
 import threading
 import time
-from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
@@ -20,7 +18,7 @@ import re
 import zipfile
 import engine
 import financials
-import audit_store
+import supabase_store
 
 ROOT = Path(__file__).resolve().parent
 
@@ -49,11 +47,8 @@ def load_env():
         os.environ['LLM_API_KEY'] = os.environ['GEMINI_API_KEY']
 
 load_env()
-default_db_dir = ROOT.parent / 'database' if (ROOT.parent / 'database').exists() else ROOT / 'database'
-DATA = Path(os.environ.get('THEME_DATA_DIR', str(default_db_dir))).resolve()
-DATA.mkdir(parents=True, exist_ok=True)
-(DATA / 'sources').mkdir(parents=True, exist_ok=True)
 FRONTEND = (ROOT.parent / 'frontend') if (ROOT.parent / 'frontend').exists() else (ROOT / 'frontend')
+store = supabase_store.SupabaseStore()
 LOCK = threading.Lock()
 MAX_FILE = 20 * 1024 * 1024
 VERSIONS = {'prompt': '1.0.0', 'extraction': '1.0.0', 'calculation': engine.VERSION}
@@ -80,51 +75,18 @@ def _unique_node_id(base, used):
         candidate = f'{slug}_{i}'
     return candidate
 
-@contextmanager
-def db():
-    c = sqlite3.connect(DATA / 'research.sqlite', timeout=30)
-    c.execute('PRAGMA journal_mode=WAL')
-    c.execute('''CREATE TABLE IF NOT EXISTS records
-                 (kind TEXT, id TEXT, payload TEXT, PRIMARY KEY(kind,id))''')
-    audit_store.initialize(c)
-    try:
-        with c:
-            yield c
-    finally:
-        c.close()
-
 def put(kind, record):
-    with db() as c:
-        previous = c.execute('SELECT payload FROM records WHERE kind=? AND id=?', (kind, record['id'])).fetchone()
-        c.execute('INSERT OR REPLACE INTO records VALUES (?,?,?)',
-                  (kind, record['id'], json.dumps(record, allow_nan=False)))
-        if kind != 'cache':
-            audit_store.enqueue(c, 'record.updated' if previous else 'record.created',
-                                {'before': json.loads(previous[0]) if previous else None, 'after': record},
-                                kind, record['id'])
-    return record
+    return store.put(kind, record)
 
 def all_records(kind):
-    with db() as c:
-        return [json.loads(r[0]) for r in
-                c.execute('SELECT payload FROM records WHERE kind=? ORDER BY rowid', (kind,))]
+    return store.all_records(kind)
 
 def get(kind, rid):
-    with db() as c:
-        r = c.execute('SELECT payload FROM records WHERE kind=? AND id=?',
-                      (kind, rid)).fetchone()
-    if not r:
-        raise ValueError(f'Unknown {kind} ID')
-    return json.loads(r[0])
+    return store.get(kind, rid)
 
 def find(kind, rid):
     """Like get(), but returns None instead of raising when the id is absent."""
-    if not rid:
-        return None
-    with db() as c:
-        r = c.execute('SELECT payload FROM records WHERE kind=? AND id=?',
-                      (kind, rid)).fetchone()
-    return json.loads(r[0]) if r else None
+    return store.find(kind, rid)
 
 def parse_date(value):
     date.fromisoformat(value)
@@ -133,14 +95,8 @@ def parse_date(value):
 # ── Theme ────────────────────────────────────────────────────────────────────
 
 def theme_create(d):
-    # Only theme_name is hard-required (YTP-8)
     if not str(d.get('theme_name', '')).strip():
         raise ValueError('Theme requires theme_name')
-    # At least one of (theme_description + included_activities) or (positive_examples)
-    has_desc = str(d.get('theme_description', '')).strip() and str(d.get('included_activities', '')).strip()
-    has_examples = str(d.get('positive_examples', '')).strip()
-    if not has_desc and not has_examples:
-        raise ValueError('Provide either (theme_description + included_activities) or positive_examples')
     if d.get('cutoff'):
         parse_date(d['cutoff'])
     nodes = d.get('nodes', [])
@@ -153,7 +109,12 @@ def theme_create(d):
     fields = ('theme_name', 'theme_description', 'included_activities', 'excluded_activities',
               'positive_examples', 'negative_examples', 'additional_information', 'nodes',
               'cutoff', 'geographic_scope', 'exposure_basis', 'reporting_period')
-    record = {k: d.get(k, '') for k in fields}
+    record = {k: d.get(k) for k in fields}
+    for key in fields:
+        if key == 'nodes':
+            continue
+        if isinstance(record[key], str):
+            record[key] = record[key].strip() or None
     record['nodes'] = nodes
     record.update(
         id=existing['id'] if existing else ident('theme'),
@@ -166,13 +127,35 @@ def theme_create(d):
 
 def theme_delete(d):
     rid = d.get('id')
-    with db() as c:
-        previous = c.execute('SELECT payload FROM records WHERE kind=? AND id=?', ('themes', rid)).fetchone()
-        if not previous:
-            raise ValueError('Theme not found')
-        c.execute('DELETE FROM records WHERE kind=? AND id=?', ('themes', rid))
-        audit_store.enqueue(c, 'record.deleted', {'before': json.loads(previous[0]), 'after': None}, 'themes', rid)
+    if not find('themes', rid):
+        raise ValueError('Theme not found')
+    store.delete('themes', rid)
     return {'deleted': rid}
+
+
+def portfolio_delete(d):
+    rid = d.get('id')
+    portfolio = find('portfolio_imports', rid)
+    if not portfolio:
+        raise ValueError('Portfolio not found')
+    store.delete('portfolio_imports', rid)
+
+    snapshot_id = portfolio.get('snapshot_id')
+    if snapshot_id and not any(
+        item.get('snapshot_id') == snapshot_id
+        for item in all_records('portfolio_imports')
+    ):
+        store.delete('snapshots', snapshot_id)
+
+    warning = None
+    storage_path = portfolio.get('file_storage_path')
+    if storage_path:
+        try:
+            supabase_store.delete_portfolio_file(storage_path)
+        except supabase_store.SupabaseError as error:
+            warning = f'Portfolio deleted, but its Excel file could not be removed from storage: {error}'
+    return {'deleted': rid, 'warning': warning}
+
 
 # ── Company / Security ────────────────────────────────────────────────────────
 
@@ -210,6 +193,8 @@ def company_create(d):
 def source_ingest(d):
     company = get('companies', d['company_id'])
     parse_date(d['publication_date'])
+    if d.get('cutoff'):
+        parse_date(d['cutoff'])
     if not d.get('period'):
         raise ValueError('Source fiscal period is required')
     url = d.get('url', '')
@@ -239,7 +224,8 @@ def source_ingest(d):
                 and s['period'] == d['period'] and s.get('url', '') == url):
             return s
     sid = ident('source')
-    (DATA / 'sources' / (sid + ext)).write_bytes(content)
+    storage_path = 'sources/' + sid + ext
+    supabase_store.upload_source(storage_path, content, ext)
     evidence, warnings = [], []
     for i, p in enumerate(pages):
         text = p.strip()
@@ -255,19 +241,23 @@ def source_ingest(d):
     return put('sources', {
         'id': sid, 'company_id': company['id'],
         'company_name': company['name'],
+        'bloomberg_ticker': company.get('bloomberg_ticker', ''),
+        'sedol': company.get('sedol', ''),
         'filename': Path(d['filename']).name,
         'title': d.get('title', Path(d['filename']).name),
         'registry': d.get('registry', 'Official Regulatory Registry'),
         'short_registry': d.get('short_registry', 'Official Registry'),
-        'extension': ext, 'sha256': digest, 'url': url,
+        'extension': ext, 'sha256': digest, 'storage_path': storage_path, 'url': url,
         'source_type': d.get('source_type', 'annual_report'),
         'publication_date': d['publication_date'],
-        'period': d['period'], 'retrieved_at': now(),
+        'period': d['period'], 'cutoff': d.get('cutoff') or None,
+        'retrieved_at': now(),
         'warnings': warnings, 'evidence': evidence
     })
 
 def source_update(d):
     source = get('sources', d['id'])
+    company = get('companies', source['company_id'])
     # Evidence and fiscal periods stay immutable once ingested.
     source_type = d.get('source_type', source.get('source_type'))
     if source_type != source.get('source_type') and source_type not in ('annual_report', 'regulatory_filing', 'investor_presentation',
@@ -279,7 +269,12 @@ def source_update(d):
     filename = Path(str(d.get('filename', source['filename']))).name.strip()
     if not filename:
         raise ValueError('Document name is required')
-    source.update(filename=filename, url=url, source_type=source_type)
+    source.update(
+        filename=filename, url=url, source_type=source_type,
+        company_name=company['name'],
+        bloomberg_ticker=company.get('bloomberg_ticker', ''),
+        sedol=company.get('sedol', ''),
+    )
     return put('sources', source)
 
 
@@ -477,8 +472,6 @@ def llm(task, payload, run_rec):
     request = Request(endpoint, data=json.dumps(body).encode(),
                       headers={'Authorization': 'Bearer ' + key,
                                'Content-Type': 'application/json'})
-    with db() as c:
-        audit_store.enqueue(c, 'model.request', {'model': model, 'endpoint': endpoint, 'body': body}, 'model_calls', call['id'])
     max_attempts = 4
     for attempt in range(max_attempts):
         try:
@@ -864,8 +857,6 @@ def check_case(d):
         if alt not in candidate_models:
             candidate_models.append(alt)
 
-    with db() as c:
-        audit_store.enqueue(c, 'model.check_request', {'model': model, 'system': system_prompt, 'user': user_prompt}, 'cases', case_id)
     last_err = None
     output_obj = None
 
@@ -997,13 +988,6 @@ def export(theme_id, snapshot_id=None):
              if o['run_id'] in {r['id'] for r in manifest['runs']}], indent=2))
     return buffer.getvalue()
 
-# ── Evaluate endpoint ─────────────────────────────────────────────────────────
-
-def evaluate_examples(examples):
-    """Run evaluate.py logic inline for the API endpoint."""
-    import evaluate as eval_mod
-    return eval_mod.evaluate(examples)
-
 # ── Snapshot ──────────────────────────────────────────────────────────────────
 
 def snapshot_create(d):
@@ -1033,6 +1017,30 @@ def portfolio_import(d):
     holdings_date = d.get('holdings_date') or date.today().isoformat()
     benchmark_name = d.get('benchmark_name') or 'MSCI Asia ex Japan'
     rows_data = d.get('rows', [])
+    file_content = None
+    file_name = None
+    file_extension = None
+    file_content_type = None
+
+    if d.get('file_content') or d.get('file_name'):
+        if not d.get('file_content') or not d.get('file_name'):
+            raise ValueError('Portfolio file name and content must be provided together')
+        file_name = Path(str(d['file_name'])).name
+        file_extension = Path(file_name).suffix.lower()
+        content_types = {
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.xls': 'application/vnd.ms-excel',
+            '.csv': 'text/csv',
+        }
+        if file_extension not in content_types:
+            raise ValueError('Portfolio file must be XLSX, XLS, or CSV')
+        try:
+            file_content = base64.b64decode(d['file_content'], validate=True)
+        except (ValueError, TypeError):
+            raise ValueError('Portfolio file content is invalid') from None
+        if not 0 < len(file_content) <= MAX_FILE:
+            raise ValueError('Portfolio file must be between 1 byte and 20 MB')
+        file_content_type = content_types[file_extension]
 
     if not rows_data and d.get('content'):
         raw_bytes = base64.b64decode(d['content'], validate=True)
@@ -1162,6 +1170,16 @@ def portfolio_import(d):
         'rows_count': len(clean_rows),
         'rows': clean_rows
     }
+    if file_content is not None:
+        storage_path = f"portfolios/{import_record['id']}{file_extension}"
+        supabase_store.upload_portfolio_file(storage_path, file_content, file_content_type)
+        import_record.update(
+            file_name=file_name,
+            file_storage_path=storage_path,
+            file_sha256=hashlib.sha256(file_content).hexdigest(),
+            file_size=len(file_content),
+            file_content_type=file_content_type,
+        )
     put('portfolio_imports', import_record)
     return {
         'import': import_record,
@@ -1178,10 +1196,7 @@ def state():
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
     checker_model = os.environ.get('CHECKER_LLM_MODEL', 'claude-sonnet-5')
-    with db() as c:
-        audit_status = audit_store.status(c)
     return {
-        'audit_sync': audit_status,
         **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in all_records(k)] if k == 'sources' else all_records(k)) for k in
            ('themes', 'companies', 'sources', 'cases', 'reviews', 'runs', 'snapshots',
             'portfolio_imports', 'search_runs')},
@@ -1202,6 +1217,7 @@ def state():
 def _dispatch(path, d):
     if path == '/api/theme':            return theme_create(d)
     if path == '/api/theme/delete':     return theme_delete(d)
+    if path == '/api/portfolio/delete': return portfolio_delete(d)
     if path == '/api/generate':         return generate(d)
     if path == '/api/analyze':          return analyze(d)
     if path == '/api/analyze_all':      return analyze_all(d)
@@ -1214,49 +1230,11 @@ def _dispatch(path, d):
     if path == '/api/review':           return review(d)
     if path == '/api/snapshot':         return snapshot_create(d)
     if path == '/api/dashboard':        return dashboard(d['theme_id'], d.get('snapshot_id'))
-    if path == '/api/evaluate':         return evaluate_examples(d.get('examples', []))
     if path == '/api/source/update': return source_update(d)
     raise ValueError('Unknown API endpoint')
 
-def audited_action(path, data, action, requested_view=None):
-    view = audit_store.resolve_view(path, requested=requested_view)
-    if view == 'dashboard':
-        return action()
-    view_token = audit_store.view_name.set(view)
-    token = audit_store.request_id.set(str(uuid.uuid4()))
-    try:
-        with db() as c:
-            audit_store.enqueue(c, 'request.input', {'path': path, 'input': data})
-        try:
-            result = action()
-        except Exception as error:
-            with db() as c:
-                audit_store.enqueue(c, 'request.failed', {'path': path, 'error_type': type(error).__name__,
-                                                         'error': str(error)})
-            raise
-        output = {'bytes': len(result), 'sha256': hashlib.sha256(result).hexdigest()} if isinstance(result, bytes) else result
-        with db() as c:
-            audit_store.enqueue(c, 'request.output', {'path': path, 'output': output})
-        if path == '/api/theme' and isinstance(result, dict):
-            try:
-                sync = audit_store.sync_once(DATA / 'research.sqlite', request_id_filter=audit_store.request_id.get())
-                with db() as c:
-                    pending = c.execute("SELECT count(*) FROM audit_outbox WHERE synced_at IS NULL AND json_extract(body, '$.request_id')=?",
-                                        (audit_store.request_id.get(),)).fetchone()[0]
-                state = 'synced' if sync.get('configured') and pending == 0 else 'pending'
-                audit_result = {'state': state, 'configured': sync.get('configured', False),
-                                'error': sync.get('error')}
-            except Exception as error:
-                audit_result = {'state': 'pending', 'error': type(error).__name__}
-            result = {**result, 'audit_sync': audit_result}
-        return result
-    finally:
-        audit_store.request_id.reset(token)
-        audit_store.view_name.reset(view_token)
-
-
-def dispatch(path, d, requested_view=None):
-    return audited_action(path, d, lambda: _dispatch(path, d), requested_view)
+def dispatch(path, d):
+    return _dispatch(path, d)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1312,6 +1290,8 @@ class Handler(BaseHTTPRequestHandler):
             if not asset_file.is_file():
                 asset_file = ROOT.parent / 'static' / assets[path]
             self.respond(asset_file.read_bytes(), mime=mime)
+        except supabase_store.SupabaseError as error:
+            self.respond({'error': str(error)}, 503)
         except Exception as err:
             self.respond({'error': str(err)}, 500)
 
@@ -1328,13 +1308,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('JSON object required')
             if self.path == '/api/export':
                 return self.respond(
-                    audited_action(self.path, d, lambda: export(d['theme_id'], d.get('snapshot_id')), self.headers.get('X-Theme-Lab-View')),
+                    export(d['theme_id'], d.get('snapshot_id')),
                     mime='application/zip',
                     extra={'Content-Disposition': 'attachment; filename=theme-analysis.zip'}
                 )
-            self.respond(dispatch(self.path, d, self.headers.get('X-Theme-Lab-View')))
+            self.respond(dispatch(self.path, d))
         except (ValueError, KeyError, TypeError, ImportError) as error:
             self.respond({'error': str(error)}, 400)
+        except supabase_store.SupabaseError as error:
+            self.respond({'error': str(error)}, 503)
         except Exception:
             self.respond({'error': 'Operation failed; check file validity and provider configuration.'}, 500)
 
@@ -1345,12 +1327,10 @@ if __name__ == '__main__':
     print(f'Theme Lab v1: http://127.0.0.1:{port}', flush=True)
     print('Local access only. Ctrl+C stops the application.', flush=True)
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-    audit_stop = audit_store.start_worker(DATA / 'research.sqlite')
     while True:
         try:
             server.serve_forever()
         except KeyboardInterrupt:
-            audit_stop.set()
             server.server_close()
             break
         except Exception as e:

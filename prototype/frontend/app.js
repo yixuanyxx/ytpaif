@@ -7,7 +7,14 @@
 
 // ── State ──────────────────────────────────────────
 let state = null;
-let currentView = 'overview';
+let currentView = 'dashboard';
+let selectedDashboardThemeId = '';
+let selectedDashboardPortfolioId = '';
+let dashboardRenderVersion = 0;
+const VIEW_STORAGE_KEY = 'theme-lab-current-view';
+const VALID_VIEWS = new Set([
+  'theme', 'portfolio', 'sources', 'analysis', 'dashboard'
+]);
 
 // ── Helpers ────────────────────────────────────────
 const $ = s => document.querySelector(s);
@@ -36,7 +43,7 @@ function reviewStatusBadge(s) {
 async function api(path, data) {
   const r = await fetch('/api/' + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Theme-Lab-View': currentView },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   });
   const json = await r.json();
@@ -46,8 +53,9 @@ async function api(path, data) {
 
 async function apiGet(path) {
   const r = await fetch('/api/' + path);
-  if (!r.ok) throw new Error('Fetch failed');
-  return r.json();
+  const json = await r.json();
+  if (!r.ok) throw new Error(json.error || 'Fetch failed');
+  return json;
 }
 
 // ── Loading / Notice ──────────────────────────────
@@ -131,7 +139,6 @@ async function run(fn, loadingMsg) {
 async function refresh() {
   state = await apiGet('state');
   updateSidebarBadges();
-  updateAiStatus();
 }
 
 function updateSidebarBadges() {
@@ -146,24 +153,36 @@ function updateSidebarBadges() {
   if (sb) { sb.textContent = missingDocs; sb.hidden = missingDocs === 0; }
 }
 
-function updateAiStatus() {
-  const el = $('#ai-status-label');
-  if (!el || !state) return;
-  el.textContent = state.ai_configured
-    ? `AI: ${state.ai_model} (${state.calls_used}/${state.call_cap} calls)`
-    : 'AI: not configured';
+// ── Navigation ─────────────────────────────────────
+function restoreSavedView() {
+  try {
+    const savedView = localStorage.getItem(VIEW_STORAGE_KEY);
+    if (VALID_VIEWS.has(savedView)) currentView = savedView;
+  } catch {
+    // Keep the default view if browser storage is unavailable.
+  }
+  $$('.nav-step').forEach(button =>
+    button.classList.toggle('active', button.dataset.view === currentView)
+  );
 }
 
-// ── Navigation ─────────────────────────────────────
 function setView(view) {
+  if (!VALID_VIEWS.has(view)) return;
   if (currentView === 'theme') captureThemeDraft();
   if (view !== currentView) clearNotice();
+  if (view === 'theme' && view !== currentView) _activeThemeId = '';
   currentView = view;
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, view);
+  } catch {
+    // Navigation still works when browser storage is unavailable.
+  }
   $$('.nav-step').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   render();
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  restoreSavedView();
   await run(async () => {
     await refresh();
     render();
@@ -207,124 +226,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ── Router ─────────────────────────────────────────
 async function render() {
   const views = {
-    overview:  viewOverview,
     theme:     viewTheme,
     portfolio: viewPortfolio,
     sources:   viewSources,
     analysis:  viewAnalysis,
-    review:    viewReview,
     dashboard: viewDashboard,
-    evaluate:  viewEvaluate,
   };
-  const fn = views[currentView] || viewOverview;
+  const fn = views[currentView] || viewDashboard;
   await fn();
-}
-
-// ══════════════════════════════════════════════════════
-// VIEW: OVERVIEW
-// ══════════════════════════════════════════════════════
-async function viewOverview() {
-  setPageHeader('THEMATIC EXPOSURE ENGINE', 'Overview', 'End-to-end workflow status');
-  $('#page-actions').innerHTML = `
-    <button class="btn" id="btn-export">↓ Export analysis</button>`;
-
-  if (!state) { $('#page-content').innerHTML = '<p>Loading…</p>'; return; }
-
-  const theme    = (state.themes || []).find(t => t.approved);
-  const snapshot = (state.snapshots || []).at(-1);
-  const cases    = state.cases || [];
-  const approved = cases.filter(c => c.review_status === 'approved');
-  const pending  = cases.filter(c => c.review_status === 'needs_review');
-  const companies = state.companies || [];
-  const sources   = state.sources || [];
-
-  // Workflow status tiles
-  const steps = [
-    { label: 'Theme defined',     done: !!theme,             goto: 'theme',     hint: theme ? theme.theme_name : 'Not yet defined' },
-    { label: 'Portfolio imported', done: companies.length>0,  goto: 'portfolio', hint: `${companies.length} companies` },
-    { label: 'Sources collected', done: sources.length>0,     goto: 'sources',   hint: `${sources.length} documents` },
-    { label: 'Cases analysed',    done: cases.length>0,       goto: 'analysis',  hint: `${cases.length} total` },
-    { label: 'Cases approved',    done: approved.length>0,    goto: 'review',    hint: `${approved.length} approved, ${pending.length} pending` },
-    { label: 'Dashboard ready',   done: !!snapshot,           goto: 'dashboard', hint: snapshot ? snapshot.name : 'No snapshot yet' },
-  ];
-
-  const stepsHtml = steps.map((s, i) => `
-    <div class="card" style="padding:18px 20px;cursor:pointer" data-goto="${s.goto}">
-      <div class="flex items-center gap-12">
-        <div style="width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-          background:${s.done ? 'var(--teal-100)' : 'var(--slate-100)'};
-          color:${s.done ? 'var(--teal-700)' : 'var(--slate-400)'};font-weight:700;font-size:13px;flex-shrink:0">
-          ${s.done ? '✓' : i+1}
-        </div>
-        <div class="flex-1">
-          <div style="font-weight:600;font-size:13px">${esc(s.label)}</div>
-          <div class="text-muted text-small mt-4">${esc(s.hint)}</div>
-        </div>
-        <div style="font-size:18px;color:var(--slate-200)">›</div>
-      </div>
-    </div>`).join('');
-
-  // Dashboard snapshot if available
-  let dashHtml = '';
-  if (theme && snapshot) {
-    try {
-      const d = await api('dashboard', { theme_id: theme.id, snapshot_id: snapshot.id });
-      if (d) {
-        const s = d.summary;
-        dashHtml = `
-          <div class="metric-grid" style="grid-template-columns:repeat(3,1fr)">
-            ${metricTile('Portfolio exposure', pct(s.portfolio.point), pctRange(s.portfolio), '')}
-            ${metricTile('Benchmark exposure', pct(s.benchmark.point), pctRange(s.benchmark), '')}
-            ${metricTile('Active exposure', pct(s.active.point, true), pctRange(s.active), 'accent')}
-          </div>
-          <div class="panel">
-            <div class="panel-title">Top active contributors</div>
-            <div class="panel-subtitle">Sorted by absolute active contribution</div>
-            ${waterfallChart(d.companies.slice(0,7), state)}
-          </div>`;
-      }
-    } catch (_) {}
-  }
-
-  $('#page-content').innerHTML = `
-    <div class="grid-2" style="align-items:start">
-      <div>
-        <div class="panel-title mb-12">Workflow progress</div>
-        <div style="display:flex;flex-direction:column;gap:10px">${stepsHtml}</div>
-        ${!theme ? `
-          <div class="notice info mt-16">
-            <span class="notice-icon">ℹ</span>
-            <div>Start by defining your investment theme and approving a taxonomy.
-              <a href="#" data-goto="theme" style="margin-left:8px;font-weight:600">Define theme →</a>
-            </div>
-          </div>` : ''}
-      </div>
-      <div>
-        ${dashHtml || `
-          <div class="empty-state" style="background:white;border:1px solid var(--slate-100);border-radius:var(--radius-lg)">
-            <div class="empty-icon">◫</div>
-            <h3>No dashboard yet</h3>
-            <p>Complete the workflow steps on the left to see portfolio thematic exposure here.</p>
-          </div>`}
-      </div>
-    </div>`;
-
-  $('#btn-export').onclick = () => run(async () => {
-    if (!theme) throw new Error('Approve a theme before exporting');
-    const r = await fetch('/api/export', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Theme-Lab-View': currentView },
-      body: JSON.stringify({ theme_id: theme.id, snapshot_id: snapshot?.id || null })
-    });
-    if (!r.ok) throw new Error((await r.json()).error);
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'theme-analysis.zip';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    notice('Export downloaded.');
-  }, 'Exporting…');
 }
 
 function metricTile(label, value, meta, accent) {
@@ -357,7 +266,7 @@ function waterfallChart(companies, state) {
 }
 
 // ══════════════════════════════════════════════════════
-let _activeThemeId = null;
+let _activeThemeId = '';
 let _themeEditorKey = 'new';
 const themeDrafts = new Map();
 
@@ -374,20 +283,16 @@ function captureThemeDraft() {
 // Renders the "Saved themes" card: a flat list of distinct themes. Clicking a
 // row loads that theme's definition + taxonomy into the editor below.
 function savedThemesListHtml(savedThemes, activeTheme) {
-  if (!savedThemes.length) {
-    return `
-      <div class="panel saved-themes-panel">
-        <div class="panel-title">Saved themes</div>
-        <div class="panel-subtitle">No themes saved yet. Define a theme below and save it to build your reusable library.</div>
-      </div>`;
-  }
   return `
     <div class="panel saved-themes-panel">
       <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <span>Saved themes <span class="badge badge-neutral">${savedThemes.length}</span></span>
+        <button type="button" class="btn btn-sm btn-primary" id="btn-new-theme">+ New theme</button>
       </div>
-      <div class="panel-subtitle">Click a theme to load its definition and sub-theme taxonomy into the editor.</div>
-      <ul class="saved-theme-list">
+      <div class="panel-subtitle">${savedThemes.length
+        ? 'Click a theme to load its definition and sub-theme taxonomy into the editor.'
+        : 'No themes saved yet. Define a theme below and save it to build your reusable library.'}</div>
+      ${savedThemes.length ? `<ul class="saved-theme-list">
         ${savedThemes.slice().reverse().map(t => {
           const t1 = (t.nodes || []).filter(n => !n.parent_id).length;
           const t2 = (t.nodes || []).filter(n => n.parent_id).length;
@@ -404,7 +309,7 @@ function savedThemesListHtml(savedThemes, activeTheme) {
               </div>
             </li>`;
         }).join('')}
-      </ul>
+      </ul>` : ''}
     </div>`;
 }
 
@@ -413,12 +318,12 @@ async function viewTheme(overrideThemeId) {
     _activeThemeId = overrideThemeId;
   }
   const savedThemes = (state.themes || []).filter(t => t.approved);
-  // `_activeThemeId === ''` means "new blank theme"; otherwise load the selected
-  // theme, falling back to the most recently saved one.
+  // An empty active ID means "new blank theme"; saved themes are only loaded
+  // after an explicit selection.
   const isNewTheme = _activeThemeId === '';
   const theme = isNewTheme
     ? null
-    : (_activeThemeId ? savedThemes.find(t => t.id === _activeThemeId) : null) || savedThemes.at(-1);
+    : savedThemes.find(t => t.id === _activeThemeId) || null;
 
   _themeEditorKey = theme?.id || 'new';
   const draft = themeDrafts.get(_themeEditorKey);
@@ -426,11 +331,7 @@ async function viewTheme(overrideThemeId) {
 
   setPageHeader('STEP 1', 'Theme Definition',
     'Define an investment theme and its sub-theme taxonomy');
-  $('#page-actions').innerHTML = `
-    <div class="btn-group">
-      ${theme ? `<button class="btn btn-sm btn-primary" id="btn-new-theme">+ New theme</button>` : ''}
-    </div>
-  `;
+  $('#page-actions').innerHTML = '';
 
   const themeFormHtml = `
     <form id="theme-form">
@@ -553,12 +454,7 @@ async function viewTheme(overrideThemeId) {
       _activeThemeId = result.id;
       await refresh();
       const savedMessage = `Theme "${result.theme_name}" ${isUpdate ? 'updated' : 'saved'}`;
-      if (result.audit_sync?.state === 'synced') {
-        notice(`${savedMessage} and copied to Supabase.`);
-      } else {
-        const detail = result.audit_sync?.error ? ` (${result.audit_sync.error})` : '';
-        notice(`${savedMessage} locally. Supabase audit copy is pending${detail}.`, 'warning');
-      }
+      notice(`${savedMessage} to Supabase.`);
       render();
     }, 'Saving theme…');
   };
@@ -578,7 +474,6 @@ async function viewTheme(overrideThemeId) {
       const ta = $('#taxonomy-json-area');
       if (ta) ta.value = JSON.stringify(result.nodes, null, 2);
       updateTaxonomyMindmap();
-      notice('AI taxonomy proposed. You can now click any node to edit, add, or delete.', 'info');
     }, 'Generating taxonomy with AI…');
   };
 
@@ -646,8 +541,8 @@ async function viewTheme(overrideThemeId) {
       if (t) {
         captureThemeDraft();
         _activeThemeId = t.id;
+        clearNotice();
         viewTheme();
-        notice(`Loaded "${t.theme_name}" into the editor.`, 'info');
       }
     };
   });
@@ -662,7 +557,7 @@ async function viewTheme(overrideThemeId) {
       run(async () => {
         await api('theme/delete', { id: t.id });
         themeDrafts.delete(t.id);
-        if (_activeThemeId === t.id) _activeThemeId = null;
+        if (_activeThemeId === t.id) _activeThemeId = '';
         await refresh();
         notice(`Deleted "${t.theme_name}".`, 'info');
         render();
@@ -691,8 +586,8 @@ async function viewTheme(overrideThemeId) {
     captureThemeDraft();
     themeDrafts.delete('new');
     _activeThemeId = '';
+    clearNotice();
     viewTheme();
-    notice('Started a new theme. Fill in the fields and save.', 'info');
   });
 }
 
@@ -1447,27 +1342,17 @@ function updateBreakdownStagedNote() {
 // Module-level staging area — survives re-renders within the view
 let _stagingRows = null;   // parsed + edited rows before confirmation
 let _stagingFile = null;   // file name for display
+let _stagingFileObject = null;
 
 async function viewPortfolio() {
   setPageHeader('STEP 2', 'Portfolio Import',
     'Upload holdings and match companies');
 
-  const companies = state.companies || [];
+  $('#page-actions').innerHTML = '';
 
-  // Resume the current preview or show the saved company universe for testing.
   const hasStaged = _stagingRows && _stagingRows.length > 0;
-  $('#page-actions').innerHTML = companies.length
-    ? '<button class="btn btn-sm" id="btn-view-universe">View company universe</button>'
-    : '';
-  $('#btn-view-universe')?.addEventListener('click', () => {
-    $('#page-actions').innerHTML = '';
-    renderImportedView(companies);
-  });
-
   if (hasStaged) {
     renderEditTable(_stagingRows);
-  } else if (companies.length) {
-    renderImportedView(companies);
   } else {
     renderUploadZone();
   }
@@ -1549,9 +1434,34 @@ function renderUploadZone() {
           </table>
         </div>
       </div>
-    </div>`;
+    </div>
+    ${renderExistingPortfolioCards()}`;
 
   $('#btn-portfolio-template').onclick = downloadPortfolioTemplate;
+  $$('[data-open-portfolio]').forEach(button => {
+    button.addEventListener('click', () => {
+      const portfolio = (state.portfolio_imports || [])
+        .find(item => item.id === button.dataset.openPortfolio);
+      if (portfolio) renderPortfolioDetails(portfolio);
+    });
+  });
+  $$('[data-del-portfolio]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const portfolio = (state.portfolio_imports || [])
+        .find(item => item.id === button.dataset.delPortfolio);
+      if (!portfolio) return;
+      const ok = await showConfirm(`Delete portfolio "${portfolio.name}"? This cannot be undone.`,
+                                   { title: 'Delete portfolio' });
+      if (!ok) return;
+      run(async () => {
+        const result = await api('portfolio/delete', { id: portfolio.id });
+        await refresh();
+        if (result.warning) notice(result.warning, 'warning');
+        else notice(`Deleted "${portfolio.name}".`, 'info');
+        renderUploadZone();
+      }, 'Deleting portfolio…');
+    });
+  });
   const dropZone = $('#excel-drop');
   const fileInput = $('#excel-file');
   let currentFile = null;
@@ -1559,6 +1469,7 @@ function renderUploadZone() {
   function onFileSelected(file) {
     if (!file) return;
     currentFile = file;
+    _stagingFileObject = file;
     _stagingFile = file.name;
     $('#import-file-name').textContent = file.name;
     $('#btn-parse').disabled = false;
@@ -1992,15 +1903,30 @@ function bindEditTable(rows) {
       if (clean.length === 0) throw new Error('No valid rows to import.');
       const res = await api('portfolio/import', {
         name: name,
-        holdings_date: new Date().toISOString().slice(0, 10),
-        benchmark_name: 'MSCI Asia ex Japan',
-        rows: clean
+        holdings_date: rows._importDate || new Date().toISOString().slice(0, 10),
+        benchmark_name: rows._benchmarkName || 'MSCI Asia ex Japan',
+        rows: clean,
+        file_name: rows._fileName,
+        file_content: await fileToBase64(_stagingFileObject)
       });
+      _stagingRows = null;
+      _stagingFileObject = null;
       await refresh();
       notice(`"${name}" imported — ${clean.length} companies registered and snapshot created. Dashboard is ready.`);
       render();
     }, 'Importing holdings…');
   };
+}
+
+async function fileToBase64(file) {
+  if (!file) throw new Error('The original portfolio file is unavailable. Select it again and retry.');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 // Expose conflict resolution and row toggle to inline onclick handlers
@@ -2048,90 +1974,61 @@ function refreshConfirmButton(rows) {
 }
 
 // ─── Phase 3: Already-imported view ──────────────────────────────────────────
-function renderImportedView(companies) {
-  const sources = state.sources || [];
-
+function renderPortfolioDetails(portfolio) {
+  const rows = portfolio.rows || [];
   $('#page-content').innerHTML = `
-    <div class="panel" style="margin-bottom:20px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <div class="panel">
+      <div class="panel-row">
         <div>
-          <div class="panel-title">Company universe</div>
-          <div class="panel-subtitle">${companies.length} companies · matched by SEDOL or Bloomberg ticker</div>
+          <div class="panel-title">${esc(portfolio.name)}</div>
+          <div class="panel-subtitle">${esc(portfolio.holdings_date || 'Date not specified')} · ${esc(portfolio.benchmark_name || 'Benchmark not specified')} · ${rows.length} holdings</div>
         </div>
-        <button class="btn btn-primary" id="btn-reimport-main">↑ Import / replace portfolio</button>
+        <button class="btn btn-sm" id="btn-back-portfolios">← Existing portfolios</button>
       </div>
       <div class="table-wrap">
         <table>
-          <thead>
-            <tr><th>#</th><th>Company</th><th>Bloomberg ticker</th><th>SEDOL</th><th>Country</th><th>Sources</th></tr>
-          </thead>
+          <thead><tr>
+            <th>Company</th><th>Bloomberg ticker</th><th>SEDOL</th>
+            <th>Country</th><th>Sector</th>
+            <th class="td-num">Portfolio wt</th><th class="td-num">Reference wt</th><th class="td-num">Active wt</th>
+          </tr></thead>
           <tbody>
-            ${companies.map((c, i) => {
-              const srcCount = sources.filter(s=>s.company_id===c.id).length;
-              return `<tr>
-                <td class="text-muted text-small">${i+1}</td>
-                <td class="td-company">${esc(c.name)}</td>
-                <td class="text-mono">${esc(c.bloomberg_ticker||'—')}</td>
-                <td class="text-mono">${esc(c.sedol||'—')}</td>
-                <td>${esc(c.jurisdiction||'—')}</td>
-                <td>${srcCount > 0 ? badge(srcCount+' docs','green') : badge('No docs','amber')}</td>
-              </tr>`;
-            }).join('')}
+            ${rows.map(row => `<tr>
+              <td class="td-company">${esc(row.company_name || row.name || row.company_id)}</td>
+              <td class="text-mono">${esc(row.bloomberg_ticker || '—')}</td>
+              <td class="text-mono">${esc(row.sedol || '—')}</td>
+              <td>${esc(row.country || '—')}</td>
+              <td>${esc(row.sector || '—')}</td>
+              <td class="td-num">${pct(row.portfolio_weight)}</td>
+              <td class="td-num">${pct(row.reference_weight)}</td>
+              <td class="td-num">${pct(row.active_weight, true)}</td>
+            </tr>`).join('')}
           </tbody>
         </table>
       </div>
-    </div>
-
-    <!-- Manual company add -->
-    <div class="panel">
-      <div class="panel-title">Add company manually</div>
-      <div class="panel-subtitle">Provide company name and at least one security identifier.</div>
-      <form id="company-form">
-        <div class="form-grid">
-          <div class="form-group span-2">
-            <label class="field-label">Legal name <span class="required">*</span></label>
-            <input type="text" name="name" placeholder="e.g. Taiwan Semiconductor Manufacturing" required>
-          </div>
-          <div class="form-group">
-            <label class="field-label">Bloomberg ticker</label>
-            <input type="text" name="bloomberg_ticker" placeholder="e.g. 2330 TT Equity">
-          </div>
-          <div class="form-group">
-            <label class="field-label">SEDOL</label>
-            <input type="text" name="sedol" placeholder="e.g. 6889106">
-          </div>
-          <div class="form-group">
-            <label class="field-label">Country / jurisdiction <span class="optional">(optional)</span></label>
-            <input type="text" name="jurisdiction" placeholder="e.g. TW">
-          </div>
-        </div>
-        <button type="submit" class="btn btn-primary btn-sm">Add company</button>
-      </form>
     </div>`;
+  $('#btn-back-portfolios').onclick = () => renderUploadZone();
+}
 
-  $('#btn-reimport-main').onclick = () => {
-    _stagingRows = null;
-    renderUploadZone();
-  };
-
-  $('#company-form').onsubmit = e => {
-    e.preventDefault();
-    const fd = Object.fromEntries(new FormData(e.target));
-    if (!fd.bloomberg_ticker && !fd.sedol)
-      return notice('Provide at least one security identifier (ticker or SEDOL)', 'error');
-    run(async () => {
-      await api('company', fd);
-      await refresh();
-      notice(`${fd.name} added to company universe.`);
-      render();
-    }, 'Adding company…');
-  };
-
-  // Reimport button in header (if rendered)
-  $('#btn-reimport')?.addEventListener('click', () => {
-    _stagingRows = null;
-    renderUploadZone();
-  });
+function renderExistingPortfolioCards() {
+  const portfolios = state.portfolio_imports || [];
+  return portfolios.length ? `
+    <div class="panel">
+      <div class="panel-title">Existing portfolios <span class="badge badge-neutral">${portfolios.length}</span></div>
+      <div class="panel-subtitle">Select a portfolio to view its saved holdings.</div>
+      <ul class="saved-theme-list">
+        ${portfolios.map(portfolio => `
+          <li class="saved-theme-row">
+            <button type="button" class="saved-theme-main" data-open-portfolio="${esc(portfolio.id)}" title="View this portfolio's holdings">
+              <span class="saved-theme-name">${esc(portfolio.name)}</span>
+              <span class="saved-theme-meta">${esc(portfolio.holdings_date || 'Date not specified')} · ${portfolio.rows?.length || 0} holdings · ${esc(portfolio.benchmark_name || 'Benchmark not specified')}${portfolio.file_name ? ` · Excel: ${esc(portfolio.file_name)}` : ''}</span>
+            </button>
+            <div class="saved-theme-actions">
+              <button type="button" class="btn btn-sm btn-ghost saved-theme-del" data-del-portfolio="${esc(portfolio.id)}" title="Delete this portfolio" aria-label="Delete ${esc(portfolio.name)}">🗑</button>
+            </div>
+          </li>`).join('')}
+      </ul>
+    </div>` : '';
 }
 
 // ══════════════════════════════════════════════════════
@@ -2144,10 +2041,7 @@ async function viewSources() {
   const sources   = state.sources   || [];
   const theme     = (state.themes  || []).filter(t=>t.approved).at(-1);
 
-  $('#page-actions').innerHTML = `
-    <button class="btn btn-primary" id="btn-search-docs" ${companies.length===0?'disabled':''}>
-      ✦ Search for documents
-    </button>`;
+  $('#page-actions').innerHTML = '';
 
   const SOURCE_TYPES = [
     { value:'annual_report',         label:'Annual report',          default:true  },
@@ -2300,7 +2194,11 @@ async function viewSources() {
                 <input type="date" name="publication_date" required>
               </div>
               <div class="form-group">
-                <label class="field-label">Fiscal period <span class="required">*</span></label>
+                <label class="field-label">Evidence cutoff <span class="optional">(optional)</span></label>
+                <input type="date" name="cutoff" value="${esc(theme?.cutoff || '')}">
+              </div>
+              <div class="form-group">
+                <label class="field-label">Reporting period <span class="required">*</span></label>
                 <input type="text" name="period" placeholder="FY2025" required>
               </div>
               <div class="form-group">
@@ -2378,10 +2276,6 @@ async function viewSources() {
     const count = res.results?.length || 0;
     notice(`Search complete. ${count} uploaded documents evaluated against cutoff (${cutoff}). Review the results below.`, 'success');
   }, 'Searching for documents…');
-
-  $('#btn-search-docs')?.addEventListener('click', () => {
-    document.getElementById('btn-run-search')?.scrollIntoView({behavior:'smooth'});
-  });
 
   $('#source-form').onsubmit = e => {
     e.preventDefault();
@@ -2810,7 +2704,7 @@ async function viewAnalysis() {
           <div class="empty-state" style="padding:32px 16px">
             <div class="empty-icon">🏢</div>
             <h3>No companies yet</h3>
-            <p><a href="#" data-goto="portfolio">Import a portfolio</a> to see your company universe here.</p>
+            <p><a href="#" data-goto="portfolio">Import a portfolio</a> to add companies for analysis.</p>
           </div>`}
 
         <!-- Accordion 1: Targeted Single-Company Passage Selection -->
@@ -3050,17 +2944,6 @@ function bindAnalysisPanel(companyId) {
 // ══════════════════════════════════════════════════════
 // VIEW: REVIEW CASES  (YTP-21, YTP-22)
 // ══════════════════════════════════════════════════════
-async function viewReview() {
-  await viewAnalysis();
-}
-
-function confidenceBadge(level) {
-  if (level === 'high')   return badge('High · 92%', 'green');
-  if (level === 'medium') return badge('Medium · 70%', 'amber');
-  if (level === 'low')    return badge('Low · 35%', 'red');
-  return badge(level||'—', 'neutral');
-}
-
 window.openCase = function(caseId) {
   const c = (state.cases||[]).find(x=>x.id===caseId);
   if (!c) return;
@@ -3504,43 +3387,85 @@ function activeContributionsPanel(rows, companies, hasSources) {
 }
 
 async function viewDashboard() {
+  const renderVersion = ++dashboardRenderVersion;
   $('#page-actions').innerHTML = '';
-  setPageHeader('STEP 5', 'Portfolio Exposure Dashboard',
+  setPageHeader('PORTFOLIO ANALYTICS', 'Portfolio Exposure Dashboard',
     'Thematic exposure across portfolio and benchmark');
 
-  const theme     = (state.themes||[]).filter(t=>t.approved).at(-1);
+  const themes = (state.themes || []).filter(t => t.approved);
+  const portfolios = state.portfolio_imports || [];
   const snapshots = state.snapshots || [];
   const companies = state.companies || [];
+  const theme = themes.find(t => t.id === selectedDashboardThemeId) || themes.at(-1);
+  const portfolioImport = portfolios.find(p => p.id === selectedDashboardPortfolioId) || portfolios.at(-1);
+  selectedDashboardThemeId = theme?.id || '';
+  selectedDashboardPortfolioId = portfolioImport?.id || '';
+
+  const selectorsHtml = `
+    <div class="dashboard-selectors">
+      <label class="dashboard-selector">
+        <span>Theme</span>
+        <select id="dashboard-theme-select" ${themes.length ? '' : 'disabled'}>
+          ${themes.length ? themes.map(t => `<option value="${esc(t.id)}" ${t.id === theme?.id ? 'selected' : ''}>${esc(t.theme_name)}</option>`).join('') : '<option value="">No approved themes</option>'}
+        </select>
+      </label>
+      <label class="dashboard-selector">
+        <span>Portfolio</span>
+        <select id="dashboard-portfolio-select" ${portfolios.length ? '' : 'disabled'}>
+          ${portfolios.length ? portfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolioImport?.id ? 'selected' : ''}>${esc(p.name)}${p.holdings_date ? ` · ${esc(p.holdings_date)}` : ''}</option>`).join('') : '<option value="">No portfolios imported</option>'}
+        </select>
+      </label>
+    </div>`;
+  const renderDashboardBody = html => {
+    $('#page-content').innerHTML = selectorsHtml + html;
+    $('#dashboard-theme-select')?.addEventListener('change', event => {
+      selectedDashboardThemeId = event.target.value;
+      viewDashboard();
+    });
+    $('#dashboard-portfolio-select')?.addEventListener('change', event => {
+      selectedDashboardPortfolioId = event.target.value;
+      viewDashboard();
+    });
+  };
+  $('#page-content').innerHTML = `${selectorsHtml}
+    <div class="dashboard-loading" role="status" aria-live="polite" aria-busy="true">
+      <span class="dashboard-loading-spinner" aria-hidden="true"></span>
+      <span>Loading portfolio exposure…</span>
+    </div>`;
+  const selectedSnapshot = snapshots.find(s => s.id === portfolioImport?.snapshot_id);
 
   if (!theme) {
-    $('#page-content').innerHTML = `
+    renderDashboardBody(`
       <div class="empty-state">
         <div class="empty-icon">◫</div>
-        <h3>No approved theme</h3>
+        <h3>No approved themes</h3>
         <p><a href="#" data-goto="theme">Define and approve a theme</a> to view portfolio exposure.</p>
-      </div>`;
+      </div>`);
     return;
   }
-  if (snapshots.length === 0) {
-    $('#page-content').innerHTML = `
+  if (!portfolioImport || !selectedSnapshot) {
+    renderDashboardBody(`
       <div class="empty-state">
         <div class="empty-icon">⇄</div>
-        <h3>No holdings snapshot</h3>
+        <h3>No portfolio snapshot</h3>
         <p><a href="#" data-goto="portfolio">Import a portfolio</a> to calculate thematic exposures.</p>
-      </div>`;
+      </div>`);
     return;
   }
 
-  const snapshot = snapshots.at(-1);
+  const snapshot = selectedSnapshot;
   let d;
   try {
     d = await api('dashboard', { theme_id: theme.id, snapshot_id: snapshot.id });
   } catch (e) {
+    if (renderVersion !== dashboardRenderVersion) return;
     notice(e.message, 'error');
+    renderDashboardBody(`<div class="notice error">${esc(e.message)}</div>`);
     return;
   }
+  if (renderVersion !== dashboardRenderVersion) return;
   if (!d) {
-    $('#page-content').innerHTML = '<div class="notice warning">Dashboard data unavailable.</div>';
+    renderDashboardBody('<div class="notice warning">Dashboard data unavailable.</div>');
     return;
   }
 
@@ -3555,7 +3480,7 @@ async function viewDashboard() {
   const cases  = state.cases || [];
 
   const subthemeExposure = {};
-  nodes.forEach(n => subthemeExposure[n.node_id] = { lower:0, upper:0, point:0 });
+  nodes.forEach(n => subthemeExposure[n.node_id] = { point:0 });
 
   d.companies.forEach(row => {
     if (row.company_id === 'CASH') return;
@@ -3563,9 +3488,7 @@ async function viewDashboard() {
     if (!c) return;
     const w = row.weights.portfolio;
     Object.entries(c.estimate?.subthemes||{}).forEach(([nid, v]) => {
-      if (!subthemeExposure[nid]) subthemeExposure[nid] = { lower:0, upper:0, point:0 };
-      subthemeExposure[nid].lower += w * v.lower;
-      subthemeExposure[nid].upper += w * v.upper;
+      if (!subthemeExposure[nid]) subthemeExposure[nid] = { point:0 };
       if (v.point !== null) subthemeExposure[nid].point += w * v.point;
     });
   });
@@ -3575,15 +3498,14 @@ async function viewDashboard() {
       <button class="btn btn-sm btn-secondary" id="btn-reference" title="Filter to reference benchmark constituents">
         Benchmark: ${esc(snapshot.benchmark_name || 'MSCI Asia ex Japan')}
       </button>
-      <button class="btn btn-sm" id="btn-export-dash">↓ Export</button>
     </div>`;
 
-  $('#page-content').innerHTML = `
+  renderDashboardBody(`
     <!-- Top-level exposure metrics -->
     <div class="metric-grid">
-      ${metricTile('Portfolio exposure', pct(s.portfolio.point), `Bounds: ${pctRange(s.portfolio)}`, '')}
-      ${metricTile('Benchmark exposure', pct(s.benchmark.point), `Bounds: ${pctRange(s.benchmark)}`, '')}
-      ${metricTile('Active exposure', pct(s.active.point, true), `Bounds: ${pctRange(s.active)}`, 'accent')}
+      ${metricTile('Portfolio exposure', pct(s.portfolio.point), '', '')}
+      ${metricTile('Benchmark exposure', pct(s.benchmark.point), '', '')}
+      ${metricTile('Active exposure', pct(s.active.point, true), '', 'accent')}
       ${metricTile('Coverage', pct(d.coverage.portfolio), `Benchmark: ${pct(d.coverage.benchmark)}`, '')}
     </div>
 
@@ -3597,27 +3519,21 @@ async function viewDashboard() {
         ${assessedHoldings.length && tier1.length ? `<div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Sub-theme</th><th class="td-num">Lower</th><th class="td-num">Upper</th><th class="td-num">Point</th></tr>
+              <tr><th>Sub-theme</th><th class="td-num">Exposure</th></tr>
             </thead>
             <tbody>
               ${tier1.map(t1 => {
                 const children = nodes.filter(n=>n.parent_id===t1.node_id);
-                const t1Low  = children.reduce((s,n)=>s+(subthemeExposure[n.node_id]?.lower||0),0);
-                const t1High = children.reduce((s,n)=>s+(subthemeExposure[n.node_id]?.upper||0),0);
                 const t1Pt   = children.reduce((s,n)=>s+(subthemeExposure[n.node_id]?.point||0),0);
                 return `
                   <tr data-subtheme="${esc(t1.node_id)}" style="background:var(--slate-50);cursor:pointer" title="Click to filter companies by ${esc(t1.name)}">
                     <td><strong>${esc(t1.name)}</strong> <span class="text-muted text-small">(Tier 1)</span></td>
-                    <td class="td-num">${pct(t1Low)}</td>
-                    <td class="td-num">${pct(t1High)}</td>
                     <td class="td-num">${pct(t1Pt)}</td>
                   </tr>
                   ${children.map(t2 => {
-                    const v = subthemeExposure[t2.node_id]||{lower:0,upper:0,point:0};
+                    const v = subthemeExposure[t2.node_id]||{point:0};
                     return `<tr data-subtheme="${esc(t2.node_id)}" style="cursor:pointer" title="Click to filter companies by ${esc(t2.name)}">
                       <td style="padding-left:28px">↳ ${esc(t2.name)} <span class="text-muted text-small">(Tier 2)</span></td>
-                      <td class="td-num text-muted">${pct(v.lower)}</td>
-                      <td class="td-num text-muted">${pct(v.upper)}</td>
                       <td class="td-num text-muted">${pct(v.point)}</td>
                     </tr>`;
                   }).join('')}`;
@@ -3635,8 +3551,7 @@ async function viewDashboard() {
     <div class="panel" id="dashboard-companies">
       <div class="panel-title">Company-level exposure</div>
       <div class="panel-subtitle">
-        Approved results only · ${esc(snapshot?.portfolio?.[0]?.as_of_date||'')} · 
-        Unassessed companies: lower=0%, upper=100%, point=—
+        Approved results only · ${esc(snapshot?.portfolio?.[0]?.as_of_date||'')}
       </div>
 
       <div class="company-filter-banner" id="company-filter-banner" hidden style="align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:12px 0;border:1px solid var(--teal-200);border-left:4px solid var(--teal-500);border-radius:8px;background:var(--teal-50)">
@@ -3657,7 +3572,6 @@ async function viewDashboard() {
               <th class="td-num">Reference wt</th>
               <th class="td-num">Active wt</th>
               <th class="td-num">Exposure</th>
-              <th class="td-num">Bounds</th>
               <th class="td-num">Active contrib</th>
               <th>Status</th>
             </tr>
@@ -3672,7 +3586,6 @@ async function viewDashboard() {
                 <td class="td-num">${pct(row.weights.benchmark)}</td>
                 <td class="td-num ${row.weights.active>=0?'positive':'negative'}">${pct(row.weights.active,true)}</td>
                 <td class="td-num">${pct(row.exposure.point)}</td>
-                <td class="td-num text-muted text-small">${pctRange(row.exposure)}</td>
                 <td class="td-num ${ap===null?'':ap>=0?'positive':'negative'}">${pct(ap,true)}</td>
                 <td>${row.assessed ? badge('Assessed','green') : badge('Unassessed','amber')}</td>
               </tr>`;
@@ -3689,10 +3602,9 @@ async function viewDashboard() {
         <strong>Methodology:</strong>
         Exposure = qualifying external revenue ÷ total consolidated revenue.
         Portfolio exposure = Σ (portfolio weight × company exposure).
-        Bounds are assumption-based limits, not statistical confidence intervals.
         Confidence scores use a non-probabilistic ordinal rubric (high/medium/low).
       </div>
-    </div>`;
+    </div>`);
 
   const allCompRows = [...document.querySelectorAll('[data-dashboard-company]')];
   const filterCompanies = (title, matchingIds, label) => {
@@ -3754,171 +3666,6 @@ async function viewDashboard() {
     };
   });
 
-  $('#btn-export-dash')?.addEventListener('click', () => run(async () => {
-    const r = await fetch('/api/export', {
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'X-Theme-Lab-View':currentView},
-      body: JSON.stringify({ theme_id: theme.id, snapshot_id: snapshot.id })
-    });
-    if (!r.ok) throw new Error((await r.json()).error);
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'theme-analysis.zip';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    notice('Export downloaded.');
-  }, 'Exporting…'));
-}
-
-// ══════════════════════════════════════════════════════
-// VIEW: EVALUATE  (YTP-27)
-// ══════════════════════════════════════════════════════
-async function viewEvaluate() {
-  setPageHeader('VALIDATION', 'Evaluate Accuracy',
-    'Classification accuracy against a labelled reference set');
-  $('#page-actions').innerHTML = '';
-
-  $('#page-content').innerHTML = `
-    <div class="grid-2" style="align-items:start">
-
-      <div class="panel">
-        <div class="panel-title">Upload labelled examples</div>
-        <div class="panel-subtitle">
-          JSON file with independently labelled company-theme classifications.
-          Keep development (8) and held-out (12) sets strictly separate.
-        </div>
-
-        <div class="drop-zone" id="eval-drop" style="margin-bottom:18px">
-          <input type="file" id="eval-file" accept=".json">
-          <div class="upload-icon">📋</div>
-          <h3>Drop JSON file here</h3>
-          <p>Format: array of objects with <code>actual</code>, optional <code>predicted</code>,<br>
-             <code>confidence_band</code>, <code>point</code>, <code>reference_point</code></p>
-          <button class="btn btn-primary" style="margin-top:14px"
-            onclick="document.getElementById('eval-file').click();event.stopPropagation()">Browse file</button>
-        </div>
-
-        <div class="btn-group">
-          <button class="btn btn-primary" id="btn-run-eval" disabled>Run evaluation</button>
-        </div>
-
-        <div class="notice info mt-16">
-          <span class="notice-icon">ℹ</span>
-          <div>
-            <strong>Targets (mentor session, 6 Oct):</strong><br>
-            Gold set: 20 companies (8 dev / 12 held-out).<br>
-            Acceptable: mean exposure error ≤ 10 pp on held-out.<br>
-            Must beat sector-label and keyword baselines.
-          </div>
-        </div>
-
-        <div class="form-section">
-          <div class="form-section-title">CLI equivalent</div>
-          <div class="text-mono" style="background:var(--slate-50);padding:12px;border-radius:var(--radius-sm);font-size:12px;border:1px solid var(--slate-100)">
-            python evaluate.py labelled_examples.json
-          </div>
-        </div>
-      </div>
-
-      <!-- Results panel -->
-      <div id="eval-results">
-        <div class="panel">
-          <div class="empty-state" style="padding:40px 16px">
-            <div class="empty-icon">◎</div>
-            <h3>No results yet</h3>
-            <p>Upload a labelled JSON file and run the evaluation to see metrics.</p>
-          </div>
-        </div>
-      </div>
-    </div>`;
-
-  const evalDrop = $('#eval-drop');
-  const evalFile = $('#eval-file');
-  let evalData = null;
-
-  evalFile.onchange = () => {
-    const f = evalFile.files[0];
-    if (!f) return;
-    const reader = new FileReader();
-    reader.onload = e => {
-      try {
-        evalData = JSON.parse(e.target.result);
-        notice(`Loaded ${evalData.length} labelled examples.`, 'success');
-        $('#btn-run-eval').disabled = false;
-      } catch { notice('Invalid JSON file.', 'error'); }
-    };
-    reader.readAsText(f);
-  };
-  evalDrop.onclick = () => evalFile.click();
-  evalDrop.ondragover = e => { e.preventDefault(); evalDrop.classList.add('drag-over'); };
-  evalDrop.ondragleave = () => evalDrop.classList.remove('drag-over');
-  evalDrop.ondrop = e => {
-    e.preventDefault(); evalDrop.classList.remove('drag-over');
-    evalFile.files = e.dataTransfer.files;
-    evalFile.dispatchEvent(new Event('change'));
-  };
-
-  $('#btn-run-eval').onclick = () => run(async () => {
-    const result = await api('evaluate', { examples: evalData });
-    renderEvalResults(result);
-  }, 'Running evaluation…');
-}
-
-function renderEvalResults(r) {
-  const panel = $('#eval-results');
-  if (!panel) return;
-  const cls = r.classification || {};
-  const bands = r.rubric_bands || {};
-
-  panel.innerHTML = `
-    <div class="panel">
-      <div class="panel-title">Evaluation results</div>
-      <div class="panel-subtitle">${r.note || 'Rubric bands are non-probabilistic.'}</div>
-
-      <div class="metric-grid" style="grid-template-columns:1fr 1fr;margin-bottom:20px">
-        <div class="metric-tile">
-          <div class="label">Answered accuracy</div>
-          <div class="value">${r.answered_accuracy !== null ? pct(r.answered_accuracy) : '—'}</div>
-          <div class="meta">${r.examples} examples · abstention: ${pct(r.abstention_rate)}</div>
-        </div>
-        <div class="metric-tile ${(r.exposure_mean_absolute_error_pp||99) <= 10 ? 'accent' : ''}">
-          <div class="label">Mean exposure error</div>
-          <div class="value">${r.exposure_mean_absolute_error_pp !== null ? r.exposure_mean_absolute_error_pp?.toFixed(1)+' pp' : '—'}</div>
-          <div class="meta">Target: ≤ 10 pp · Range overlap: ${pct(r.reference_range_overlap_rate)}</div>
-        </div>
-      </div>
-
-      <div class="form-section-title">Accuracy by confidence band</div>
-      <div class="table-wrap" style="margin-bottom:16px">
-        <table>
-          <thead><tr><th>Band</th><th>Count</th><th class="td-num">Observed accuracy</th><th>Expected direction</th></tr></thead>
-          <tbody>
-            ${['high','medium','low'].map(b => `<tr>
-              <td>${confidenceBadge(b)}</td>
-              <td>${bands[b]?.count ?? 0}</td>
-              <td class="td-num">${bands[b]?.observed_accuracy !== null ? pct(bands[b]?.observed_accuracy) : '—'}</td>
-              <td class="text-muted text-small">${b==='high'?'Should be highest':b==='medium'?'Should be middle':'Should be lowest'}</td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-
-      <div class="form-section-title">Per-label classification metrics</div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Label (Tier-2 node)</th><th class="td-num">Precision</th><th class="td-num">Recall</th><th class="td-num">F1</th></tr></thead>
-          <tbody>
-            ${Object.entries(cls).map(([label, m]) => `<tr>
-              <td class="text-mono">${esc(label)}</td>
-              <td class="td-num">${pct(m.precision)}</td>
-              <td class="td-num">${pct(m.recall)}</td>
-              <td class="td-num"><strong>${pct(m.f1)}</strong></td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>`;
 }
 
 // ── Utilities ──────────────────────────────────────
