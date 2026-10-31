@@ -1484,3 +1484,5 @@ tr:hover td { background: var(--slate-50); }
 .queue-row:hover td { background: #f0fdfa !important; }
 .filter-tab.active { background: var(--teal-100) !important; color: var(--teal-900) !important; font-weight: 700 !important; }
 
+[hidden] { display: none !important; }
+

@@ -184,10 +184,36 @@ def company_create(d):
             return existing
         if sedol and existing.get('sedol') == sedol:
             return existing
+    # Parse exchange-specific ticker symbol and exchange code from Bloomberg ticker
+    # e.g. "2330 TT Equity" → symbol="2330", exchange_code="TT"
+    # e.g. "BBCA IJ Equity" → symbol="BBCA", exchange_code="IJ"
+    parts = ticker.split()
+    symbol = parts[0] if parts else ''
+    exchange_code = parts[1].upper() if len(parts) >= 2 else ''
+
+    # Fallback: derive exchange code from country/jurisdiction if ticker format is non-standard
+    if not exchange_code:
+        jur = (d.get('country', '') or d.get('jurisdiction', '')).lower()
+        COUNTRY_TO_EXCHANGE = {
+            'taiwan': 'TT', 'hong kong': 'HK', 'china': 'CH',
+            'korea': 'KS', 'australia': 'AU', 'india': 'IN',
+            'singapore': 'SP', 'thailand': 'TB', 'new zealand': 'NZ',
+            'indonesia': 'IJ', 'malaysia': 'MK', 'philippines': 'PM',
+            'vietnam': 'VN', 'pakistan': 'PA', 'bangladesh': 'BD',
+            'sri lanka': 'SL', 'macau': 'MO', 'macao': 'MO',
+            'mongolia': 'MG',
+        }
+        for keyword, code in COUNTRY_TO_EXCHANGE.items():
+            if keyword in jur:
+                exchange_code = code
+                break
+
     company = {
         'id': cid or ident('company'),
         'name': name,
         'bloomberg_ticker': ticker,
+        'symbol': symbol,
+        'exchange_code': exchange_code,
         'sedol': sedol,
         'jurisdiction': d.get('jurisdiction', '') or d.get('country', ''),
         'sector': d.get('sector', ''),

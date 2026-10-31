@@ -1438,7 +1438,10 @@ async function viewPortfolio() {
   const hasImported = companies.length > 0;
 
   $('#page-actions').innerHTML = hasImported
-    ? `<button class="btn btn-sm" id="btn-reimport">↑ Replace with new file</button>`
+    ? `<div style="display:flex;gap:8px;align-items:center">
+         <button class="btn btn-sm btn-secondary" id="btn-portfolio-template" onclick="downloadPortfolioTemplate()">↓ Download Excel template</button>
+         <button class="btn btn-sm" id="btn-reimport">↑ Replace with new file</button>
+       </div>`
     : '';
 
   if (!hasStaged && !hasImported) {
@@ -2053,7 +2056,10 @@ function renderImportedView(companies) {
           <div class="panel-title">Company universe</div>
           <div class="panel-subtitle">${companies.length} companies · matched by SEDOL or Bloomberg ticker</div>
         </div>
-        <button class="btn btn-primary" id="btn-reimport-main">↑ Import / replace portfolio</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-sm btn-secondary" onclick="downloadPortfolioTemplate()">↓ Download Excel template</button>
+          <button class="btn btn-primary" id="btn-reimport-main">↑ Import / replace portfolio</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table>
@@ -2132,6 +2138,76 @@ function renderImportedView(companies) {
 // ══════════════════════════════════════════════════════
 // VIEW: SOURCE DOCUMENTS  (YTP-17, YTP-18)
 // ══════════════════════════════════════════════════════
+const EXCHANGE_MAP = {
+  // ── MSCI Asia Pacific ex Japan – Constituent Markets ──────────────
+  TT: { name: 'TWSE (Taiwan)',             short: 'TWSE',      country: 'Taiwan' },
+  HK: { name: 'HKEX (Hong Kong)',           short: 'HKEX',      country: 'Hong Kong' },
+  AU: { name: 'ASX (Australia)',            short: 'ASX',       country: 'Australia' },
+  KS: { name: 'KRX (South Korea)',         short: 'KRX',       country: 'South Korea' },
+  IN: { name: 'NSE / BSE (India)',          short: 'NSE',       country: 'India' },
+  SP: { name: 'SGX (Singapore)',            short: 'SGX',       country: 'Singapore' },
+  CH: { name: 'SSE / SZSE (China A)',       short: 'China A',   country: 'China' },
+  TB: { name: 'SET (Thailand)',             short: 'SET',       country: 'Thailand' },
+  NZ: { name: 'NZX (New Zealand)',          short: 'NZX',       country: 'New Zealand' },
+  IJ: { name: 'IDX (Indonesia)',            short: 'IDX',       country: 'Indonesia' },
+  MK: { name: 'Bursa Malaysia',             short: 'KLSE',      country: 'Malaysia' },
+  PM: { name: 'PSE (Philippines)',           short: 'PSE',       country: 'Philippines' },
+  // ── Non-index / Frontier Asian markets ────────────────────────────
+  VN: { name: 'HOSE / HNX (Vietnam)',       short: 'HOSE',      country: 'Vietnam' },
+  PA: { name: 'PSX (Pakistan)',              short: 'PSX',       country: 'Pakistan' },
+  BD: { name: 'DSE (Bangladesh)',            short: 'DSE',       country: 'Bangladesh' },
+  SL: { name: 'CSE (Sri Lanka)',             short: 'CSE',       country: 'Sri Lanka' },
+  MO: { name: 'Macau Exchange',              short: 'Macau',     country: 'Macau' },
+  MG: { name: 'MSE (Mongolia)',              short: 'MSE',       country: 'Mongolia' },
+};
+
+function getCompanyExchangeInfo(c) {
+  // Prefer persisted fields from backend; fall back to runtime parsing
+  const ticker = (c.bloomberg_ticker || '').trim();
+  const parts = ticker.split(/\s+/);
+  const symbol = c.symbol || parts[0] || c.id || '';
+  const exCode = c.exchange_code || (parts.length >= 2 ? parts[1].toUpperCase() : '');
+
+  let exKey = exCode;
+  if (!EXCHANGE_MAP[exKey]) {
+    const jur = (c.jurisdiction || c.country || '').toLowerCase();
+    if (jur.includes('taiwan')) exKey = 'TT';
+    else if (jur.includes('hong kong')) exKey = 'HK';
+    else if (jur.includes('china')) exKey = 'CH';
+    else if (jur.includes('korea')) exKey = 'KS';
+    else if (jur.includes('australia')) exKey = 'AU';
+    else if (jur.includes('india')) exKey = 'IN';
+    else if (jur.includes('singapore')) exKey = 'SP';
+    else if (jur.includes('thailand')) exKey = 'TB';
+    else if (jur.includes('new zealand')) exKey = 'NZ';
+    else if (jur.includes('indonesia')) exKey = 'IJ';
+    else if (jur.includes('malaysia')) exKey = 'MK';
+    else if (jur.includes('philippines') || jur.includes('pilipinas')) exKey = 'PM';
+    else if (jur.includes('vietnam') || jur.includes('viet nam')) exKey = 'VN';
+    else if (jur.includes('pakistan')) exKey = 'PA';
+    else if (jur.includes('bangladesh')) exKey = 'BD';
+    else if (jur.includes('sri lanka')) exKey = 'SL';
+    else if (jur.includes('macau') || jur.includes('macao')) exKey = 'MO';
+    else if (jur.includes('mongolia')) exKey = 'MG';
+    else exKey = 'OTHER';
+  }
+
+  const meta = EXCHANGE_MAP[exKey] || {
+    name: c.jurisdiction ? `${c.jurisdiction} (Other)` : 'Other / Example',
+    short: exCode || 'OTHER',
+    country: c.jurisdiction || ''
+  };
+
+  return {
+    symbol,
+    exchangeKey: exKey,
+    exchangeName: meta.name,
+    exchangeShort: meta.short,
+    country: meta.country,
+    fullTicker: ticker
+  };
+}
+
 async function viewSources() {
   setPageHeader('STEP 3', 'Source Documents',
     'Find and upload company filings');
@@ -2153,14 +2229,38 @@ async function viewSources() {
     { value:'sustainability_report', label:'Sustainability report',  default:false },
   ];
 
+  // Group companies by exchange
+  const exchangeGroups = new Map();
+  companies.forEach(c => {
+    const ex = getCompanyExchangeInfo(c);
+    c._exInfo = ex;
+    if (!exchangeGroups.has(ex.exchangeKey)) {
+      exchangeGroups.set(ex.exchangeKey, {
+        key: ex.exchangeKey,
+        name: ex.exchangeName,
+        short: ex.exchangeShort,
+        companies: []
+      });
+    }
+    exchangeGroups.get(ex.exchangeKey).companies.push(c);
+  });
+  const sortedExchanges = Array.from(exchangeGroups.values())
+    .sort((a, b) => b.companies.length - a.companies.length);
+
   const companyList = companies.map(c => {
     const co = sources.filter(s=>s.company_id===c.id);
     const sedolText = c.sedol ? ` · SEDOL: ${c.sedol}` : '';
-    return `<label class="company-search-item" data-cid="${esc(c.id)}" data-name="${esc(c.name.toLowerCase())}" data-ticker="${esc((c.bloomberg_ticker||'').toLowerCase())}" data-sedol="${esc((c.sedol||'').toLowerCase())}" style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--slate-100);margin-bottom:6px">
+    const ex = c._exInfo || getCompanyExchangeInfo(c);
+    return `<label class="company-search-item" data-cid="${esc(c.id)}" data-name="${esc(c.name.toLowerCase())}" data-ticker="${esc((c.bloomberg_ticker||'').toLowerCase())}" data-symbol="${esc(ex.symbol.toLowerCase())}" data-exchange="${esc(ex.exchangeKey.toLowerCase())}" data-sedol="${esc((c.sedol||'').toLowerCase())}" style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--slate-100);margin-bottom:6px">
       <input type="checkbox" name="company_ids" value="${esc(c.id)}" checked style="width:auto">
       <div class="flex-1">
-        <div style="font-weight:600;font-size:13px">${esc(c.name)}</div>
-        <div class="text-muted text-small">${esc(c.bloomberg_ticker||c.id)}${esc(sedolText)}</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-weight:600;font-size:13px">${esc(c.name)}</span>
+          <span class="badge neutral" style="font-size:10px;padding:1px 6px">${esc(ex.exchangeShort)}</span>
+        </div>
+        <div class="text-muted text-small" style="margin-top:2px">
+          <span style="font-family:monospace;font-weight:700;color:var(--teal-800)">${esc(ex.symbol)}</span> · <span>${esc(c.bloomberg_ticker||c.id)}</span>${esc(sedolText)}
+        </div>
       </div>
       ${co.length > 0 ? badge(co.length+' docs','green') : badge('No docs','amber')}
     </label>`;
@@ -2183,14 +2283,43 @@ async function viewSources() {
 
         <div class="form-section-title">Companies to search</div>
         <div class="form-group mb-8">
-          <label class="field-label">Search universe by SEDOL (London Stock Exchange), Ticker or Name</label>
-          <div style="display:flex;gap:8px">
-            <input type="text" id="src-global-search" placeholder="Type SEDOL (e.g. 6889106), ticker, or name..." style="flex:1">
-            <select id="src-sedol-select" style="max-width:220px">
-              <option value="">— Select by SEDOL —</option>
-              ${companies.filter(c=>c.sedol).map(c=>`<option value="${esc(c.id)}">${esc(c.sedol)} · ${esc(c.name)}</option>`).join('')}
-            </select>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <label class="field-label" style="margin:0;font-weight:600">Select by Stock Exchange &amp; Ticker Symbol</label>
+            <span class="text-muted text-small" id="src-filter-count">${companies.length} companies</span>
           </div>
+
+          <!-- 1. Exchange and 2. Ticker selectors -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+            <div>
+              <label class="text-muted" style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">1. Stock Exchange</label>
+              <select id="src-exchange-select" style="width:100%;font-size:12.5px;padding:7px 10px;border-radius:6px;border:1px solid var(--slate-300);background:#fff">
+                <option value="">— 1. Select Exchange (${companies.length}) —</option>
+                ${sortedExchanges.map(ex => `<option value="${esc(ex.key)}">${esc(ex.name)} (${ex.companies.length})</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="text-muted" style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">2. Ticker Symbol</label>
+              <select id="src-ticker-select" style="width:100%;font-size:12.5px;padding:7px 10px;border-radius:6px;border:1px solid var(--slate-300);background:#fff">
+                <option value="">— 2. Select Ticker Symbol —</option>
+                ${[...companies].sort((a,b)=> (a._exInfo?.symbol||'').localeCompare(b._exInfo?.symbol||'')).map(c => {
+                  const ex = c._exInfo || getCompanyExchangeInfo(c);
+                  return `<option value="${esc(c.id)}" data-exchange="${esc(ex.exchangeKey)}">${esc(ex.symbol)} · ${esc(c.name)}</option>`;
+                }).join('')}
+              </select>
+            </div>
+          </div>
+
+          <!-- Free text search & Clear -->
+          <div style="display:flex;gap:6px">
+            <input type="text" id="src-global-search" placeholder="🔍 Or type ticker (e.g. 2330), name, or SEDOL..." style="flex:1">
+            <button type="button" class="btn btn-sm btn-secondary" id="src-btn-reset-filters" style="white-space:nowrap;padding:0 12px">Clear</button>
+          </div>
+
+          <!-- Preserved SEDOL selector for test compatibility -->
+          <select id="src-sedol-select" style="display:none">
+            <option value="">— Select by SEDOL —</option>
+            ${companies.filter(c=>c.sedol).map(c=>`<option value="${esc(c.id)}">${esc(c.sedol)} · ${esc(c.name)}</option>`).join('')}
+          </select>
         </div>
         <div id="company-checklist" style="max-height:260px;overflow-y:auto;margin-bottom:16px">
           ${companies.length > 0 ? companyList : `<div class="text-muted text-small">No companies registered. <a href="#" data-goto="portfolio">Import a portfolio first.</a></div>`}
@@ -2340,22 +2469,104 @@ async function viewSources() {
       </div>
     </div>`;
 
-  // Real-time filtering by SEDOL, ticker or company name
-  const filterChecklist = (query) => {
-    query = (query || '').toLowerCase().trim();
+  // Real-time filtering by Stock Exchange, Ticker Symbol, company name, or SEDOL
+  const applyFilters = () => {
+    const selectedExchange = ($('#src-exchange-select')?.value || '').toLowerCase();
+    const selectedTickerCid = $('#src-ticker-select')?.value || '';
+    const textQuery = ($('#src-global-search')?.value || '').toLowerCase().trim();
+
+    let visibleCount = 0;
     $$('.company-search-item').forEach(item => {
-      const match = !query || item.dataset.name.includes(query) || item.dataset.ticker.includes(query) || item.dataset.sedol.includes(query);
-      item.style.display = match ? 'flex' : 'none';
+      const matchExchange = !selectedExchange || item.dataset.exchange === selectedExchange;
+      const matchTickerCid = !selectedTickerCid || item.dataset.cid === selectedTickerCid;
+      const matchText = !textQuery ||
+        item.dataset.name.includes(textQuery) ||
+        item.dataset.ticker.includes(textQuery) ||
+        item.dataset.symbol.includes(textQuery) ||
+        item.dataset.sedol.includes(textQuery);
+
+      const isVisible = matchExchange && matchTickerCid && matchText;
+      item.style.display = isVisible ? 'flex' : 'none';
+      if (isVisible) visibleCount++;
     });
+
+    const countEl = $('#src-filter-count');
+    if (countEl) {
+      countEl.textContent = (selectedExchange || selectedTickerCid || textQuery)
+        ? `${visibleCount} of ${companies.length} companies`
+        : `${companies.length} companies`;
+    }
   };
-  $('#src-global-search')?.addEventListener('input', e => filterChecklist(e.target.value));
+
+  const updateTickerDropdown = (selectedEx) => {
+    const tickerSelect = $('#src-ticker-select');
+    if (!tickerSelect) return;
+    
+    const filteredComps = selectedEx
+      ? companies.filter(c => (c._exInfo?.exchangeKey || '').toLowerCase() === selectedEx.toLowerCase())
+      : companies;
+    
+    const sorted = [...filteredComps].sort((a, b) => {
+      const symA = a._exInfo?.symbol || '';
+      const symB = b._exInfo?.symbol || '';
+      return symA.localeCompare(symB);
+    });
+
+    const exMeta = sortedExchanges.find(e => e.key.toLowerCase() === (selectedEx||'').toLowerCase());
+    const placeholder = selectedEx
+      ? `— 2. Select ${exMeta?.short || selectedEx} Ticker (${sorted.length}) —`
+      : '— 2. Select Ticker Symbol —';
+
+    tickerSelect.innerHTML = `<option value="">${placeholder}</option>` +
+      sorted.map(c => {
+        const ex = c._exInfo || getCompanyExchangeInfo(c);
+        return `<option value="${esc(c.id)}" data-exchange="${esc(ex.exchangeKey)}">${esc(ex.symbol)} · ${esc(c.name)}</option>`;
+      }).join('');
+    
+    tickerSelect.value = '';
+  };
+
+  $('#src-exchange-select')?.addEventListener('change', e => {
+    const exVal = e.target.value;
+    updateTickerDropdown(exVal);
+    applyFilters();
+  });
+
+  $('#src-ticker-select')?.addEventListener('change', e => {
+    const cid = e.target.value;
+    if (cid) {
+      const comp = companies.find(c => c.id === cid);
+      if (comp && !$('#src-exchange-select').value) {
+        const ex = comp._exInfo || getCompanyExchangeInfo(comp);
+        $('#src-exchange-select').value = ex.exchangeKey;
+        updateTickerDropdown(ex.exchangeKey);
+        $('#src-ticker-select').value = cid;
+      }
+    }
+    applyFilters();
+  });
+
+  $('#src-global-search')?.addEventListener('input', () => applyFilters());
+
+  $('#src-btn-reset-filters')?.addEventListener('click', () => {
+    if ($('#src-exchange-select')) $('#src-exchange-select').value = '';
+    updateTickerDropdown('');
+    if ($('#src-ticker-select')) $('#src-ticker-select').value = '';
+    if ($('#src-global-search')) $('#src-global-search').value = '';
+    applyFilters();
+  });
+
   $('#src-sedol-select')?.addEventListener('change', e => {
     const cid = e.target.value;
-    if (!cid) { filterChecklist(''); return; }
+    if (!cid) { 
+      if ($('#src-global-search')) $('#src-global-search').value = '';
+      applyFilters(); 
+      return; 
+    }
     const comp = companies.find(c => c.id === cid);
     if (comp) {
-      $('#src-global-search').value = comp.sedol || comp.name;
-      filterChecklist(comp.sedol || comp.name);
+      if ($('#src-global-search')) $('#src-global-search').value = comp.sedol || comp.name;
+      applyFilters();
     }
   });
 
@@ -3723,14 +3934,18 @@ async function viewDashboard() {
       tr.style.display = show ? '' : 'none';
       if (show) count++;
     });
-    $('#company-filter-banner').hidden = false;
+    const banner = $('#company-filter-banner');
+    banner.style.display = 'flex';
+    banner.hidden = false;
     $('#company-filter-name').textContent = `${label}: ${title}`;
     $('#company-filter-count').textContent = `${count} of ${d.companies.length} companies match`;
   };
 
   const clearFilter = () => {
     allCompRows.forEach(tr => tr.style.display = '');
-    $('#company-filter-banner').hidden = true;
+    const banner = $('#company-filter-banner');
+    banner.style.display = 'none';
+    banner.hidden = true;
     $$('[data-subtheme]').forEach(r => r.style.outline = '');
   };
 
