@@ -403,9 +403,6 @@ async function viewTheme(overrideThemeId) {
 
   $('#page-content').innerHTML = `
     <div class="theme-layout">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
-        <button type="button" class="btn btn-sm btn-primary" id="btn-new-theme">+ New theme</button>
-      </div>
 
       <!-- 1. Theme Scope Card (Top, full width) -->
       <details class="panel theme-scope" open>
@@ -622,7 +619,7 @@ function taxonomyMindmap(nodes, themeName) {
         <button type="button" class="mm-ctl mm-ctl-del" data-delete-id="${esc(node.node_id)}"
           title="Delete this node and everything under it" aria-label="Delete node">−</button>
       </div>
-      <button type="button" class="mm-node-body" data-mindmap-id="${esc(node.node_id)}" title="Click to edit this Tier-${level} node">
+      <button type="button" class="mm-node-body" data-mindmap-id="${esc(node.node_id)}" title="${esc(node.rationale || node.definition || '')}">
         <span class="mm-tier">Tier ${level}</span>
         <span class="mm-name">${esc(node.name)}</span>
         ${count ? `<span class="mm-count">${count} ${level === 1 ? (count === 1 ? 'activity' : 'activities') : (count === 1 ? 'sub-node' : 'sub-nodes')}</span>` : ''}
@@ -1048,8 +1045,7 @@ function nodeDepthOf(nodeId, nodes) {
 
 // The per-tier sub-node caps. Mirrors engine.MAX_CHILDREN on the backend.
 function tierCaps() {
-  const c = state?.max_children || { 1: 5, 2: 3, 3: 4 };
-  return { 1: c[1] ?? c['1'] ?? 5, 2: c[2] ?? c['2'] ?? 3, 3: c[3] ?? c['3'] ?? 4 };
+  return { 1: 5, 2: 15, 3: 60 };
 }
 
 // Check, before opening the add dialog, whether adding a child under `parentId`
@@ -1066,9 +1062,9 @@ function childTierFullError(parentId) {
   }
   const childTier = nodeDepthOf(parentId, nodes) + 1;
   const cap = caps[childTier];
-  const count = nodes.filter(n => n.parent_id === parentId).length;
+  const count = nodes.filter(n => nodeDepthOf(n.node_id, nodes) === childTier).length;
   if (cap && count >= cap) {
-    return `You can only have ${cap} Tier-${childTier} nodes here.`;
+    return `You can only have ${cap} Tier-${childTier} nodes in total.`;
   }
   return null;
 }
@@ -1087,19 +1083,18 @@ function tierLimitError(nodes) {
   // Children per parent, capped by the child's tier.
   const childCounts = {};
   for (const n of nodes) {
-    if (n.parent_id) childCounts[n.parent_id] = (childCounts[n.parent_id] || 0) + 1;
+    const depth = nodeDepthOf(n.node_id, nodes);
+    childCounts[depth] = (childCounts[depth] || 0) + 1;
   }
   const byId = Object.fromEntries(nodes.map(n => [n.node_id, n]));
-  for (const [pid, count] of Object.entries(childCounts)) {
-    const parent = byId[pid];
-    const childTier = nodeDepthOf(pid, nodes) + 1;
+  for (const [depth, count] of Object.entries(childCounts)) {
+    const childTier = Number(depth);
     if (childTier > maxTiers) {
       return `Nodes can't go deeper than Tier-${maxTiers}.`;
     }
     const cap = caps[childTier];
     if (cap && count > cap) {
-      const label = parent ? `"${parent.name}"` : 'this node';
-      return `A Tier-${childTier - 1} node can have at most ${cap} Tier-${childTier} sub-nodes. ${label} now has ${count}.`;
+      return `A taxonomy can have at most ${cap} Tier-${childTier} nodes in total; currently ${count}.`;
     }
   }
   return null;
@@ -3418,6 +3413,9 @@ async function viewDashboard() {
   selectedDashboardPortfolioId = portfolioImport?.id || '';
 
   const selectorsHtml = `
+    <div style="margin-bottom:12px">
+      <button type="button" class="btn btn-sm btn-primary" id="btn-new-theme">+ New theme</button>
+    </div>
     <div class="dashboard-selectors">
       <label class="dashboard-selector">
         <span>Theme</span>
@@ -3434,6 +3432,13 @@ async function viewDashboard() {
     </div>`;
   const renderDashboardBody = html => {
     $('#page-content').innerHTML = selectorsHtml + html;
+    $('#btn-new-theme')?.addEventListener('click', () => {
+      themeDrafts.delete('new');
+      setView('theme');
+      _activeThemeId = '';
+      clearNotice();
+      viewTheme('');
+    });
     $('#dashboard-theme-select')?.addEventListener('change', event => {
       selectedDashboardThemeId = event.target.value;
       viewDashboard();

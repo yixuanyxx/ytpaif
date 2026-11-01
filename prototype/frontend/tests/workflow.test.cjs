@@ -118,14 +118,25 @@ test('Dashboard shows a loading spinner until its data request completes',async(
   assert.doesNotMatch(node('#page-content').innerHTML,/dashboard-loading/);
   assert.match(node('#page-content').innerHTML,/Company-level exposure/);
 });
-test('Theme Definition loads the dashboard theme and only offers New theme',async()=>{
+test('Dashboard New theme sits above the selector and opens a blank editor',async()=>{
+  const {run,node} = setup();
+  run(`state.themes=[{id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[]}]`);
+  await run('viewDashboard()');
+  const html = node('#page-content').innerHTML;
+  assert.ok(html.indexOf('id="btn-new-theme"') < html.indexOf('id="dashboard-theme-select"'));
+  node('#btn-new-theme').click();
+  assert.match(node('#page-content').innerHTML,/New theme scope/);
+  assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value=""/);
+});
+
+test('Theme Definition loads the dashboard theme without a New theme button',async()=>{
   const {run,node} = setup();
   run(`state.themes=[{id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[]}]`);
   await run("selectedDashboardThemeId='theme-1'; setView('theme')");
   assert.match(node('#page-content').innerHTML,/Edit theme scope/);
   assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value="AI Infrastructure"/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Saved themes|data-load-theme/);
-  assert.match(node('#page-content').innerHTML,/id="btn-new-theme"/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/id="btn-new-theme"/);
   assert.equal(node('#page-actions').innerHTML,'');
 });
 test('Generate taxonomy updates the mind map draft without saving a theme',async()=>{

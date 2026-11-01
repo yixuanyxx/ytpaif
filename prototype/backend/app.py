@@ -550,7 +550,10 @@ def generate(d):
         # (adds Tier-3 children) — always one level deeper than the target.
         child_tier = target_depth + 1
         # Cap the number of children by the tier being created (Tier-2: 3, Tier-3: 4).
-        child_count = engine.MAX_CHILDREN.get(child_tier, 3)
+        child_count = engine.MAX_CHILDREN[child_tier] - sum(
+            1 for n in existing_all if node_depth(n.get('node_id')) == child_tier)
+        if child_count <= 0:
+            raise ValueError(f'Tier-{child_tier} global limit reached')
         task = (
             f'You are refining one node within an existing investment theme taxonomy. '
             f'Limit all outputs, scopes, and company examples strictly to Asian stocks excluding Japan '
@@ -569,7 +572,7 @@ def generate(d):
             f'Propose a two-level investment theme taxonomy. '
             f'Limit all outputs, sub-theme scopes, and company examples strictly to Asian stocks and companies excluding Japan (covering any Asian markets such as Taiwan, South Korea, Hong Kong, China, Singapore, India, Australasia, and ASEAN, including stocks outside any benchmark index). '
             f'Do not include or reference any Japanese stocks or non-Asian companies. '
-            f'Generate exactly {tier1} Tier-1 nodes (parent_id: null) and {tier2} Tier-2 nodes per Tier-1 node. '
+            f'Generate exactly {tier1} Tier-1 nodes (parent_id: null) and at most {tier2} Tier-2 nodes TOTAL across all Tier-1 nodes. Distribute them flexibly according to scope, with at least one per Tier-1. '
             f'No deeper levels. Use both company-reported language and market/industry consensus. '
             + 'Return {"nodes":[{"node_id":"...","parent_id":null,"name":"...","definition":"...","examples":[]}]}. '
             'Avoid redundant categories. Do not approve nodes.'
