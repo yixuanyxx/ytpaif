@@ -101,6 +101,15 @@ test('Portfolio Exposure Dashboard replaces Overview as the landing page',async(
   assert.doesNotMatch(sidebar,/Local workspace|Revenue exposure research|ai-status-label/);
   assert.equal((sidebar.match(/data-view="dashboard"/g)||[]).length,1);
 });
+test('Portfolio and Source Documents require dashboard selections',async()=>{
+  const {run,node}=setup();
+  await run('viewPortfolio()');
+  assert.match(node('#page-content').innerHTML,/Select a theme in Portfolio Exposure Dashboard/);
+  await run('viewSources()');
+  assert.match(node('#page-content').innerHTML,/Select a theme and portfolio in Portfolio Exposure Dashboard/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/source-portfolio-select|source-form/);
+});
+
 test('Dashboard selectors load theme and portfolio choices and refresh the selected snapshot',async()=>{
   const {run,node} = setup();
   run(`state = {
@@ -109,8 +118,8 @@ test('Dashboard selectors load theme and portfolio choices and refresh the selec
       {id:'theme-2',theme_name:'Clean Energy',approved:true,nodes:[]}
     ],
     portfolio_imports: [
-      {id:'portfolio-1',name:'Core',holdings_date:'2026-10-01',snapshot_id:'snapshot-1'},
-      {id:'portfolio-2',name:'Growth',holdings_date:'2026-10-02',snapshot_id:'snapshot-2'}
+      {id:'portfolio-1',theme_id:'theme-1',name:'Core',holdings_date:'2026-10-01',snapshot_id:'snapshot-1'},
+      {id:'portfolio-2',theme_id:'theme-2',name:'Growth',holdings_date:'2026-10-02',snapshot_id:'snapshot-2'}
     ],
     snapshots: [
       {id:'snapshot-1',benchmark_name:'Index A',portfolio:[]},
@@ -128,15 +137,20 @@ test('Dashboard selectors load theme and portfolio choices and refresh the selec
   await run('viewDashboard()');
   assert.match(node('#page-content').innerHTML,/AI Infrastructure/);
   assert.match(node('#page-content').innerHTML,/Clean Energy/);
-  assert.match(node('#page-content').innerHTML,/Core/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Core|Growth/);
+  assert.equal(run('dashboardCalls.length'),0);
+  node('#dashboard-theme-select').change({target:{value:'theme-2'}});
+  await run('new Promise(resolve=>setTimeout(resolve,0))');
   assert.match(node('#page-content').innerHTML,/Growth/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Core/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/No portfolio for this theme/);
   assert.equal(run('dashboardCalls[0].theme_id'),'theme-2');
   assert.equal(run('dashboardCalls[0].snapshot_id'),'snapshot-2');
 
   node('#dashboard-theme-select').change({target:{value:'theme-1'}});
   await run('new Promise(resolve=>setTimeout(resolve,0))');
   assert.equal(run('dashboardCalls.at(-1).theme_id'),'theme-1');
-  assert.equal(run('dashboardCalls.at(-1).snapshot_id'),'snapshot-2');
+  assert.equal(run('dashboardCalls.at(-1).snapshot_id'),'snapshot-1');
 
   node('#dashboard-portfolio-select').change({target:{value:'portfolio-1'}});
   await run('new Promise(resolve=>setTimeout(resolve,0))');
@@ -146,10 +160,11 @@ test('Dashboard shows a loading spinner until its data request completes',async(
   const {run,node} = setup();
   run(`state = {
     themes:[{id:'theme-1',theme_name:'AI',approved:true,nodes:[]}],
-    portfolio_imports:[{id:'portfolio-1',name:'Core',snapshot_id:'snapshot-1'}],
+    portfolio_imports:[{id:'portfolio-1',theme_id:'theme-1',name:'Core',snapshot_id:'snapshot-1'}],
     snapshots:[{id:'snapshot-1',portfolio:[]}],
     companies:[],sources:[],cases:[]
   };
+  selectedDashboardThemeId='theme-1';
   let resolveDashboard;
   api=()=>new Promise(resolve=>{resolveDashboard=resolve;});`);
 
@@ -228,13 +243,13 @@ test('Portfolio Import defaults to Excel import, lists saved portfolios, and ope
     companies:[{id:'company-1',name:'TSMC',bloomberg_ticker:'2330 TT',sedol:'6889106'}],
     sources:[],
     portfolio_imports:[{
-      id:'portfolio-1',name:'Asia Core',holdings_date:'2026-10-01',file_name:'asia-core.xlsx',
+      id:'portfolio-1',theme_id:'theme-1',name:'Asia Core',holdings_date:'2026-10-01',file_name:'asia-core.xlsx',
       benchmark_name:'MSCI Asia ex Japan',snapshot_id:'snapshot-1',
       rows:[{company_id:'company-1',company_name:'TSMC',bloomberg_ticker:'2330 TT',
         sedol:'6889106',country:'Taiwan',sector:'Semiconductors',
         portfolio_weight:0.2,reference_weight:0.1,active_weight:0.1}]
     }]
-  };`);
+  }; selectedDashboardThemeId='theme-1';`);
   portfolioCards.push({
     dataset:{openPortfolio:'portfolio-1'},
     addEventListener(type, handler) { this[type] = handler; }
@@ -260,7 +275,7 @@ test('Portfolio Import defaults to Excel import, lists saved portfolios, and ope
 });
 test('Deleting an existing portfolio confirms and removes it from the portfolio list',async()=>{
   const {run,node,deletePortfolioButtons} = setup();
-  run(`state={portfolio_imports:[{id:'portfolio-1',name:'Asia Core',snapshot_id:'snapshot-1',rows:[]}],
+  run(`selectedDashboardThemeId='theme-1'; state={portfolio_imports:[{id:'portfolio-1',theme_id:'theme-1',name:'Asia Core',snapshot_id:'snapshot-1',rows:[]}],
     snapshots:[],companies:[],sources:[],themes:[],cases:[]};
     showConfirm=async(message,options)=>{globalThis.confirmation={message,options};return true};
     const calls=[];
@@ -302,10 +317,11 @@ test('Dashboard hides bounds and export; Source Documents has no search header a
   const {run,node} = setup();
   run(`state = {
     themes:[{id:'theme-1',theme_name:'AI',approved:true,nodes:[]}],
-    portfolio_imports:[{id:'portfolio-1',name:'Core',snapshot_id:'snapshot-1',rows:[]}],
+    portfolio_imports:[{id:'portfolio-1',theme_id:'theme-1',name:'Core',snapshot_id:'snapshot-1',rows:[]}],
     snapshots:[{id:'snapshot-1',benchmark_name:'Index',portfolio:[]}],
     companies:[],sources:[],cases:[]
   };
+  selectedDashboardThemeId='theme-1';
   const metric={point:0,lower:0,upper:0};
   api=async()=>({summary:{portfolio:metric,benchmark:metric,active:metric},
     coverage:{portfolio:0,benchmark:0},companies:[]});`);
@@ -317,7 +333,7 @@ test('Dashboard hides bounds and export; Source Documents has no search header a
   assert.doesNotMatch(node('#page-actions').innerHTML,/Search for documents/);
   assert.match(node('#page-content').innerHTML,/btn-run-search/);
 });
-test('Source Documents portfolio selector scopes companies, documents and search request',async()=>{
+test('Source Documents follows dashboard portfolio and scopes the AI search',async()=>{
   const {run,node,context} = setup();
   run(`state = {
     companies:[
@@ -330,21 +346,23 @@ test('Source Documents portfolio selector scopes companies, documents and search
     ],
     cases:[],themes:[],search_runs:[],
     portfolio_imports:[
-      {id:'portfolio-a',name:'Asia Core',rows:[{company_id:'company-a',portfolio_weight:1}]},
-      {id:'portfolio-b',name:'Korea Growth',rows:[{company_id:'company-b',portfolio_weight:1}]}
+      {id:'portfolio-a',theme_id:'theme-1',name:'Asia Core',rows:[{company_id:'company-a',portfolio_weight:1}]},
+      {id:'portfolio-b',theme_id:'theme-1',name:'Korea Growth',rows:[{company_id:'company-b',portfolio_weight:1}]}
     ]
   };
+  selectedDashboardThemeId='theme-1'; selectedDashboardPortfolioId='portfolio-b';
   const searchCalls=[];
   api=async(path,data)=>{searchCalls.push({path,data});return {results:[]};};
   refresh=async()=>{};
   render=async()=>{};`);
   await run('viewSources()');
-  assert.match(node('#page-content').innerHTML,/id="source-portfolio-select"/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/id="source-portfolio-select"/);
   assert.match(node('#page-content').innerHTML,/Korea Growth/);
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
 
-  await node('#source-portfolio-select').change({target:{value:'portfolio-a'}});
+  run("selectedDashboardPortfolioId='portfolio-a'");
+  await run('viewSources()');
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Samsung/);
 
@@ -352,6 +370,8 @@ test('Source Documents portfolio selector scopes companies, documents and search
     selector === 'input[name="company_ids"]:checked' ? [{value:'company-a'}] : [];
   await node('#btn-run-search').onclick();
   assert.equal(run('searchCalls[0].path'),'source/search');
+  assert.equal(run('searchCalls[0].data.discover_web'),true);
+  assert.equal(run('searchCalls[0].data.latest_documents'),true);
   assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.company_ids'))),['company-a']);
 });
 test('Evaluate page and navigation entry are removed',()=>{
@@ -369,7 +389,7 @@ test('Obsolete standalone Review route is removed; unified Analysis & Review rem
 });
 test('Step 3 filters immediately by SEDOL, ticker, name and dropdown; clearing restores all', async()=>{
   const {run,node,rows} = setup();
-  run(`state.portfolio_imports=[{id:'p',name:'Both',rows:[{company_id:'a'},{company_id:'b'}]}]`);
+  run(`selectedDashboardThemeId='t'; selectedDashboardPortfolioId='p'; state.portfolio_imports=[{id:'p',theme_id:'t',name:'Both',rows:[{company_id:'a'},{company_id:'b'}]}]`);
   await run('viewSources()');
   const search = node('#src-global-search');
   for (const query of ['6889106','2330','TSMC']) {
@@ -383,7 +403,7 @@ test('Step 3 filters immediately by SEDOL, ticker, name and dropdown; clearing r
 });
 test('Step 3 renders six source categories even before uploads, and counts distinct types', async()=>{
   const {run,node} = setup();
-  run(`state.portfolio_imports=[{id:'p',name:'Both',rows:[{company_id:'a'},{company_id:'b'}]}]`);
+  run(`selectedDashboardThemeId='t'; selectedDashboardPortfolioId='p'; state.portfolio_imports=[{id:'p',theme_id:'t',name:'Both',rows:[{company_id:'a'},{company_id:'b'}]}]`);
   await run('viewSources()');
   assert.match(node('#page-content').innerHTML,/Market Cap/);
   assert.match(node('#page-content').innerHTML,/Net Revenue/);
