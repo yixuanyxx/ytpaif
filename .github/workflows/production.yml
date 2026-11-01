@@ -25,6 +25,7 @@ jobs:
       - run: python -m unittest discover -s prototype/backend/tests -v
         env:
           PYTHONPATH: prototype/backend
+          TRUSTED_ORIGINS: https://is4002.com
       - run: node --test prototype/frontend/tests/workflow.test.cjs
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
