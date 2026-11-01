@@ -171,7 +171,9 @@ function setView(view) {
   if (!VALID_VIEWS.has(view)) return;
   if (currentView === 'theme') captureThemeDraft();
   if (view !== currentView) clearNotice();
-  if (view === 'theme' && view !== currentView) _activeThemeId = '';
+  if (view === 'theme' && view !== currentView) {
+    _activeThemeId = selectedDashboardThemeId || (state.themes || []).filter(t => t.approved).at(-1)?.id || '';
+  }
   currentView = view;
   try {
     localStorage.setItem(VIEW_STORAGE_KEY, view);
@@ -267,7 +269,7 @@ function waterfallChart(companies, state) {
 }
 
 // ══════════════════════════════════════════════════════
-let _activeThemeId = '';
+let _activeThemeId = null;
 let _themeEditorKey = 'new';
 const themeDrafts = new Map();
 
@@ -319,6 +321,9 @@ async function viewTheme(overrideThemeId) {
     _activeThemeId = overrideThemeId;
   }
   const savedThemes = (state.themes || []).filter(t => t.approved);
+  if (_activeThemeId === null) {
+    _activeThemeId = selectedDashboardThemeId || savedThemes.at(-1)?.id || '';
+  }
   // An empty active ID means "new blank theme"; saved themes are only loaded
   // after an explicit selection.
   const isNewTheme = _activeThemeId === '';
@@ -398,7 +403,9 @@ async function viewTheme(overrideThemeId) {
 
   $('#page-content').innerHTML = `
     <div class="theme-layout">
-      ${savedThemesListHtml(savedThemes, theme)}
+      <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
+        <button type="button" class="btn btn-sm btn-primary" id="btn-new-theme">+ New theme</button>
+      </div>
 
       <!-- 1. Theme Scope Card (Top, full width) -->
       <details class="panel theme-scope" open>
