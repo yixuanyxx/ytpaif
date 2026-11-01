@@ -23,6 +23,9 @@ class AppFlowTest(unittest.TestCase):
         self.source_upload_mock = patch.object(self.app.supabase_store, 'upload_source')
         self.source_upload_mock.start()
         self.addCleanup(self.source_upload_mock.stop)
+        self.portfolio_upload_mock = patch.object(self.app.supabase_store, 'upload_portfolio_file')
+        self.portfolio_upload_mock.start()
+        self.addCleanup(self.portfolio_upload_mock.stop)
         self.theme = demo(self.app)
 
     def test_demo_reproducible_and_export(self):
