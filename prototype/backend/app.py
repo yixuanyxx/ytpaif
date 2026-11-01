@@ -1296,8 +1296,11 @@ class Handler(BaseHTTPRequestHandler):
             self.respond({'error': str(err)}, 500)
 
     def do_POST(self):
-        if not self.valid_host() or \
-                self.headers.get('Origin', '').rstrip('/') != 'http://' + self.headers.get('Host', ''):
+        origin = self.headers.get('Origin', '').rstrip('/')
+        allowed_origins = {value.strip().rstrip('/') for value in
+                           os.environ.get('TRUSTED_ORIGINS', '').split(',') if value.strip()}
+        allowed_origins.add('http://' + self.headers.get('Host', ''))
+        if not self.valid_host() or origin not in allowed_origins:
             return self.respond({'error': 'Same-origin local requests required'}, 403)
         try:
             length = int(self.headers.get('Content-Length', '0'))
