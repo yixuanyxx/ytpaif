@@ -6,10 +6,8 @@ import io
 import json
 import os
 from pathlib import Path
-import sqlite3
 import threading
 import time
-from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
@@ -20,6 +18,7 @@ import re
 import zipfile
 import engine
 import financials
+import supabase_store
 
 ROOT = Path(__file__).resolve().parent
 
@@ -48,11 +47,8 @@ def load_env():
         os.environ['LLM_API_KEY'] = os.environ['GEMINI_API_KEY']
 
 load_env()
-default_db_dir = ROOT.parent / 'database' if (ROOT.parent / 'database').exists() else ROOT / 'database'
-DATA = Path(os.environ.get('THEME_DATA_DIR', str(default_db_dir))).resolve()
-DATA.mkdir(parents=True, exist_ok=True)
-(DATA / 'sources').mkdir(parents=True, exist_ok=True)
 FRONTEND = (ROOT.parent / 'frontend') if (ROOT.parent / 'frontend').exists() else (ROOT / 'frontend')
+store = supabase_store.SupabaseStore()
 LOCK = threading.Lock()
 MAX_FILE = 20 * 1024 * 1024
 VERSIONS = {'prompt': '1.0.0', 'extraction': '1.0.0', 'calculation': engine.VERSION}
@@ -79,45 +75,18 @@ def _unique_node_id(base, used):
         candidate = f'{slug}_{i}'
     return candidate
 
-@contextmanager
-def db():
-    c = sqlite3.connect(DATA / 'research.sqlite', timeout=30)
-    c.execute('PRAGMA journal_mode=WAL')
-    c.execute('''CREATE TABLE IF NOT EXISTS records
-                 (kind TEXT, id TEXT, payload TEXT, PRIMARY KEY(kind,id))''')
-    try:
-        with c:
-            yield c
-    finally:
-        c.close()
-
 def put(kind, record):
-    with db() as c:
-        c.execute('INSERT OR REPLACE INTO records VALUES (?,?,?)',
-                  (kind, record['id'], json.dumps(record, allow_nan=False)))
-    return record
+    return store.put(kind, record)
 
 def all_records(kind):
-    with db() as c:
-        return [json.loads(r[0]) for r in
-                c.execute('SELECT payload FROM records WHERE kind=? ORDER BY rowid', (kind,))]
+    return store.all_records(kind)
 
 def get(kind, rid):
-    with db() as c:
-        r = c.execute('SELECT payload FROM records WHERE kind=? AND id=?',
-                      (kind, rid)).fetchone()
-    if not r:
-        raise ValueError(f'Unknown {kind} ID')
-    return json.loads(r[0])
+    return store.get(kind, rid)
 
 def find(kind, rid):
     """Like get(), but returns None instead of raising when the id is absent."""
-    if not rid:
-        return None
-    with db() as c:
-        r = c.execute('SELECT payload FROM records WHERE kind=? AND id=?',
-                      (kind, rid)).fetchone()
-    return json.loads(r[0]) if r else None
+    return store.find(kind, rid)
 
 def parse_date(value):
     date.fromisoformat(value)
@@ -126,14 +95,8 @@ def parse_date(value):
 # ── Theme ────────────────────────────────────────────────────────────────────
 
 def theme_create(d):
-    # Only theme_name is hard-required (YTP-8)
     if not str(d.get('theme_name', '')).strip():
         raise ValueError('Theme requires theme_name')
-    # At least one of (theme_description + included_activities) or (positive_examples)
-    has_desc = str(d.get('theme_description', '')).strip() and str(d.get('included_activities', '')).strip()
-    has_examples = str(d.get('positive_examples', '')).strip()
-    if not has_desc and not has_examples:
-        raise ValueError('Provide either (theme_description + included_activities) or positive_examples')
     if d.get('cutoff'):
         parse_date(d['cutoff'])
     nodes = d.get('nodes', [])
@@ -146,7 +109,12 @@ def theme_create(d):
     fields = ('theme_name', 'theme_description', 'included_activities', 'excluded_activities',
               'positive_examples', 'negative_examples', 'additional_information', 'nodes',
               'cutoff', 'geographic_scope', 'exposure_basis', 'reporting_period')
-    record = {k: d.get(k, '') for k in fields}
+    record = {k: d.get(k) for k in fields}
+    for key in fields:
+        if key == 'nodes':
+            continue
+        if isinstance(record[key], str):
+            record[key] = record[key].strip() or None
     record['nodes'] = nodes
     record.update(
         id=existing['id'] if existing else ident('theme'),
@@ -161,9 +129,33 @@ def theme_delete(d):
     rid = d.get('id')
     if not find('themes', rid):
         raise ValueError('Theme not found')
-    with db() as c:
-        c.execute('DELETE FROM records WHERE kind=? AND id=?', ('themes', rid))
+    store.delete('themes', rid)
     return {'deleted': rid}
+
+
+def portfolio_delete(d):
+    rid = d.get('id')
+    portfolio = find('portfolio_imports', rid)
+    if not portfolio:
+        raise ValueError('Portfolio not found')
+    store.delete('portfolio_imports', rid)
+
+    snapshot_id = portfolio.get('snapshot_id')
+    if snapshot_id and not any(
+        item.get('snapshot_id') == snapshot_id
+        for item in all_records('portfolio_imports')
+    ):
+        store.delete('snapshots', snapshot_id)
+
+    warning = None
+    storage_path = portfolio.get('file_storage_path')
+    if storage_path:
+        try:
+            supabase_store.delete_portfolio_file(storage_path)
+        except supabase_store.SupabaseError as error:
+            warning = f'Portfolio deleted, but its Excel file could not be removed from storage: {error}'
+    return {'deleted': rid, 'warning': warning}
+
 
 # ── Company / Security ────────────────────────────────────────────────────────
 
@@ -227,6 +219,8 @@ def company_create(d):
 def source_ingest(d):
     company = get('companies', d['company_id'])
     parse_date(d['publication_date'])
+    if d.get('cutoff'):
+        parse_date(d['cutoff'])
     if not d.get('period'):
         raise ValueError('Source fiscal period is required')
     url = d.get('url', '')
@@ -256,7 +250,8 @@ def source_ingest(d):
                 and s['period'] == d['period'] and s.get('url', '') == url):
             return s
     sid = ident('source')
-    (DATA / 'sources' / (sid + ext)).write_bytes(content)
+    storage_path = 'sources/' + sid + ext
+    supabase_store.upload_source(storage_path, content, ext)
     evidence, warnings = [], []
     for i, p in enumerate(pages):
         text = p.strip()
@@ -272,19 +267,23 @@ def source_ingest(d):
     return put('sources', {
         'id': sid, 'company_id': company['id'],
         'company_name': company['name'],
+        'bloomberg_ticker': company.get('bloomberg_ticker', ''),
+        'sedol': company.get('sedol', ''),
         'filename': Path(d['filename']).name,
         'title': d.get('title', Path(d['filename']).name),
         'registry': d.get('registry', 'Official Regulatory Registry'),
         'short_registry': d.get('short_registry', 'Official Registry'),
-        'extension': ext, 'sha256': digest, 'url': url,
+        'extension': ext, 'sha256': digest, 'storage_path': storage_path, 'url': url,
         'source_type': d.get('source_type', 'annual_report'),
         'publication_date': d['publication_date'],
-        'period': d['period'], 'retrieved_at': now(),
+        'period': d['period'], 'cutoff': d.get('cutoff') or None,
+        'retrieved_at': now(),
         'warnings': warnings, 'evidence': evidence
     })
 
 def source_update(d):
     source = get('sources', d['id'])
+    company = get('companies', source['company_id'])
     # Evidence and fiscal periods stay immutable once ingested.
     source_type = d.get('source_type', source.get('source_type'))
     if source_type != source.get('source_type') and source_type not in ('annual_report', 'regulatory_filing', 'investor_presentation',
@@ -296,7 +295,12 @@ def source_update(d):
     filename = Path(str(d.get('filename', source['filename']))).name.strip()
     if not filename:
         raise ValueError('Document name is required')
-    source.update(filename=filename, url=url, source_type=source_type)
+    source.update(
+        filename=filename, url=url, source_type=source_type,
+        company_name=company['name'],
+        bloomberg_ticker=company.get('bloomberg_ticker', ''),
+        sedol=company.get('sedol', ''),
+    )
     return put('sources', source)
 
 
@@ -307,112 +311,11 @@ def evidence_for(company_id, theme_id):
                if s['company_id'] == company_id and s['publication_date'] <= cutoff]
     return sources, {e['evidence_id'] for s in sources for e in s['evidence']}
 
-def regional_registry_info(comp, period='FY2025'):
-    ticker = comp.get('bloomberg_ticker', '')
-    cname = comp.get('name', 'Company')
-    cid = comp.get('id', '')
-    jurisdiction = comp.get('jurisdiction', '')
-    parts = ticker.split()
-    code = parts[0] if parts else cid
-    suffix = parts[1] if len(parts) > 1 else ''
-
-    if suffix in ('TT', 'TWO') or 'Taiwan' in jurisdiction:
-        return {
-            'jurisdiction': 'Taiwan',
-            'registry': 'Taiwan MOPS (Market Observation Post System)',
-            'short_registry': 'TWSE / MOPS',
-            'url': f"https://mops.twse.com.tw/mops/web/t51sb10?stkno={code}",
-            'annual_report': f"{cname} Annual Shareholders' Report ({period})",
-            'regulatory_filing': f"{cname} MOPS Material Information & Segment Filing ({period})"
-        }
-    elif suffix in ('KS', 'KQ') or 'Korea' in jurisdiction:
-        return {
-            'jurisdiction': 'South Korea',
-            'registry': 'Korea DART (Data Analysis, Retrieval, and Transfer System / FSS)',
-            'short_registry': 'KRX / DART',
-            'url': f"https://dart.fss.or.kr/dsab001/main.do?textCrpNm={code}",
-            'annual_report': f"{cname} Annual Business Report / 사업보고서 ({period})",
-            'regulatory_filing': f"{cname} DART Statutory Audit & Segment Disclosure ({period})"
-        }
-    elif suffix == 'AU' or 'Australia' in jurisdiction:
-        return {
-            'jurisdiction': 'Australia',
-            'registry': 'ASX Market Announcements / ASIC',
-            'short_registry': 'ASX Announcements',
-            'url': f"https://www.asx.com.au/asx/markets/companyInfo.do?by=asxCode&asxCode={code}",
-            'annual_report': f"{cname} Annual Report & Full Year Statutory Accounts ({period})",
-            'regulatory_filing': f"{cname} ASX Appendix 4E Preliminary Final Report ({period})"
-        }
-    elif suffix in ('HK', 'CH') or 'Hong Kong' in jurisdiction or 'China' in jurisdiction:
-        clean_code = code.zfill(5) if code.isdigit() else code
-        if suffix == 'CH' or 'HK-C' in cname or 'A (HK-C)' in cname:
-            return {
-                'jurisdiction': 'Mainland China',
-                'registry': 'CNINFO (Information Disclosure for Listed Companies)',
-                'short_registry': 'CNINFO (SSE/SZSE)',
-                'url': f"http://www.cninfo.com.cn/new/disclosure/stock?stockCode={code}&orgId=",
-                'annual_report': f"{cname} Annual Report / 年度报告 ({period})",
-                'regulatory_filing': f"{cname} Audited Financial Disclosures ({period})"
-            }
-        else:
-            return {
-                'jurisdiction': 'Hong Kong / China',
-                'registry': 'HKEXnews Regulatory Disclosure Platform',
-                'short_registry': 'HKEXnews',
-                'url': f"https://www.hkexnews.hk/listedco/listconews/advancedsearch/search_active_main.aspx?stock_code={clean_code}",
-                'annual_report': f"{cname} Audited Annual Report & Accounts ({period})",
-                'regulatory_filing': f"{cname} HKEX Final Results Announcement ({period})"
-            }
-    elif suffix == 'SP' or 'Singapore' in jurisdiction:
-        return {
-            'jurisdiction': 'Singapore',
-            'registry': 'SGX Net Corporate Announcement System',
-            'short_registry': 'SGX Net',
-            'url': f"https://www.sgx.com/securities/company-announcements?security={code}",
-            'annual_report': f"{cname} Annual Report & Financial Statements ({period})",
-            'regulatory_filing': f"{cname} SGX Full Year Results Announcement ({period})"
-        }
-    elif suffix == 'IN' or 'India' in jurisdiction:
-        return {
-            'jurisdiction': 'India',
-            'registry': 'National Stock Exchange (NSE) / BSE Corporate Filings',
-            'short_registry': 'NSE Corporate Filings',
-            'url': f"https://www.nseindia.com/companies-listing/corporate-filings-annual-reports?symbol={code}",
-            'annual_report': f"{cname} Integrated Annual Report & Financial Results ({period})",
-            'regulatory_filing': f"{cname} SEBI Statutory Segment Filing ({period})"
-        }
-    elif suffix == 'NZ' or 'New Zealand' in jurisdiction:
-        return {
-            'jurisdiction': 'New Zealand',
-            'registry': 'NZX Market Disclosures Platform',
-            'short_registry': 'NZX Disclosures',
-            'url': f"https://www.nzx.com/companies/{code}",
-            'annual_report': f"{cname} Annual Report & Full Year Results ({period})",
-            'regulatory_filing': f"{cname} NZX Full Year Results ({period})"
-        }
-    elif suffix == 'TB' or 'Thailand' in jurisdiction:
-        return {
-            'jurisdiction': 'Thailand',
-            'registry': 'SET Community Disclosure / SEC Thailand',
-            'short_registry': 'SETTRADE / SET',
-            'url': f"https://www.set.or.th/en/market/product/stock/quote/{code}/company-summary",
-            'annual_report': f"{cname} Form 56-1 One Report / Annual Report ({period})",
-            'regulatory_filing': f"{cname} SET Audited Financial Disclosures ({period})"
-        }
-    else:
-        return {
-            'jurisdiction': jurisdiction or 'Asia-Pacific',
-            'registry': 'National Regulatory Authority',
-            'short_registry': 'Official Registry',
-            'url': f"https://www.google.com/search?q={cname}+annual+report+investor+relations",
-            'annual_report': f"{cname} Audited Annual Report ({period})",
-            'regulatory_filing': f"{cname} Statutory Disclosure Filing ({period})"
-        }
-
 def source_search(d):
     """Find company source documents matching criteria (YTP-17)."""
     company_ids = d.get('company_ids') or ([d['company_id']] if 'company_id' in d else [])
-    source_types = d.get('source_types', ['annual_report', 'regulatory_filing'])
+    stick_earnings = bool(d.get('stick_to_earnings_call'))
+    source_types = ['earnings_call'] if stick_earnings else d.get('source_types', ['annual_report', 'regulatory_filing'])
     cutoff = d.get('cutoff') or date.today().isoformat()
     period = d.get('period', '')
     results = []
@@ -422,6 +325,12 @@ def source_search(d):
         except ValueError:
             continue
         existing = [s for s in all_records('sources') if s['company_id'] == cid]
+        if stick_earnings:
+            existing = sorted(
+                [s for s in existing if s.get('source_type') == 'earnings_call'
+                 and s.get('publication_date') and s['publication_date'] <= cutoff],
+                key=lambda s: (s['publication_date'], s.get('retrieved_at', '')), reverse=True
+            )[:1]
         if existing:
             for s in existing:
                 st = s.get('source_type', 'annual_report')
@@ -442,39 +351,6 @@ def source_search(d):
                     'eligible': eligible,
                     'ineligible_reason': 'Published after cutoff' if not eligible else None
                 })
-        else:
-            reg = regional_registry_info(comp, period or 'FY2025')
-            cname = comp.get('name', 'Company')
-            templates = {
-                'annual_report': reg['annual_report'],
-                'regulatory_filing': reg['regulatory_filing'],
-                'investor_presentation': f"{cname} Investor Presentation ({period or 'FY2025'})",
-                'earnings_call': f"{cname} Q4/Full Year {period or 'FY2025'} Earnings Conference Call Transcript",
-                'transcripts': f"{cname} Earnings Call Transcript ({period or 'FY2025'})",
-                'sustainability_report': f"{cname} Sustainability & ESG Report 2025",
-                'news_announcements': f"{cname} Corporate Announcement"
-            }
-            stick_earnings = bool(d.get('stick_to_earnings_call'))
-            if stick_earnings:
-                cand_types = ['earnings_call']
-            else:
-                cand_types = [t for t in source_types if t in templates][:2] or ['annual_report']
-            for st in cand_types:
-                cand_pub = '2026-03-31'
-                eligible = bool(cand_pub <= cutoff)
-                results.append({
-                    'company_id': cid,
-                    'company_name': cname,
-                    'title': templates.get(st, f"{cname} Filing"),
-                    'source_type': st,
-                    'registry': reg['registry'],
-                    'short_registry': reg['short_registry'],
-                    'url': reg['url'],
-                    'publication_date': cand_pub,
-                    'period': period or 'FY2025',
-                    'eligible': eligible,
-                    'ineligible_reason': 'Published after cutoff' if not eligible else None
-                })
     run_record = {
         'id': ident('searchrun'),
         'created_at': now(),
@@ -486,94 +362,8 @@ def source_search(d):
         'results': results
     }
     put('search_runs', run_record)
-    ingested = []
-    if d.get('auto_ingest'):
-        ingested_res = ingest_candidates({'candidates': results})
-        ingested = ingested_res.get('sources', [])
-    return {'search_run': run_record, 'results': results, 'ingested_count': len(ingested)}
-
-def ingest_candidates(d):
-    """Ingest candidate search results into the source library with evidence passages."""
-    candidates = d.get('candidates', [])
-    if not candidates and d.get('search_run_id'):
-        sr = get('search_runs', d['search_run_id'])
-        candidates = sr.get('results', [])
-    if not candidates:
-        runs = all_records('search_runs')
-        if runs:
-            candidates = runs[-1].get('results', [])
-    ingested = []
-    seen_companies = set()
-    for cand in candidates:
-        cid = cand.get('company_id')
-        if not cid or cid in seen_companies:
-            continue
-        try:
-            comp = get('companies', cid)
-        except ValueError:
-            continue
-        seen_companies.add(cid)
-        cname = comp.get('name', 'Company')
-        ticker = comp.get('bloomberg_ticker', '')
-        sedol = comp.get('sedol', '')
-        period = cand.get('period', 'FY2025')
-        pub_date = cand.get('publication_date') or '2026-03-31'
-        reg = regional_registry_info(comp, period)
-        source_type = cand.get('source_type', 'annual_report')
-        title = cand.get('title') or (reg['annual_report'] if source_type != 'earnings_call' else f"{cname} Q4/{period} Earnings Call Transcript")
-        url = cand.get('url') or reg['url']
-        registry = cand.get('registry') or reg['registry']
-        short_reg = cand.get('short_registry') or reg['short_registry']
-        
-        if source_type == 'earnings_call':
-            text = (
-                f"EARNINGS CONFERENCE CALL TRANSCRIPT & MANAGEMENT DISCUSSION ({period})\n"
-                f"OFFICIAL SOURCE:          CORPORATE INVESTOR RELATIONS & TRANSCRIPTS\n"
-                f"COMPANY NAME:             {cname}\n"
-                f"BLOOMBERG TICKER:         {ticker}\n"
-                f"SEDOL (LONDON STK EXCH):  {sedol or 'N/A'}\n"
-                f"INTERNAL ID:              {cid}\n"
-                f"EVENT TITLE:              {title}\n"
-                f"FISCAL PERIOD:            {period} | TRANSCRIPT DATE: {pub_date}\n"
-                f"REPRESENTATIVES:          Chief Executive Officer, Chief Financial Officer, Head of Investor Relations\n\n"
-                f"EXECUTIVE SUMMARY & OPERATIONAL HIGHLIGHTS:\n"
-                f"Thank you for joining our {period} earnings conference call. "
-                f"During this period, {cname} sustained strong commercial momentum across our core operational divisions in {reg['jurisdiction']}. "
-                f"Total consolidated net external revenue reached target levels. Operating segment revenues reflect direct deliveries to strategic infrastructure, "
-                f"specialized hardware manufacturing, advanced supply chain solutions, and enterprise market applications. "
-                f"In our business segment breakdown, our primary commercial units reported solid order backlogs and revenue contributions qualifying under primary operational categories."
-            )
-        else:
-            text = (
-                f"STATUTORY DISCLOSURE & AUDITED ANNUAL FINANCIAL REPORT ({period})\n"
-                f"REGULATORY FILING REGISTRY: {registry.upper()}\n"
-                f"COMPANY NAME:             {cname}\n"
-                f"BLOOMBERG TICKER:         {ticker}\n"
-                f"SEDOL (LONDON STK EXCH):  {sedol or 'N/A'}\n"
-                f"INTERNAL ID:              {cid}\n"
-                f"FILING TITLE:             {title}\n"
-                f"REPORTING PERIOD:         {period} | PUBLICATION DATE: {pub_date}\n"
-                f"OFFICIAL REPOSITORY URL:  {url}\n\n"
-                f"BUSINESS OVERVIEW & OPERATIONS:\n"
-                f"{cname} is an active commercial enterprise incorporated in {reg['jurisdiction']}. "
-                f"During fiscal period {period}, the company engaged in principal operational activities including product design, manufacturing, hardware/software infrastructure, and enterprise commercial solutions. "
-                f"Financial results disclose total external net revenue across primary operating segments. "
-                f"Audited segment disclosures provide breakdowns of disclosed revenue contributions and qualifying business lines."
-            )
-        source = source_ingest({
-            'company_id': cid,
-            'publication_date': pub_date,
-            'period': period,
-            'title': title,
-            'registry': registry,
-            'short_registry': short_reg,
-            'filename': f"{cname.replace(' ', '_')}_{source_type}_{period}.txt",
-            'content': base64.b64encode(text.encode('utf-8')).decode('ascii'),
-            'url': url,
-            'source_type': source_type
-        })
-        ingested.append(source)
-    return {'ingested_count': len(ingested), 'sources': ingested}
+    return {'search_run': run_record, 'results': results, 'ingested_count': 0,
+            'message': 'Search covers uploaded documents only. Upload real filings to add evidence.'}
 
 
 # ── Case ──────────────────────────────────────────────────────────────────────
@@ -786,7 +576,10 @@ def generate(d):
         # (adds Tier-3 children) — always one level deeper than the target.
         child_tier = target_depth + 1
         # Cap the number of children by the tier being created (Tier-2: 3, Tier-3: 4).
-        child_count = engine.MAX_CHILDREN.get(child_tier, 3)
+        child_count = engine.MAX_CHILDREN[child_tier] - sum(
+            1 for n in existing_all if node_depth(n.get('node_id')) == child_tier)
+        if child_count <= 0:
+            raise ValueError(f'Tier-{child_tier} global limit reached')
         task = (
             f'You are refining one node within an existing investment theme taxonomy. '
             f'Limit all outputs, scopes, and company examples strictly to Asian stocks excluding Japan '
@@ -805,7 +598,7 @@ def generate(d):
             f'Propose a two-level investment theme taxonomy. '
             f'Limit all outputs, sub-theme scopes, and company examples strictly to Asian stocks and companies excluding Japan (covering any Asian markets such as Taiwan, South Korea, Hong Kong, China, Singapore, India, Australasia, and ASEAN, including stocks outside any benchmark index). '
             f'Do not include or reference any Japanese stocks or non-Asian companies. '
-            f'Generate exactly {tier1} Tier-1 nodes (parent_id: null) and {tier2} Tier-2 nodes per Tier-1 node. '
+            f'Generate exactly {tier1} Tier-1 nodes (parent_id: null) and at most {tier2} Tier-2 nodes TOTAL across all Tier-1 nodes. Distribute them flexibly according to scope, with at least one per Tier-1. '
             f'No deeper levels. Use both company-reported language and market/industry consensus. '
             + 'Return {"nodes":[{"node_id":"...","parent_id":null,"name":"...","definition":"...","examples":[]}]}. '
             'Avoid redundant categories. Do not approve nodes.'
@@ -997,11 +790,15 @@ def analyze_all(d):
         comp_sources, valid_eids = evidence_for(comp['id'], theme_id)
         if not valid_eids:
             continue
+        if sum(len(e.get('passage', '')) for s in comp_sources for e in s.get('evidence', [])) > 60000:
+            errors.append({'company_id': comp['id'], 'company_name': comp['name'],
+                           'error': 'Evidence exceeds 60,000 characters; select passages manually.'})
+            continue
         selected = []
         char_count = 0
         for s in comp_sources:
             for e in s.get('evidence', []):
-                if char_count + len(e.get('passage', '')) <= 55000:
+                if char_count + len(e.get('passage', '')) <= 60000:
                     selected.append(e['evidence_id'])
                     char_count += len(e.get('passage', ''))
         if not selected:
@@ -1220,13 +1017,6 @@ def export(theme_id, snapshot_id=None):
              if o['run_id'] in {r['id'] for r in manifest['runs']}], indent=2))
     return buffer.getvalue()
 
-# ── Evaluate endpoint ─────────────────────────────────────────────────────────
-
-def evaluate_examples(examples):
-    """Run evaluate.py logic inline for the API endpoint."""
-    import evaluate as eval_mod
-    return eval_mod.evaluate(examples)
-
 # ── Snapshot ──────────────────────────────────────────────────────────────────
 
 def snapshot_create(d):
@@ -1256,6 +1046,30 @@ def portfolio_import(d):
     holdings_date = d.get('holdings_date') or date.today().isoformat()
     benchmark_name = d.get('benchmark_name') or 'MSCI Asia ex Japan'
     rows_data = d.get('rows', [])
+    file_content = None
+    file_name = None
+    file_extension = None
+    file_content_type = None
+
+    if d.get('file_content') or d.get('file_name'):
+        if not d.get('file_content') or not d.get('file_name'):
+            raise ValueError('Portfolio file name and content must be provided together')
+        file_name = Path(str(d['file_name'])).name
+        file_extension = Path(file_name).suffix.lower()
+        content_types = {
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.xls': 'application/vnd.ms-excel',
+            '.csv': 'text/csv',
+        }
+        if file_extension not in content_types:
+            raise ValueError('Portfolio file must be XLSX, XLS, or CSV')
+        try:
+            file_content = base64.b64decode(d['file_content'], validate=True)
+        except (ValueError, TypeError):
+            raise ValueError('Portfolio file content is invalid') from None
+        if not 0 < len(file_content) <= MAX_FILE:
+            raise ValueError('Portfolio file must be between 1 byte and 20 MB')
+        file_content_type = content_types[file_extension]
 
     if not rows_data and d.get('content'):
         raw_bytes = base64.b64decode(d['content'], validate=True)
@@ -1385,6 +1199,16 @@ def portfolio_import(d):
         'rows_count': len(clean_rows),
         'rows': clean_rows
     }
+    if file_content is not None:
+        storage_path = f"portfolios/{import_record['id']}{file_extension}"
+        supabase_store.upload_portfolio_file(storage_path, file_content, file_content_type)
+        import_record.update(
+            file_name=file_name,
+            file_storage_path=storage_path,
+            file_sha256=hashlib.sha256(file_content).hexdigest(),
+            file_size=len(file_content),
+            file_content_type=file_content_type,
+        )
     put('portfolio_imports', import_record)
     return {
         'import': import_record,
@@ -1417,113 +1241,30 @@ def state():
 
 # ── Demo ──────────────────────────────────────────────────────────────────────
 
-def demo():
-    existing = [t for t in all_records('themes') if t.get('theme_name') == 'AI Infrastructure · demonstration']
-    if existing:
-        return existing[0]
-    nodes = [
-        {'node_id': 'compute',      'parent_id': None,      'name': 'Compute Hardware',
-         'definition': 'Dedicated AI chips and systems', 'examples': ['AI accelerators']},
-        {'node_id': 'compute_design','parent_id': 'compute', 'name': 'AI Chip Design',
-         'definition': 'Companies designing AI-specific chips', 'examples': ['GPU designers']},
-        {'node_id': 'compute_fab',  'parent_id': 'compute', 'name': 'AI Chip Fabrication',
-         'definition': 'Foundries manufacturing AI chips', 'examples': ['TSMC AI orders']},
-        {'node_id': 'datacenter',   'parent_id': None,      'name': 'Data Centre Infrastructure',
-         'definition': 'Infrastructure explicitly serving AI workloads', 'examples': ['AI server racks']},
-        {'node_id': 'dc_power',     'parent_id': 'datacenter','name': 'Power & Cooling',
-         'definition': 'Power delivery and cooling for AI data centres', 'examples': ['Liquid cooling systems']},
-        {'node_id': 'dc_server',    'parent_id': 'datacenter','name': 'Server Hardware',
-         'definition': 'AI-optimised server platforms', 'examples': ['AI inference servers']},
-    ]
-    theme = theme_create({
-        'theme_name': 'AI Infrastructure · demonstration',
-        'theme_description': 'Synthetic worked examples from the specification; no real-company investment conclusions.',
-        'included_activities': 'Dedicated AI hardware and supported AI infrastructure',
-        'excluded_activities': 'General enterprise computing; indirect beneficiaries',
-        'positive_examples': 'AI accelerators / dedicated AI server revenue qualifies',
-        'negative_examples': 'General cloud revenue without an AI allocation does not qualify',
-        'nodes': nodes
-    })
-    for cid, exposure in [('DEMO_A', .5), ('DEMO_B', .1), ('DEMO_MIXED', None)]:
-        put('companies', {
-            'id': cid,
-            'name': {'DEMO_A': 'Company A', 'DEMO_B': 'Company B', 'DEMO_MIXED': 'Mixed business'}[cid] + ' (synthetic)',
-            'bloomberg_ticker': cid, 'sedol': '', 'jurisdiction': 'Example', 'created_at': now()
-        })
-        text = 'SYNTHETIC DEMONSTRATION. Consolidated external FY2025 revenue is USD 100 million. '
-        if exposure is not None:
-            text += f'Qualifying AI hardware revenue is USD {exposure*100:g} million; remaining revenue is unrelated consumer services.'
-        else:
-            text += 'AI hardware revenue 20 million; mixed data centre revenue 40 million with undisclosed AI share; excluded consumer services revenue 40 million.'
-        source = source_ingest({
-            'company_id': cid, 'publication_date': '2026-01-01', 'period': 'FY2025',
-            'filename': cid + '.txt',
-            'content': base64.b64encode(text.encode()).decode(),
-            'url': '', 'source_type': 'synthetic_example'
-        })
-        eid = source['evidence'][0]['evidence_id']
-        def unit(uid, revenue, lo, hi, point, relationship, leaf=None):
-            return {
-                'unit_id': uid, 'activity': uid, 'revenue': revenue,
-                'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'external': True,
-                'evidence_ids': [eid], 'overlap_group': None,
-                'lower': lo, 'upper': hi, 'point': point,
-                'relationship_type': relationship,
-                'rationale': 'Synthetic source explicitly describes activity',
-                'scope_check': 'Consumer services fall outside approved AI infrastructure scope' if relationship == 'excluded' else '',
-                'method': 'disclosed' if point is not None else 'insufficient_evidence',
-                'assumption': '', 'allocations': {leaf: 1} if leaf else {}
-            }
-        if exposure is not None:
-            units = [unit('hardware', exposure*100, 1, 1, 1, 'direct', 'compute_fab'),
-                     unit('other', (1-exposure)*100, 0, 0, 0, 'excluded')]
-        else:
-            units = [unit('hardware', 20, 1, 1, 1, 'direct', 'compute_design'),
-                     unit('mixed', 40, 0, 1, None, 'insufficient_evidence', 'dc_server'),
-                     unit('other', 40, 0, 0, 0, 'excluded')]
-        case = save_case({
-            'company_id': cid, 'theme_id': theme['id'],
-            'case': {'total_revenue': 100, 'denominator_evidence_ids': [eid],
-                     'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'units': units},
-            'classification_confidence': 'high',
-            'exposure_quality': 'high' if exposure is not None else 'low',
-            'confidence_basis': 'Synthetic disclosed figures; mixed business retains an unknown allocation'
-        })
-        review({'case_id': case['id'], 'decision': 'approved',
-                'reviewer': 'Demo fixture', 'reason': 'Verified synthetic worked example'})
-
-    def row(cid, w, label):
-        return {'snapshot_id': label, 'as_of_date': '2026-10-03',
-                'company_id': cid, 'security_id': cid + '_ORD', 'weight': w}
-    snapshot_create({
-        'name': 'Specification example · synthetic',
-        'portfolio': [row('DEMO_A', .2, 'demo_p'), row('DEMO_B', .8, 'demo_p')],
-        'benchmark': [row('DEMO_A', .1, 'demo_b'), row('DEMO_B', .9, 'demo_b')]
-    })
-    return theme
-
 # ── HTTP dispatch ─────────────────────────────────────────────────────────────
 
-def dispatch(path, d):
+def _dispatch(path, d):
     if path == '/api/theme':            return theme_create(d)
     if path == '/api/theme/delete':     return theme_delete(d)
+    if path == '/api/portfolio/delete': return portfolio_delete(d)
     if path == '/api/generate':         return generate(d)
     if path == '/api/analyze':          return analyze(d)
     if path == '/api/analyze_all':      return analyze_all(d)
     if path in ('/api/case/check', '/api/check'): return check_case(d)
     if path == '/api/company':          return company_create(d)
     if path in ('/api/source/search', '/api/search'): return source_search(d)
-    if path == '/api/source/ingest_candidates':       return ingest_candidates(d)
     if path == '/api/source':           return source_ingest(d)
     if path in ('/api/portfolio/import', '/api/portfolio_import'): return portfolio_import(d)
     if path == '/api/case':             return save_case(d)
     if path == '/api/review':           return review(d)
     if path == '/api/snapshot':         return snapshot_create(d)
     if path == '/api/dashboard':        return dashboard(d['theme_id'], d.get('snapshot_id'))
-    if path == '/api/demo':             return demo()
-    if path == '/api/evaluate':         return evaluate_examples(d.get('examples', []))
     if path == '/api/source/update': return source_update(d)
     raise ValueError('Unknown API endpoint')
+
+def dispatch(path, d):
+    return _dispatch(path, d)
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
@@ -1578,12 +1319,17 @@ class Handler(BaseHTTPRequestHandler):
             if not asset_file.is_file():
                 asset_file = ROOT.parent / 'static' / assets[path]
             self.respond(asset_file.read_bytes(), mime=mime)
+        except supabase_store.SupabaseError as error:
+            self.respond({'error': str(error)}, 503)
         except Exception as err:
             self.respond({'error': str(err)}, 500)
 
     def do_POST(self):
-        if not self.valid_host() or \
-                self.headers.get('Origin', '').rstrip('/') != 'http://' + self.headers.get('Host', ''):
+        origin = self.headers.get('Origin', '').rstrip('/')
+        allowed_origins = {value.strip().rstrip('/') for value in
+                           os.environ.get('TRUSTED_ORIGINS', '').split(',') if value.strip()}
+        allowed_origins.add('http://' + self.headers.get('Host', ''))
+        if not self.valid_host() or origin not in allowed_origins:
             return self.respond({'error': 'Same-origin local requests required'}, 403)
         try:
             length = int(self.headers.get('Content-Length', '0'))
@@ -1601,6 +1347,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(dispatch(self.path, d))
         except (ValueError, KeyError, TypeError, ImportError) as error:
             self.respond({'error': str(error)}, 400)
+        except supabase_store.SupabaseError as error:
+            self.respond({'error': str(error)}, 503)
         except Exception:
             self.respond({'error': 'Operation failed; check file validity and provider configuration.'}, 500)
 
@@ -1615,6 +1363,7 @@ if __name__ == '__main__':
         try:
             server.serve_forever()
         except KeyboardInterrupt:
+            server.server_close()
             break
         except Exception as e:
             print(f'Server warning: {e}', flush=True)

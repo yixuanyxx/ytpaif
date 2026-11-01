@@ -20,7 +20,7 @@ MAX_TIERS = 3  # Theme → Tier-1 → Tier-2 → Tier-3 (Tier-3 only via manual 
 #   Tier-1: up to 5 top-level areas
 #   Tier-2: up to 3 activities under each Tier-1 (produced by "generate taxonomy")
 #   Tier-3: up to 4 sub-nodes under a Tier-2 (only via manual "break down")
-MAX_CHILDREN = {1: 5, 2: 3, 3: 4}
+MAX_CHILDREN = {1: 5, 2: 15, 3: 60}  # Global totals at each depth.
 
 def taxonomy(nodes, require_leaves=False):
     """Validate the taxonomy and return the set of leaf node IDs.
@@ -78,14 +78,12 @@ def taxonomy(nodes, require_leaves=False):
         raise ValueError(f'A theme may have at most {MAX_CHILDREN[1]} Tier-1 areas')
     child_counts = {}
     for n in nodes:
-        pid = n.get('parent_id')
-        if pid is not None:
-            child_counts[pid] = child_counts.get(pid, 0) + 1
-    for pid, count in child_counts.items():
-        child_tier = _depth(pid) + 1
+        depth = _depth(n['node_id'])
+        child_counts[depth] = child_counts.get(depth, 0) + 1
+    for child_tier, count in child_counts.items():
         cap = MAX_CHILDREN.get(child_tier)
         if cap is not None and count > cap:
-            raise ValueError(f'A Tier-{child_tier - 1} node may have at most {cap} sub-nodes')
+            raise ValueError(f'A taxonomy may have at most {cap} Tier-{child_tier} nodes in total')
 
     if require_leaves:
         tier1_ids = {n['node_id'] for n in nodes if n.get('parent_id') is None}

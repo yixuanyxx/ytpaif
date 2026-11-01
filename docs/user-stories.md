@@ -201,7 +201,7 @@ Explicitly out of scope for the presentation:
 
 1. `LLM_MAX_CALLS` defaults to `0` (AI disabled).
 2. Any call when the cap is reached returns: "AI call cap reached. Set LLM_MAX_CALLS explicitly before running paid calls."
-3. The cap is persistent across restarts (tracked in SQLite).
+3. The cap is persistent across restarts (tracked by Supabase model-call records).
 4. Identical requests (same payload, model, endpoint, version) are served from cache without consuming the cap.
 5. Each company analysis consumes 2 calls (extraction + classification); taxonomy generation consumes 1.
 
@@ -307,25 +307,6 @@ Explicitly out of scope for the presentation:
 
 ---
 
-## Epic YTP-12 — Validation & Evaluation
-
-### YTP-27 · Evaluate classification accuracy against a labelled set
-
-**As an** Analyst,
-**I want to** run `evaluate.py` against a labelled reference set,
-**so that** I can report classification accuracy, exposure error, and confidence scores.
-
-**Acceptance Criteria:**
-
-1. `python evaluate.py labelled_examples.json` produces a JSON report without error.
-2. Report includes: `examples`, `answered_accuracy`, per-label `precision`/`recall`/`F1`, `exposure_mean_absolute_error_pp`, `reference_range_overlap_rate`.
-3. Data is classified into sub-theme categories; exposure is estimated with confidence scores and supporting evidence.
-4. Where data is insufficient to support a classification, this is explicitly identified.
-
-**Mentor notes (6 Oct):** Target gold set: 20 companies (8 dev / 12 held-out). Acceptable bar: mean exposure error ≤ 10 pp on held-out, beating sector-label and keyword baselines.
-
----
-
 ## Epic YTP-13 — Backend / System
 
 ### YTP-29 · Persist themes as versioned, immutable records
@@ -339,7 +320,7 @@ Explicitly out of scope for the presentation:
 1. A new theme with no `previous_id` gets `version = 1` and a fresh `theme_id`.
 2. A theme with a valid `previous_id` inherits the same `theme_id` and receives `version = previous.version + 1`; the prior record is not modified.
 3. `engine.taxonomy(nodes)` is called before any write; structural errors (duplicate IDs, cycles, missing fields, empty list) abort the write.
-4. All records are persisted via `INSERT OR REPLACE INTO records` with `(kind, id)` as primary key; SQLite WAL mode handles concurrent reads.
+4. All records are persisted in Supabase; the backend uses `(kind, id)` keys for generic research records.
 
 ---
 
@@ -462,7 +443,6 @@ Explicitly out of scope for the presentation:
 | **Must have** | YTP-19, YTP-20, YTP-21, YTP-22 | AI analysis + manual review — core classification workflow |
 | **Must have** | YTP-23, YTP-24, YTP-25 | Portfolio dashboard — the primary deliverable |
 | **Must have** | YTP-29–YTP-36 | Backend contracts underpinning all of the above |
-| **Should have** | YTP-27 | Evaluation metrics for presentation evidence |
 
 ---
 
