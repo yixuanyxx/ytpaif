@@ -42,6 +42,17 @@ class SupabasePersistenceTest(unittest.TestCase):
         self.assertEqual(row['payload'], record)
         self.assertEqual(request.call_args.args[0], '/rest/v1/analysis_runs')
 
+    def test_unnamed_tables_never_receive_a_name_column(self):
+        store = supabase_store.SupabaseStore()
+        for kind in ('search_runs', 'runs', 'cases', 'reviews', 'model_outputs',
+                     'model_calls', 'provider_outputs', 'cache'):
+            with self.subTest(kind=kind), patch.object(supabase_store, 'request') as request:
+                record = {'id': 'test', 'name': 'Metadata only'}
+                store.put(kind, record)
+                row = request.call_args.kwargs['payload']
+                self.assertNotIn('name', row)
+                self.assertEqual(row['payload']['name'], 'Metadata only')
+
     def test_store_routes_each_record_kind_to_its_dedicated_table(self):
         requests = []
 

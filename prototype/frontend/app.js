@@ -10,9 +10,66 @@ let state = null;
 let currentView = 'dashboard';
 let selectedDashboardThemeId = '';
 let selectedDashboardPortfolioId = '';
-let selectedSourcePortfolioId = '';
 let dashboardRenderVersion = 0;
+let sourceSearchPollTimer = null;
+const trackedSourceSearches = new Set();
+function notifyFinishedSourceSearches() {
+  for (const search of state.search_runs || []) {
+    if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed'].includes(search.status)) continue;
+    trackedSourceSearches.delete(search.id);
+    const count = search.results_count || 0;
+    const gaps = search.missing?.length || 0;
+    if (search.status === 'failed') {
+      notice(`AI source search failed. ${count} documents were saved before the failure. Review Source Documents and try again.`, 'error');
+    } else {
+      notice(`AI source search is over. ${count} documents saved.${gaps ? ` ${gaps} company/source-type gaps remain; review Source Documents.` : ' All required source categories are covered.'}`, gaps ? 'warning' : 'success');
+    }
+  }
+}
+function monitorSourceSearches() {
+  for (const search of state.search_runs || []) {
+    if (search.status === 'running') trackedSourceSearches.add(search.id);
+  }
+  if (sourceSearchPollTimer) return;
+  sourceSearchPollTimer = setTimeout(async () => {
+    sourceSearchPollTimer = null;
+    try {
+      const running = [...trackedSourceSearches];
+      if (!running.length) return;
+      await refresh();
+      notifyFinishedSourceSearches();
+      const pending = (state.search_runs || []).some(r => running.includes(r.id) && r.status === 'running');
+      if (currentView === 'sources') {
+        const status = $('#source-search-status');
+        if (status) status.innerHTML = pending
+          ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Searching for source documents in the background… You can continue browsing.'
+          : 'AI source search finished. Reopen Source Documents to view the latest results.';
+        const button = $('#btn-run-search');
+        if (button) button.disabled = pending;
+      }
+      if (pending) monitorSourceSearches();
+    } catch { monitorSourceSearches(); }
+  }, 5000);
+}
 const VIEW_STORAGE_KEY = 'theme-lab-current-view';
+const SELECTION_STORAGE_KEY = 'theme-lab-dashboard-selection';
+function saveDashboardSelection() {
+  try {
+    localStorage.setItem(SELECTION_STORAGE_KEY, JSON.stringify({
+      themeId: selectedDashboardThemeId, portfolioId: selectedDashboardPortfolioId
+    }));
+  } catch { /* Keep navigation working when storage is unavailable. */ }
+}
+function restoreDashboardSelection() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SELECTION_STORAGE_KEY) || '{}');
+    selectedDashboardThemeId = (state.themes || []).some(t => t.approved && t.id === saved.themeId) ? saved.themeId : '';
+    selectedDashboardPortfolioId = (state.portfolio_imports || []).some(p => p.id === saved.portfolioId && p.theme_id === selectedDashboardThemeId) ? saved.portfolioId : '';
+  } catch {
+    selectedDashboardThemeId = '';
+    selectedDashboardPortfolioId = '';
+  }
+}
 const VALID_VIEWS = new Set([
   'theme', 'portfolio', 'sources', 'analysis', 'dashboard'
 ]);
@@ -188,6 +245,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   restoreSavedView();
   await run(async () => {
     await refresh();
+    restoreDashboardSelection();
     render();
   }, 'Loading workspace…');
 
@@ -308,7 +366,7 @@ function savedThemesListHtml(savedThemes, activeTheme) {
               </button>
               <div class="saved-theme-actions">
                 ${isActive ? '<span class="badge badge-green">Loaded</span>' : ''}
-                <button type="button" class="btn btn-sm btn-ghost saved-theme-del" data-del-theme="${esc(t.id)}" title="Delete this theme">🗑</button>
+                <button type="button" class="btn btn-sm btn-ghost saved-theme-del" data-del-theme="${esc(t.id)}" title="Delete this theme">Delete</button>
               </div>
             </li>`;
         }).join('')}
@@ -1348,6 +1406,15 @@ let _stagingFile = null;   // file name for display
 let _stagingFileObject = null;
 
 async function viewPortfolio() {
+  if (!selectedDashboardThemeId) {
+    $('#page-content').innerHTML = '<div class="panel">Select a theme in Portfolio Exposure Dashboard before importing a portfolio.</div>';
+    return;
+  }
+  const selected = (state.portfolio_imports || []).find(p => p.id === selectedDashboardPortfolioId && p.theme_id === selectedDashboardThemeId);
+  if (selected && !_stagingRows) {
+    renderPortfolioDetails(selected);
+    return;
+  }
   setPageHeader('STEP 2', 'Portfolio Import',
     'Upload holdings and match companies');
 
@@ -1397,11 +1464,13 @@ function renderUploadZone() {
           </div>
           <div class="form-group">
             <label class="field-label">Holdings date <span class="optional">(optional)</span></label>
-            <input type="date" id="import-date">
+            <input type="date" id="import-date" max="${new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())}">
+            <div class="text-muted text-small">Must be today or earlier (Singapore time). Leave blank to use the upload date.</div>
           </div>
           <div class="form-group span-2">
-            <label class="field-label">Benchmark name <span class="optional">(optional)</span></label>
-            <input type="text" id="import-benchmark" value="MSCI Asia ex Japan">
+            <label class="field-label">Benchmark</label>
+            <div><strong>MSCI Asia ex Japan</strong></div>
+            <div class="text-muted text-small">The Reference wt column must contain weights for this benchmark.</div>
           </div>
         </div>
 
@@ -1445,7 +1514,11 @@ function renderUploadZone() {
     button.addEventListener('click', () => {
       const portfolio = (state.portfolio_imports || [])
         .find(item => item.id === button.dataset.openPortfolio);
-      if (portfolio) renderPortfolioDetails(portfolio);
+      if (portfolio) {
+        selectedDashboardPortfolioId = portfolio.id;
+        saveDashboardSelection();
+        renderPortfolioDetails(portfolio);
+      }
     });
   });
   $$('[data-del-portfolio]').forEach(button => {
@@ -1476,11 +1549,23 @@ function renderUploadZone() {
     _stagingFile = file.name;
     $('#import-file-name').textContent = file.name;
     $('#btn-parse').disabled = false;
-    if (!$('#import-name').value.trim()) $('#import-name').value = file.name.replace(/\.[^.]+$/, '');
+    if (!$('#import-name').value.trim()) {
+      $('#import-name').value = file.name.replace(/\.[^.]+$/, '');
+    }
     $('#parse-error').hidden = true;
   }
 
   fileInput.onchange   = () => onFileSelected(fileInput.files[0]);
+  $('#import-date').addEventListener('change', event => {
+    const input = event.target;
+    const parts = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const part = type => parts.find(p => p.type === type).value;
+    input.max = `${part('year')}-${part('month')}-${part('day')}`;
+    if (input.value && input.value > input.max) {
+      input.value = '';
+      showAlert('Holdings date cannot be later than today (Singapore time). Choose today or an earlier date.', 'Invalid holdings date');
+    }
+  });
   dropZone.onclick = e => { if (e.target !== fileInput) fileInput.click(); };
   $('#btn-browse-excel').onclick = e => { e.stopPropagation(); fileInput.click(); };
   dropZone.ondragover  = e => { e.preventDefault(); dropZone.classList.add('drag-over'); };
@@ -1502,15 +1587,33 @@ function renderUploadZone() {
     }
     showLoading('Parsing Excel file…');
     try {
+      const dateInput = $('#import-date');
+      if (dateInput.value && dateInput.value > dateInput.max) {
+        throw new Error('Holdings date cannot be later than today (Singapore time).');
+      }
       const rows = await parseExcelFile(currentFile);
+      const invalidRows = rows.filter(row => row.error);
+      if (!rows.length || invalidRows.length) {
+        throw new Error(invalidRows.length
+          ? `Invalid portfolio rows: ${invalidRows.slice(0, 5).map(row => `${row.name}: ${row.error}`).join('; ')}. Correct the file and upload it again.`
+          : 'The file contains no portfolio holdings. Fill in the downloaded template and upload it again.');
+      }
       // Attach metadata
       rows._importName      = importName;
       rows._importDate      = $('#import-date').value;
-      rows._benchmarkName   = $('#import-benchmark').value || 'MSCI Asia ex Japan';
+      rows._benchmarkName   = 'MSCI Asia ex Japan';
       rows._fileName        = currentFile.name;
       _stagingRows = rows;
       viewPortfolio();
     } catch (err) {
+      currentFile = null;
+      _stagingFileObject = null;
+      _stagingRows = null;
+      fileInput.value = '';
+      $('#btn-parse').disabled = true;
+      $('#import-file-name').textContent = 'No file selected';
+      hideLoading();
+      showAlert(`${err.message} Use the downloaded Excel template and try again.`, 'Portfolio file rejected');
       const el = $('#parse-error');
       el.hidden = false;
       el.innerHTML = `<div class="notice error"><span class="notice-icon">✕</span>${esc(err.message)}</div>`;
@@ -1531,11 +1634,18 @@ async function parseExcelFile(file) {
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
   if (!raw || raw.length < 2) throw new Error('File appears to be empty.');
 
-  const headerRow = raw[0].map(h => String(h ?? '').trim().toLowerCase());
+  const headerRow = raw[0].map(h => String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' '));
+  const expectedHeaders = ['company', 'bloomberg ticker', 'country', 'sector', 'sedol', 'portfolio wt', 'reference wt', 'active wt'];
+  const populatedHeaders = headerRow.filter(Boolean);
+  const missing = expectedHeaders.filter(h => !populatedHeaders.includes(h));
+  if (missing.length) throw new Error(`Missing template column(s): ${missing.join(', ')}.`);
+  const relevantHeaders = populatedHeaders.filter(h => expectedHeaders.includes(h));
+  if (new Set(relevantHeaders).size !== relevantHeaders.length) throw new Error('Duplicate template column headers are not allowed.');
 
   // Column index map — case-insensitive, normalise spaces/special chars
   function col(name) {
-    const idx = headerRow.findIndex(h => h.includes(name.toLowerCase()));
+    const canonical = {bloomberg: 'bloomberg ticker', portfolio: 'portfolio wt', reference: 'reference wt', active: 'active wt'};
+    const idx = headerRow.indexOf(canonical[name] || name.toLowerCase());
     return idx;
   }
 
@@ -1659,6 +1769,7 @@ function renderEditTable(rows) {
 
   $('#page-content').innerHTML = `
     <!-- Sticky action bar -->
+    <h2 id="portfolio-preview-name" style="font-size:20px;font-weight:700;margin:0 0 16px">${esc(rows._importName || 'Portfolio')}</h2>
     <div style="position:sticky;top:0;z-index:40;background:white;border:1px solid var(--slate-100);
       border-radius:var(--radius-lg);padding:14px 20px;margin-bottom:20px;
       display:flex;align-items:center;gap:16px;box-shadow:var(--shadow-sm)">
@@ -1886,14 +1997,19 @@ function bindEditTable(rows) {
 
   // Confirm import
   $('#btn-confirm-import').onclick = () => {
-    const name = rows._importName || 'Portfolio import';
+    const name = (rows._importName || '').trim();
+    if (!name) {
+      notice('Portfolio name is required.', 'error');
+      return;
+    }
     run(async () => {
       const clean = rows.filter(r => !r.excluded && !r.error && !r.conflict);
       if (clean.length === 0) throw new Error('No valid rows to import.');
       const res = await api('portfolio/import', {
+        theme_id: selectedDashboardThemeId,
         name: name,
         holdings_date: rows._importDate || new Date().toISOString().slice(0, 10),
-        benchmark_name: rows._benchmarkName || 'MSCI Asia ex Japan',
+        benchmark_name: 'MSCI Asia ex Japan',
         rows: clean,
         file_name: rows._fileName,
         file_content: await fileToBase64(_stagingFileObject)
@@ -1901,6 +2017,8 @@ function bindEditTable(rows) {
       _stagingRows = null;
       _stagingFileObject = null;
       await refresh();
+      selectedDashboardPortfolioId = res.import.id;
+      saveDashboardSelection();
       notice(`"${name}" imported — ${clean.length} companies registered and snapshot created. Dashboard is ready.`);
       render();
     }, 'Importing holdings…');
@@ -2000,20 +2118,20 @@ function renderPortfolioDetails(portfolio) {
 }
 
 function renderExistingPortfolioCards() {
-  const portfolios = state.portfolio_imports || [];
+  const portfolios = (state.portfolio_imports || []).filter(p => p.theme_id === selectedDashboardThemeId);
   return portfolios.length ? `
     <div class="panel">
       <div class="panel-title">Existing portfolios <span class="badge badge-neutral">${portfolios.length}</span></div>
       <div class="panel-subtitle">Select a portfolio to view its saved holdings.</div>
       <ul class="saved-theme-list">
         ${portfolios.map(portfolio => `
-          <li class="saved-theme-row">
+          <li class="saved-theme-row ${portfolio.id === selectedDashboardPortfolioId ? 'portfolio-selected' : ''}">
             <button type="button" class="saved-theme-main" data-open-portfolio="${esc(portfolio.id)}" title="View this portfolio's holdings">
-              <span class="saved-theme-name">${esc(portfolio.name)}</span>
+              <span class="saved-theme-name">${esc(portfolio.name)}${portfolio.id === selectedDashboardPortfolioId ? ' <span class="badge badge-amber">Selected</span>' : ''}</span>
               <span class="saved-theme-meta">${esc(portfolio.holdings_date || 'Date not specified')} · ${portfolio.rows?.length || 0} holdings · ${esc(portfolio.benchmark_name || 'Benchmark not specified')}${portfolio.file_name ? ` · Excel: ${esc(portfolio.file_name)}` : ''}</span>
             </button>
             <div class="saved-theme-actions">
-              <button type="button" class="btn btn-sm btn-ghost saved-theme-del" data-del-portfolio="${esc(portfolio.id)}" title="Delete this portfolio" aria-label="Delete ${esc(portfolio.name)}">🗑</button>
+              <button type="button" class="btn btn-sm btn-ghost saved-theme-del" data-del-portfolio="${esc(portfolio.id)}" title="Delete this portfolio" aria-label="Delete ${esc(portfolio.name)}">Delete</button>
             </div>
           </li>`).join('')}
       </ul>
@@ -2027,25 +2145,23 @@ async function viewSources() {
   setPageHeader('STEP 3', 'Source Documents',
     'Find and upload company filings');
   const portfolios = state.portfolio_imports || [];
-  const portfolio = portfolios.find(p => p.id === selectedSourcePortfolioId) || portfolios.at(-1);
-  selectedSourcePortfolioId = portfolio?.id || '';
+  const portfolio = portfolios.find(p => p.id === selectedDashboardPortfolioId && p.theme_id === selectedDashboardThemeId);
+  if (!portfolio) {
+    $('#page-actions').innerHTML = '';
+    $('#page-content').innerHTML = '<div class="panel">Select a theme and portfolio in Portfolio Exposure Dashboard to view source documents.</div>';
+    return;
+  }
   const portfolioRows = portfolio?.rows || [];
   const companyIds = new Set(portfolioRows.map(row => row.company_id).filter(id => id && id !== 'CASH'));
   const companies = (state.companies || []).filter(company => companyIds.has(company.id));
   const sources = (state.sources || []).filter(source => companyIds.has(source.company_id));
-  const theme     = (state.themes  || []).filter(t=>t.approved).at(-1);
+  const theme     = (state.themes || []).find(t => t.id === selectedDashboardThemeId);
 
   $('#page-actions').innerHTML = '';
   const portfolioSelectorHtml = `
-    <div class="dashboard-selectors" style="grid-template-columns:minmax(220px, 1fr)">
-      <label class="dashboard-selector">
-        <span>Portfolio</span>
-        <select id="source-portfolio-select" ${portfolios.length ? '' : 'disabled'}>
-          ${portfolios.length
-            ? portfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolio?.id ? 'selected' : ''}>${esc(p.name)}${p.holdings_date ? ` · ${esc(p.holdings_date)}` : ''}</option>`).join('')
-            : '<option value="">No portfolios imported</option>'}
-        </select>
-      </label>
+    <div class="panel">
+      <div class="field-label">Portfolio</div>
+      <strong>${esc(portfolio.name)}</strong>
     </div>`;
 
   const SOURCE_TYPES = [
@@ -2071,6 +2187,7 @@ async function viewSources() {
   }).join('');
 
   const latestSearchRun = (state.search_runs || []).at(-1) || null;
+  monitorSourceSearches();
   const portfolioCompanyIds = new Set(companies.map(company => company.id));
   const candidateResults = (latestSearchRun?.results || [])
     .filter(result => portfolioCompanyIds.has(result.company_id));
@@ -2105,11 +2222,11 @@ async function viewSources() {
         <div class="form-section">
           <div style="margin-bottom:12px;padding:10px 12px;background:var(--teal-50);border-radius:6px;border:1px solid var(--teal-200)">
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--teal-900);cursor:pointer">
-              <input type="checkbox" id="src-stick-earnings-call" style="width:auto">
-              <span>Stick to latest earnings call document</span>
+              <input type="checkbox" id="src-latest-documents" style="width:auto" checked>
+              <span id="latest-documents-label">Using latest documents</span>
             </label>
             <div class="text-muted text-small" style="margin-left:22px;margin-top:2px">
-              Restricts source discovery to the latest quarterly earnings conference call transcript for direct management commentary.
+              Find the most up-to-date documents in every source category, published on or before the cutoff date. Fiscal period is ignored when enabled.
             </div>
           </div>
 
@@ -2129,24 +2246,24 @@ async function viewSources() {
           <div class="form-grid">
             <div class="form-group">
               <label class="field-label">Reporting period</label>
-              <input type="text" id="src-period" placeholder="e.g. FY2025"
-                value="${esc(theme?.cutoff ? 'FY'+theme.cutoff.slice(0,4) : 'FY2025')}">
+              <input type="number" id="src-period" inputmode="numeric" min="1000" max="9999" step="1" placeholder="e.g. 2025" disabled>
             </div>
             <div class="form-group">
               <label class="field-label">Evidence cutoff date</label>
-              <input type="date" id="src-cutoff" value="${esc(theme?.cutoff||new Date().toISOString().slice(0,10))}">
+              <input type="date" id="src-cutoff" disabled>
             </div>
           </div>
         </div>
 
         <div class="btn-group">
-          <button class="btn btn-primary" id="btn-run-search" ${companies.length===0?'disabled':''}>
-            ✦ Search uploaded documents
+          <button class="btn btn-primary" id="btn-run-search" ${companies.length===0 || latestSearchRun?.status === 'running' ? 'disabled' : ''}>
+            ✦ Ask AI for source documents
           </button>
           <span class="text-muted text-small">
-            Filters uploaded documents by company, source type and cutoff.
+            Searches preferred websites first, then other public sources. Runs for up to 10 minutes.
           </span>
         </div>
+        <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${latestSearchRun?.status === 'running' ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Searching for source documents in the background… You can continue browsing.' : ''}</div>
       </div>
 
       <!-- Source library + manual upload -->
@@ -2219,7 +2336,7 @@ async function viewSources() {
                 <input type="url" name="url" placeholder="https://…">
               </div>
             </div>
-            <button type="submit" class="btn btn-primary btn-sm">Upload &amp; extract passages</button>
+            <button type="submit" class="btn btn-primary btn-sm">Upload</button>
           </form>
         </div>
 
@@ -2237,10 +2354,6 @@ async function viewSources() {
       </div>
     </div>`;
 
-  $('#source-portfolio-select')?.addEventListener('change', event => {
-    selectedSourcePortfolioId = event.target.value;
-    viewSources();
-  });
 
   // Real-time filtering by SEDOL, ticker or company name
   const filterChecklist = (query) => {
@@ -2261,33 +2374,67 @@ async function viewSources() {
     }
   });
 
-  // Stick to earnings call toggle
-  $('#src-stick-earnings-call')?.addEventListener('change', e => {
-    if (e.target.checked) {
-      $$('input[name="source_types"]').forEach(cb => {
-        cb.checked = (cb.value === 'earnings_call');
-      });
-    }
-  });
 
-  $('#btn-run-search').onclick = () => run(async () => {
+  const updateLatestDocumentFields = () => {
+    const latest = $('#src-latest-documents').checked;
+    const periodInput = $('#src-period');
+    const cutoffInput = $('#src-cutoff');
+    const parts = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+    const part = type => parts.find(p => p.type === type).value;
+    const today = `${part('year')}-${part('month')}-${part('day')}`;
+    periodInput.disabled = latest;
+    cutoffInput.disabled = latest;
+    $('#latest-documents-label').textContent = latest ? 'Using latest documents' : 'Use latest available documents';
+    for (const input of [periodInput, cutoffInput]) {
+      input.style.backgroundColor = latest ? '#f1f5f9' : '';
+      input.style.color = latest ? '#64748b' : '';
+      input.style.cursor = latest ? 'not-allowed' : '';
+      input.setAttribute?.('aria-disabled', String(latest));
+    }
+    if (latest) {
+      periodInput.value = '';
+      periodInput.placeholder = 'Using latest documents';
+      cutoffInput.value = today;
+    } else {
+      periodInput.value = '';
+      periodInput.placeholder = 'e.g. 2025';
+      cutoffInput.value = theme?.cutoff || today;
+    }
+  };
+  $('#src-latest-documents').addEventListener('change', updateLatestDocumentFields);
+  updateLatestDocumentFields();
+
+  $('#btn-run-search').onclick = async () => {
+    if ($('#src-latest-documents').checked) updateLatestDocumentFields();
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
     const selectedTypes = Array.from($$('input[name="source_types"]:checked')).map(cb => cb.value);
-    const period = $('#src-period')?.value || 'FY2025';
+    const period = $('#src-period')?.value || '';
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
-    const stickEarnings = $('#src-stick-earnings-call')?.checked ?? false;
+    const latestDocuments = $('#src-latest-documents')?.checked ?? true;
+    if (!latestDocuments && !/^\d{4}$/.test(period)) {
+      showAlert('Enter a four-digit reporting year, for example 2025.', 'Invalid reporting year');
+      return;
+    }
+    const button = $('#btn-run-search');
+    button.disabled = true;
+    $('#source-search-status').innerHTML = '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Starting source search…';
+    try {
     const res = await api('source/search', {
+      discover_web: true,
       company_ids: selectedCompanyIds,
-      source_types: stickEarnings ? ['earnings_call'] : selectedTypes,
+      source_types: selectedTypes,
       period: period,
       cutoff: cutoff,
-      stick_to_earnings_call: stickEarnings
+      latest_documents: latestDocuments
     });
     await refresh();
-    render();
-    const count = res.results?.length || 0;
-    notice(`Search complete. ${count} uploaded documents evaluated against cutoff (${cutoff}). Review the results below.`, 'success');
-  }, 'Searching for documents…');
+    if (currentView === 'sources') viewSources();
+    monitorSourceSearches();
+    } catch (error) {
+      button.disabled = false;
+      if (currentView === 'sources') $('#source-search-status').textContent = `Could not start search: ${error.message}`;
+    }
+  };
 
   $('#source-form').onsubmit = e => {
     e.preventDefault();
@@ -2397,7 +2544,7 @@ function sourceLibrary(sources, companies, portfolio) {
             return `
               <tr class="source-master-row" id="src-master-${esc(comp.id)}" data-search="${esc(searchTerms)}"
                 onclick="toggleSourceRow('${esc(comp.id)}')"
-                style="cursor:pointer;border-bottom:1px solid var(--slate-100);transition:background 0.15s ease">
+                style="cursor:pointer;border-bottom:1px solid var(--slate-100);transition:background 0.15s ease;${(state.search_runs || []).some(r => r.status === 'incomplete' && (r.missing || []).some(m => m.company_id === comp.id)) ? 'background:#fef9c3' : ''}">
                 <td style="text-align:center;font-weight:600;font-size:12px;color:var(--slate-400)">
                   <span class="src-chevron" id="src-chev-${esc(comp.id)}" style="display:inline-block;transition:transform 0.2s">▸</span>
                 </td>
@@ -2457,7 +2604,7 @@ function sourceLibrary(sources, companies, portfolio) {
                       const primaryDoc = matched[0];
 
                       return `
-                        <div style="background:#ffffff;border:1px solid ${isIngested ? '#99f6e4' : '#e2e8f0'};border-radius:8px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,0.03);position:relative">
+                        <div style="background:${!isIngested && (state.search_runs || []).some(r => r.status === 'incomplete' && (r.missing || []).some(m => m.company_id === comp.id && m.source_type === st.type)) ? '#fff1f2' : '#ffffff'};border:1px solid ${isIngested ? '#99f6e4' : '#e2e8f0'};border-radius:8px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,0.03);position:relative">
                           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px">
                             <div style="display:flex;align-items:center;gap:6px">
                               <span style="font-size:16px">${st.icon}</span>
@@ -2472,6 +2619,7 @@ function sourceLibrary(sources, companies, portfolio) {
                           </div>
 
                           ${isIngested ? `
+                            ${matched.map(doc => doc.url ? `<div><a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer">${esc(doc.title || doc.filename)} — Source URL ↗</a></div>` : `<div>${esc(doc.title || doc.filename)} — No source URL provided</div>`).join('')}
                             <div style="font-size:11.5px;color:var(--slate-700);line-height:1.4;margin:6px 0;background:#f0fdfa;padding:6px 8px;border-radius:5px;border:1px solid #ccfbf1">
                               <div style="font-weight:600;color:var(--teal-900);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(primaryDoc.title || primaryDoc.filename)}">
                                 ${esc(primaryDoc.title || primaryDoc.filename)}
@@ -2624,7 +2772,7 @@ async function viewAnalysis() {
           ✦ Analyse all ready companies (${readyCount})
         </button>` : ''}
       <div class="text-muted text-small">${state.ai_configured
-        ? `${state.calls_used} / ${state.call_cap} AI calls used`
+        ? `${state.calls_used} AI calls used`
         : `<span style="color:var(--amber-600)">⚠ AI not configured</span>`}
       </div>
       <div style="display:flex;gap:6px">
@@ -3407,10 +3555,12 @@ async function viewDashboard() {
   const portfolios = state.portfolio_imports || [];
   const snapshots = state.snapshots || [];
   const companies = state.companies || [];
-  const theme = themes.find(t => t.id === selectedDashboardThemeId) || themes.at(-1);
-  const portfolioImport = portfolios.find(p => p.id === selectedDashboardPortfolioId) || portfolios.at(-1);
+  const theme = themes.find(t => t.id === selectedDashboardThemeId);
+  const eligiblePortfolios = portfolios.filter(p => theme && p.theme_id === theme.id);
+  const portfolioImport = eligiblePortfolios.find(p => p.id === selectedDashboardPortfolioId) || eligiblePortfolios.at(-1);
   selectedDashboardThemeId = theme?.id || '';
   selectedDashboardPortfolioId = portfolioImport?.id || '';
+  saveDashboardSelection();
 
   const selectorsHtml = `
     <div style="margin-bottom:12px">
@@ -3420,13 +3570,15 @@ async function viewDashboard() {
       <label class="dashboard-selector">
         <span>Theme</span>
         <select id="dashboard-theme-select" ${themes.length ? '' : 'disabled'}>
+          <option value="">Select a theme first</option>
           ${themes.length ? themes.map(t => `<option value="${esc(t.id)}" ${t.id === theme?.id ? 'selected' : ''}>${esc(t.theme_name)}</option>`).join('') : '<option value="">No approved themes</option>'}
         </select>
       </label>
       <label class="dashboard-selector">
         <span>Portfolio</span>
-        <select id="dashboard-portfolio-select" ${portfolios.length ? '' : 'disabled'}>
-          ${portfolios.length ? portfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolioImport?.id ? 'selected' : ''}>${esc(p.name)}${p.holdings_date ? ` · ${esc(p.holdings_date)}` : ''}</option>`).join('') : '<option value="">No portfolios imported</option>'}
+        <select id="dashboard-portfolio-select">
+          ${eligiblePortfolios.length ? '' : `<option value="">${theme ? 'No portfolio for this theme' : 'Select a theme first'}</option>`}
+          ${eligiblePortfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolioImport?.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
         </select>
       </label>
     </div>`;
@@ -3441,11 +3593,25 @@ async function viewDashboard() {
     });
     $('#dashboard-theme-select')?.addEventListener('change', event => {
       selectedDashboardThemeId = event.target.value;
+      selectedDashboardPortfolioId = '';
       viewDashboard();
     });
     $('#dashboard-portfolio-select')?.addEventListener('change', event => {
+      if (!selectedDashboardThemeId) {
+        event.target.value = '';
+        clearNotice();
+        showAlert('Select a theme before selecting a portfolio.', 'Select a theme first');
+        return;
+      }
       selectedDashboardPortfolioId = event.target.value;
       viewDashboard();
+    });
+    $('#dashboard-portfolio-select')?.addEventListener('pointerdown', event => {
+      if (!selectedDashboardThemeId) {
+        event.preventDefault();
+        clearNotice();
+        showAlert('Select a theme before selecting a portfolio.', 'Select a theme first');
+      }
     });
   };
   $('#page-content').innerHTML = `${selectorsHtml}
@@ -3459,7 +3625,7 @@ async function viewDashboard() {
     renderDashboardBody(`
       <div class="empty-state">
         <div class="empty-icon">◫</div>
-        <h3>No approved themes</h3>
+        <h3>Select a theme first</h3>
         <p><a href="#" data-goto="theme">Define and approve a theme</a> to view portfolio exposure.</p>
       </div>`);
     return;

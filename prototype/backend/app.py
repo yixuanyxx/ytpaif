@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -55,8 +55,7 @@ VERSIONS = {'prompt': '1.0.0', 'extraction': '1.0.0', 'calculation': engine.VERS
 RUBRIC = {'low': 1, 'medium': 2, 'high': 3}
 
 DEFAULT_LLM_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-DEFAULT_LLM_MODEL = 'gemini-3.5-flash-lite'
-DEFAULT_LLM_MAX_CALLS = 100
+DEFAULT_LLM_MODEL = 'gemini-3.8-flash'
 DEFAULT_PORT = 8766
 
 def now():
@@ -312,6 +311,10 @@ def evidence_for(company_id, theme_id):
     return sources, {e['evidence_id'] for s in sources for e in s['evidence']}
 
 def source_search(d):
+    if d.get('discover_web'):
+        import source_discovery
+        import sys
+        return source_discovery.start(sys.modules[__name__], d)
     """Find company source documents matching criteria (YTP-17)."""
     company_ids = d.get('company_ids') or ([d['company_id']] if 'company_id' in d else [])
     stick_earnings = bool(d.get('stick_to_earnings_call'))
@@ -470,11 +473,6 @@ def llm(task, payload, run_rec):
     except ValueError:
         pass
     with LOCK:
-        calls = len(all_records('model_calls'))
-        cap_val = os.environ.get('LLM_MAX_CALLS')
-        cap = int(cap_val) if cap_val is not None and cap_val != '' else DEFAULT_LLM_MAX_CALLS
-        if calls >= cap:
-            raise ValueError('AI call cap reached. Set LLM_MAX_CALLS explicitly before running paid calls')
         call = put('model_calls', {'id': ident('call'), 'created_at': now(),
                                    'task': task, 'model': model, 'status': 'started'})
     body = {
@@ -521,8 +519,6 @@ def llm(task, payload, run_rec):
                     raise ValueError('The AI model is experiencing high demand (HTTP 503). Please try clicking again.') from None
                 raise ValueError(f'Provider HTTP {error.code}') from None
             with LOCK:
-                if len(all_records('model_calls')) >= cap:
-                    raise ValueError('Call cap reached during retry') from None
                 call = put('model_calls', {'id': ident('call'), 'created_at': now(),
                                            'task': task, 'model': model, 'status': 'retry'})
             time.sleep(2 * (attempt + 1))
@@ -650,7 +646,7 @@ def generate(d):
         return result
     except Exception as error:
         run_rec['status'] = 'failed'
-        run_rec['errors'] = [{'stage': 'taxonomy', 'reason': str(error) if isinstance(error, ValueError) else 'Malformed model taxonomy'}]
+        run_rec['errors'] = [{'stage': 'taxonomy', 'reason': str(error) if isinstance(error, (ValueError, supabase_store.SupabaseError)) else 'Malformed model taxonomy'}]
         raise ValueError(run_rec['errors'][0]['reason']) from None
     finally:
         put('runs', run_rec)
@@ -1041,10 +1037,23 @@ def snapshot_create(d):
     })
 
 def portfolio_import(d):
+    theme_id = d.get('theme_id')
+    if theme_id:
+        get('themes', theme_id)
     """Import portfolio holdings, match/create companies, and build snapshot (YTP-23, YTP-16)."""
-    import_name = d.get('name') or 'Portfolio import'
-    holdings_date = d.get('holdings_date') or date.today().isoformat()
-    benchmark_name = d.get('benchmark_name') or 'MSCI Asia ex Japan'
+    import_name = d.get('name')
+    if not isinstance(import_name, str) or not import_name.strip():
+        raise ValueError('Portfolio name is required.')
+    import_name = import_name.strip()
+    upload_today = datetime.now(timezone(timedelta(hours=8))).date()
+    holdings_date = d.get('holdings_date') or upload_today.isoformat()
+    try:
+        parsed_holdings_date = date.fromisoformat(holdings_date)
+    except (ValueError, TypeError):
+        raise ValueError('Holdings date must be a valid date (YYYY-MM-DD).') from None
+    if parsed_holdings_date > upload_today:
+        raise ValueError('Holdings date cannot be later than the upload date (Singapore time).')
+    benchmark_name = 'MSCI Asia ex Japan'
     rows_data = d.get('rows', [])
     file_content = None
     file_name = None
@@ -1190,6 +1199,7 @@ def portfolio_import(d):
     })
 
     import_record = {
+        'theme_id': theme_id,
         'id': ident('import'),
         'name': import_name,
         'uploaded_at': now(),
@@ -1219,8 +1229,6 @@ def portfolio_import(d):
 # ── State ─────────────────────────────────────────────────────────────────────
 
 def state():
-    cap_val = os.environ.get('LLM_MAX_CALLS')
-    call_cap = int(cap_val) if cap_val is not None and cap_val != '' else DEFAULT_LLM_MAX_CALLS
     key = os.environ.get('LLM_API_KEY') or os.environ.get('GEMINI_API_KEY', '')
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
@@ -1233,7 +1241,7 @@ def state():
         'ai_model': model if key else '',
         'checker_configured': bool(checker_key),
         'checker_model': checker_model if checker_key else '',
-        'call_cap': call_cap,
+        'call_cap': None,
         'calls_used': len(all_records('model_calls')),
         'max_tiers': engine.MAX_TIERS,
         'max_children': engine.MAX_CHILDREN

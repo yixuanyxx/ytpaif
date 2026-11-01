@@ -34,6 +34,53 @@ function setup() {
   return {context,node,rows,portfolioCards,deletePortfolioButtons,loadThemeButtons,deleteThemeButtons,storage,
     run:code=>vm.runInContext(code,context)};
 }
+
+test('Portfolio format rejects missing and duplicate template headers', async()=>{
+  for (const headers of [
+    ['Company notes','Portfolio wt','Reference wt','SEDOL'],
+    ['Company','Company','Portfolio wt','Reference wt','SEDOL'],
+    ['Company','SEDOL','Reference wt']
+  ]) {
+    const {context,run}=setup();
+    context.XLSX={read:()=>({Sheets:{Sheet1:{}},SheetNames:['Sheet1']}),
+      utils:{sheet_to_json:()=>[headers,['TSMC','123',1,1]]}};
+    context.testFile={arrayBuffer:async()=>new ArrayBuffer(0)};
+    await assert.rejects(run('parseExcelFile(testFile)'),/column|headers/i);
+  }
+});
+
+test('Portfolio format accepts extra columns and extracts only relevant fields', async()=>{
+  const {context,run}=setup();
+  const headers=['Company','Bloomberg ticker','Country','Sector','SEDOL','Portfolio wt','Reference wt','Active wt','AI rationale','Remarks'];
+  context.XLSX={read:()=>({Sheets:{Sheet1:{}},SheetNames:['Sheet1']}),
+    utils:{sheet_to_json:()=>[headers,['TSMC','2330 TT','Taiwan','Technology','6889106',1,1,0,'Ignored rationale','Ignored remark']]}};
+  context.testFile={arrayBuffer:async()=>new ArrayBuffer(0)};
+  const rows=await run('parseExcelFile(testFile)');
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].name,'TSMC');
+  assert.equal(rows[0].portfolio_wt,1);
+  assert.doesNotMatch(JSON.stringify(rows),/Ignored rationale|Ignored remark/);
+});
+test('Dashboard selection survives reload and rejects a mismatched portfolio',()=>{
+  const first=setup();
+  first.run("selectedDashboardThemeId='t1'; selectedDashboardPortfolioId='p1'; saveDashboardSelection()");
+  const next=setup();
+  next.storage.set('theme-lab-dashboard-selection',first.storage.get('theme-lab-dashboard-selection'));
+  next.run("state.themes=[{id:'t1',approved:true}]; state.portfolio_imports=[{id:'p1',theme_id:'t1'}]; restoreDashboardSelection()");
+  assert.equal(next.run('selectedDashboardThemeId'),'t1');
+  assert.equal(next.run('selectedDashboardPortfolioId'),'p1');
+  next.run("state.portfolio_imports[0].theme_id='other'; restoreDashboardSelection()");
+  assert.equal(next.run('selectedDashboardPortfolioId'),'');
+});
+
+test('AI source completion notifies on other pages only once',()=>{
+  const {run,node}=setup();
+  run("currentView='dashboard'; trackedSourceSearches.add('job1'); state.search_runs=[{id:'job1',status:'incomplete',results_count:3,missing:[{}]}]; notifyFinishedSourceSearches()");
+  assert.match(node('#notice-area').innerHTML,/AI source search is over.*3 documents saved.*1 company/);
+  run('clearNotice(); notifyFinishedSourceSearches()');
+  assert.equal(node('#notice-area').innerHTML,'');
+});
+
 test('The selected page is restored after reloading the app',()=>{
   const first = setup();
   first.run(`setView('sources')`);

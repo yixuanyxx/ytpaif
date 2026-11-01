@@ -11,6 +11,15 @@ import zipfile
 from test_fixtures import MemoryStore, demo
 
 class AppFlowTest(unittest.TestCase):
+    def test_future_holdings_date_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'Holdings date cannot be later'):
+            self.app.portfolio_import({'name': 'Future', 'holdings_date': '2999-01-01', 'rows': []})
+
+    def test_portfolio_name_is_required(self):
+        for name in (None, '', '   ', 123):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'Portfolio name is required'):
+                self.app.portfolio_import({'name': name, 'rows': []})
+
     def setUp(self):
         # Add prototype to sys.path so app is imported from prototype
         import sys
@@ -322,10 +331,13 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(before, len(self.app.all_records('cases')))
         self.assertEqual(self.app.all_records('runs')[-1]['status'], 'failed')
 
-    def test_provider_call_cap(self):
+    def test_provider_ignores_legacy_call_cap(self):
         with patch.dict(os.environ, {'LLM_API_KEY': 'test', 'LLM_MODEL': 'test', 'LLM_MAX_CALLS': '0'}):
-            with self.assertRaisesRegex(ValueError, 'cap'):
-                self.app.llm('test', {}, {'usage': []})
+            with patch.object(self.app, 'urlopen') as send:
+                send.return_value.__enter__.return_value = io.BytesIO(
+                    b'{"choices":[{"message":{"content":"{\\"nodes\\":[]}"}}]}')
+                self.assertEqual(self.app.llm('test', {}, {'usage': []}), {'nodes': []})
+                send.assert_called_once()
 
     def test_security_company_mapping(self):
         p = [dict(company_id='DEMO_A', security_id='one', weight=1, snapshot_id='p', as_of_date='2026-10-03')]

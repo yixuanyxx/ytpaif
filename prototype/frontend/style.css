@@ -938,12 +938,32 @@ tr:hover td { background: var(--slate-50); }
   gap: 8px;
   padding-right: 10px;
 }
+.saved-theme-row.portfolio-selected {
+  background: #fef9c3;
+  border-color: #eab308;
+  box-shadow: inset 4px 0 0 #eab308;
+}
+.saved-theme-row.portfolio-selected:hover { background: #fef08a; }
 .saved-theme-del {
-  opacity: 0.55;
-  transition: opacity 0.15s ease, color 0.15s ease;
+  opacity: 1;
+  min-width: 42px;
+  min-height: 42px;
+  color: #b91c1c;
+  background: #fff1f2;
+  border: 1px solid #fda4af;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .saved-theme-row:hover .saved-theme-del { opacity: 1; }
-.saved-theme-del:hover { color: var(--red-600, #dc2626); }
+.saved-theme-del:hover { color: #991b1b; background: #ffe4e6; }
+.saved-theme-del:focus-visible { outline: 3px solid #b91c1c; outline-offset: 3px; }
+.saved-theme-del svg { width: 22px; height: 22px; }
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    TAXONOMY MIND MAP  (left-to-right hierarchy)
    Theme â†’ Tier-1 â†’ Tier-2 â†’ Tier-3. Connectors are rendered only where a

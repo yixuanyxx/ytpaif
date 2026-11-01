@@ -249,8 +249,9 @@ class SupabaseStore:
                     file_content_type=record_payload.get('file_content_type'),
                 )
         query = {'on_conflict': 'id'}
-        if kind == 'runs':
-            # analysis_runs has no name column; retain any name inside payload only.
+        if kind in ('search_runs', 'runs', 'cases', 'reviews', 'model_outputs',
+                    'model_calls', 'provider_outputs', 'cache'):
+            # These tables store descriptive metadata in payload, without a name column.
             payload.pop('name', None)
         request('/rest/v1/' + table, method='POST', query=query, payload=payload,
                 headers={'Prefer': 'resolution=merge-duplicates,return=minimal'})
