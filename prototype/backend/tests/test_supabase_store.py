@@ -32,6 +32,16 @@ class SupabasePersistenceTest(unittest.TestCase):
         self.assertEqual(request.get_header('Apikey'), 'sb_secret_test')
         self.assertIsNone(request.get_header('Authorization'))
 
+    def test_analysis_run_does_not_send_unsupported_name_column(self):
+        record = {'id': 'run-test', 'status': 'classifying', 'task': 'taxonomy',
+                  'name': 'Retained metadata'}
+        with patch.object(supabase_store, 'request') as request:
+            supabase_store.SupabaseStore().put('runs', record)
+        row = request.call_args.kwargs['payload']
+        self.assertNotIn('name', row)
+        self.assertEqual(row['payload'], record)
+        self.assertEqual(request.call_args.args[0], '/rest/v1/analysis_runs')
+
     def test_store_routes_each_record_kind_to_its_dedicated_table(self):
         requests = []
 
