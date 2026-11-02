@@ -409,6 +409,7 @@ test('Source Documents has an independent portfolio selector and scopes the AI s
       selector === 'input[name="source_types"]:checked' ? [{value:'annual_report'}] : [];
   await node('#btn-run-search').onclick();
   assert.equal(run('searchCalls[0].path'),'source/search');
+  assert.equal(run('searchCalls[0].data.portfolio_id'),'portfolio-a');
   assert.equal(run('searchCalls[0].data.discover_web'),true);
   assert.equal(run('searchCalls[0].data.latest_documents'),true);
   assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.company_ids'))),['company-a']);

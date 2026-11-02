@@ -2517,6 +2517,9 @@ async function viewSources() {
     $('#source-search-status').innerHTML = '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Starting source search…';
     try {
     const res = await api('source/search', {
+      // Source discovery is scoped to the portfolio displayed on this page.
+      // The backend requires this ID to load its holdings and create the job.
+      portfolio_id: portfolio.id,
       discover_web: true,
       company_ids: selectedCompanyIds,
       source_types: selectedTypes,
