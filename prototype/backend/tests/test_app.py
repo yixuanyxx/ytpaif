@@ -8,9 +8,55 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 import zipfile
+from urllib.error import HTTPError
 from test_fixtures import MemoryStore, demo
 
 class AppFlowTest(unittest.TestCase):
+    def test_editing_link_only_source_requires_a_verified_document_url(self):
+        source = self.app.all_records('sources')[0]
+        source.update(storage_mode='url_only', link_status='verified')
+        self.app.put('sources', source)
+        with patch('source_discovery.verify_document_link', side_effect=ValueError('Not a document link')) as verify:
+            with self.assertRaisesRegex(ValueError, 'Not a document link'):
+                self.app.source_update({'id': source['id'], 'url': 'https://example.com/'})
+        verify.assert_called_once()
+
+    def test_general_ai_uses_gemini_38_without_grounding(self):
+        output = json.dumps({'choices': [{'message': {'content': '{}'}}]}).encode()
+        with patch.dict(os.environ, {'LLM_API_KEY': 'gemini-test-key', 'LLM_MODEL': ''}), \
+                patch.object(self.app, 'urlopen', side_effect=lambda *a, **kw: io.BytesIO(output)) as send:
+            for task in ('taxonomy', 'node breakdown', 'extraction', 'classification'):
+                self.app.llm(task, {}, {'usage': []})
+        self.assertEqual(send.call_count, 4)
+        for call in send.call_args_list:
+            request = call.args[0]
+            body = json.loads(request.data)
+            self.assertEqual(body['model'], 'gemini-3.8-flash')
+            self.assertNotIn('tools', body)
+            self.assertEqual(request.get_header('Authorization'), 'Bearer gemini-test-key')
+
+    def test_verification_uses_claude_sonnet_5_and_its_own_key(self):
+        case = self.app.all_records('cases')[0]
+        output = json.dumps({'content': [{'type': 'text', 'text': '{"verdict":"VERIFIED"}'}]}).encode()
+        with patch.dict(os.environ, {'CHECKER_LLM_API_KEY': 'claude-test-key', 'CHECKER_LLM_MODEL': '',
+                                    'CHECKER_LLM_ENDPOINT': 'https://api.anthropic.com/v1/messages'}), \
+                patch.object(self.app, 'urlopen', return_value=io.BytesIO(output)) as send:
+            result = self.app.check_case({'case_id': case['id']})
+        send.assert_called_once()
+        request = send.call_args.args[0]
+        self.assertEqual(json.loads(request.data)['model'], 'claude-sonnet-5')
+        self.assertEqual(request.get_header('X-api-key'), 'claude-test-key')
+        self.assertEqual(case['checker_result']['checker_model'], 'claude-sonnet-5')
+
+    def test_verification_does_not_silently_fallback_to_another_model(self):
+        case = self.app.all_records('cases')[0]
+        with patch.dict(os.environ, {'CHECKER_LLM_API_KEY': 'claude-test-key',
+                                    'CHECKER_LLM_MODEL': 'claude-sonnet-5'}), \
+                patch.object(self.app, 'urlopen', side_effect=HTTPError('https://provider', 404, 'Model unavailable', {}, None)) as send:
+            with self.assertRaisesRegex(ValueError, 'Claude Checker API error: HTTP 404'):
+                self.app.check_case({'case_id': case['id']})
+        send.assert_called_once()
+
     def test_future_holdings_date_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'Holdings date cannot be later'):
             self.app.portfolio_import({'name': 'Future', 'holdings_date': '2999-01-01', 'rows': []})
@@ -239,6 +285,19 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(source['bloomberg_ticker'], 'DEMO_A')
         self.assertEqual(source['sedol'], '')
         self.assertEqual(source['cutoff'], '2026-10-01')
+        same_document = {
+            'company_id': 'DEMO_A', 'filename': 'metadata.txt',
+            'content': base64.b64encode(
+                b'Annual report evidence with enough text to create a source passage and validate stored document metadata.'
+            ).decode(),
+            'publication_date': '2026-01-02', 'period': 'FY2025',
+            'cutoff': '2026-10-01', 'url': 'https://example.test/annual-report',
+            'source_type': 'regulatory_filing',
+        }
+        filing = self.app.source_ingest(same_document)
+        self.assertEqual(filing['source_type'], 'regulatory_filing')
+        self.assertNotEqual(filing['id'], source['id'])
+        self.assertEqual(self.app.source_ingest(same_document)['id'], filing['id'])
         with self.assertRaisesRegex(ValueError, 'isoformat|format'):
             self.app.source_ingest({
                 'company_id': 'DEMO_A', 'filename': 'invalid-date.txt',

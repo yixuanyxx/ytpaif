@@ -56,6 +56,7 @@ RUBRIC = {'low': 1, 'medium': 2, 'high': 3}
 
 DEFAULT_LLM_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
 DEFAULT_LLM_MODEL = 'gemini-3.8-flash'
+DEFAULT_CHECKER_MODEL = 'claude-sonnet-5'
 DEFAULT_PORT = 8766
 
 def now():
@@ -77,8 +78,15 @@ def _unique_node_id(base, used):
 def put(kind, record):
     return store.put(kind, record)
 
+def put_many(kind, records):
+    return store.put_many(kind, records)
+
 def all_records(kind):
-    return store.all_records(kind)
+    records = store.all_records(kind)
+    if kind == 'search_runs':
+        import source_jobs
+        return source_jobs.Queue().merge(records)
+    return records
 
 def get(kind, rid):
     return store.get(kind, rid)
@@ -246,7 +254,8 @@ def source_ingest(d):
     for s in all_records('sources'):
         if (s['sha256'] == digest and s['company_id'] == company['id']
                 and s['publication_date'] == d['publication_date']
-                and s['period'] == d['period'] and s.get('url', '') == url):
+                and s['period'] == d['period'] and s.get('url', '') == url
+                and s.get('source_type') == d.get('source_type', 'annual_report')):
             return s
     sid = ident('source')
     storage_path = 'sources/' + sid + ext
@@ -291,6 +300,10 @@ def source_update(d):
     url = str(d.get('url', source.get('url', ''))).strip()
     if url and urlparse(url).scheme not in ('http', 'https'):
         raise ValueError('Public source URL must use HTTP or HTTPS')
+    if source.get('storage_mode') == 'url_only' and url != source.get('url'):
+        import source_discovery
+        url, _ = source_discovery.verify_document_link({**source, 'url': url, 'source_type': source_type})
+        source['link_verified_at'] = now()
     filename = Path(str(d.get('filename', source['filename']))).name.strip()
     if not filename:
         raise ValueError('Document name is required')
@@ -824,7 +837,7 @@ def check_case(d):
 
     endpoint = os.environ.get('CHECKER_LLM_ENDPOINT') or 'https://api.anthropic.com/v1/messages'
     key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
-    model = os.environ.get('CHECKER_LLM_MODEL') or 'claude-sonnet-5'
+    model = os.environ.get('CHECKER_LLM_MODEL') or DEFAULT_CHECKER_MODEL
 
     if not key:
         raise ValueError('CHECKER_LLM_API_KEY (Claude key) is not configured in .env')
@@ -878,9 +891,8 @@ def check_case(d):
     user_prompt = f"Audit the following case:\n{json.dumps(audit_payload, indent=2)}"
 
     candidate_models = [model]
-    for alt in ('claude-sonnet-5', 'claude-sonnet-5-5', 'claude-sonnet-4-6'):
-        if alt not in candidate_models:
-            candidate_models.append(alt)
+    # Verification stays on the configured Claude model. Never silently switch
+    # generations or route the independent verifier through Gemini.
 
     last_err = None
     output_obj = None
@@ -1240,7 +1252,7 @@ def state():
     key = os.environ.get('LLM_API_KEY') or os.environ.get('GEMINI_API_KEY', '')
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
-    checker_model = os.environ.get('CHECKER_LLM_MODEL', 'claude-sonnet-5')
+    checker_model = os.environ.get('CHECKER_LLM_MODEL') or DEFAULT_CHECKER_MODEL
     return {
         **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in all_records(k)] if k == 'sources' else all_records(k)) for k in
            ('themes', 'companies', 'sources', 'cases', 'reviews', 'runs', 'snapshots',
@@ -1376,6 +1388,8 @@ if __name__ == '__main__':
     print(f'Theme Lab v1: http://127.0.0.1:{port}', flush=True)
     print('Local access only. Ctrl+C stops the application.', flush=True)
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    import source_jobs
+    source_jobs.ensure_worker()
     while True:
         try:
             server.serve_forever()

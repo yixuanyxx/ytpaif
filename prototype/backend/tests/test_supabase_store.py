@@ -9,6 +9,20 @@ import supabase_store
 
 
 class SupabasePersistenceTest(unittest.TestCase):
+    def test_bulk_source_upsert_uses_one_request_and_same_mapping(self):
+        store = supabase_store.SupabaseStore()
+        records = [{'id': str(i), 'company_id': 'a', 'source_type': 'annual_report',
+                    'url': f'https://example.com/{i}', 'extraction_status': 'not_requested',
+                    'evidence': []} for i in range(3)]
+        with patch.object(supabase_store, 'request') as request:
+            self.assertEqual(store.put_many('sources', records), records)
+        request.assert_called_once()
+        self.assertEqual(request.call_args.args[0], '/rest/v1/source_documents')
+        rows = request.call_args.kwargs['payload']
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row['evidence'] == [] for row in rows))
+        self.assertEqual([row['payload']['url'] for row in rows], [r['url'] for r in records])
+
     def setUp(self):
         self.env = patch.dict(os.environ, {
             'SUPABASE_URL': 'https://project.example',

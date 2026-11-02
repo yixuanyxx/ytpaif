@@ -73,6 +73,8 @@ def request(path, method='GET', payload=None, headers=None, query=None, raw=None
 def upload_source(storage_path, content, extension):
     path = '/storage/v1/object/source-documents/' + quote(storage_path, safe='/')
     request(path, method='POST', headers={
+        # Keep original HTML bytes as plain text: the existing private bucket
+        # accepts PDF/plain text and must not execute downloaded active content.
         'Content-Type': 'application/pdf' if extension == '.pdf' else 'text/plain',
         'x-upsert': 'true',
     }, raw=content)
@@ -168,7 +170,7 @@ class SupabaseStore:
             raise ValueError(f'Unknown {kind} ID')
         return value
 
-    def put(self, kind, record):
+    def _record_payload(self, kind, record):
         record_payload = dict(record)
         payload = {'id': record['id'], 'payload': record_payload}
         table = self._table(kind)
@@ -248,14 +250,26 @@ class SupabaseStore:
                     file_size=record_payload.get('file_size'),
                     file_content_type=record_payload.get('file_content_type'),
                 )
-        query = {'on_conflict': 'id'}
         if kind in ('search_runs', 'runs', 'cases', 'reviews', 'model_outputs',
                     'model_calls', 'provider_outputs', 'cache'):
             # These tables store descriptive metadata in payload, without a name column.
             payload.pop('name', None)
-        request('/rest/v1/' + table, method='POST', query=query, payload=payload,
+        return payload, record_payload
+
+    def put(self, kind, record):
+        payload, record_payload = self._record_payload(kind, record)
+        request('/rest/v1/' + self._table(kind), method='POST', query={'on_conflict': 'id'}, payload=payload,
                 headers={'Prefer': 'resolution=merge-duplicates,return=minimal'})
         return record_payload
+
+    def put_many(self, kind, records):
+        if not records:
+            return []
+        rows = [self._record_payload(kind, record) for record in records]
+        request('/rest/v1/' + self._table(kind), method='POST', query={'on_conflict': 'id'},
+                payload=[row[0] for row in rows],
+                headers={'Prefer': 'resolution=merge-duplicates,return=minimal'})
+        return [row[1] for row in rows]
 
     def delete(self, kind, record_id):
         table = self._table(kind)
