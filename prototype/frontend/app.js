@@ -404,7 +404,11 @@ async function viewTheme(overrideThemeId) {
   }
   const savedThemes = (state.themes || []).filter(t => t.approved);
   if (_activeThemeId === null) {
-    _activeThemeId = '';
+    // Theme Definition is the editor for the theme selected in the Portfolio
+    // Exposure Dashboard. Only the explicit New theme action opens a blank
+    // editor, so a reload or normal navigation cannot hide a saved taxonomy.
+    _activeThemeId = savedThemes.some(t => t.id === selectedDashboardThemeId)
+      ? selectedDashboardThemeId : '';
   }
   // An empty active ID means "new blank theme"; saved themes are only loaded
   // after an explicit selection.
@@ -3638,6 +3642,7 @@ async function viewDashboard() {
     $('#dashboard-theme-select')?.addEventListener('change', event => {
       selectedDashboardThemeId = event.target.value;
       selectedDashboardPortfolioId = '';
+      _activeThemeId = selectedDashboardThemeId || '';
       viewDashboard();
     });
     $('#dashboard-portfolio-select')?.addEventListener('change', event => {

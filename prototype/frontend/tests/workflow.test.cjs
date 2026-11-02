@@ -193,15 +193,16 @@ test('Dashboard New theme sits above the selector and opens a blank editor',asyn
   assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value=""/);
 });
 
-test('Theme Definition opens a new theme by default and can explicitly load a saved theme',async()=>{
+test('Theme Definition loads the dashboard-selected theme and keeps New theme blank',async()=>{
   const {run,node} = setup();
-  run(`state.themes=[{id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[]}]`);
+  run(`state.themes=[{id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[
+    {node_id:'compute',parent_id:null,name:'Compute'},
+    {node_id:'chips',parent_id:'compute',name:'Chips'}
+  ]}]; _activeThemeId=null`);
   await run("selectedDashboardThemeId='theme-1'; setView('theme')");
-  assert.match(node('#page-content').innerHTML,/New theme scope/);
-  assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value=""/);
-  await run("viewTheme('theme-1')");
   assert.match(node('#page-content').innerHTML,/Edit theme scope/);
   assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value="AI Infrastructure"/);
+  assert.match(node('#page-content').innerHTML,/1 Tier-1 · 1 Tier-2 activities/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Saved themes|data-load-theme/);
   assert.match(node('#page-actions').innerHTML,/id="btn-new-theme"/);
   assert.match(node('#page-actions').innerHTML,/id="btn-saved-themes"/);
