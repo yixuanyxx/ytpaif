@@ -106,7 +106,7 @@ test('Portfolio and Source Documents require dashboard selections',async()=>{
   await run('viewPortfolio()');
   assert.match(node('#page-content').innerHTML,/Select a theme in Portfolio Exposure Dashboard/);
   await run('viewSources()');
-  assert.match(node('#page-content').innerHTML,/Select a theme and portfolio in Portfolio Exposure Dashboard/);
+  assert.match(node('#page-content').innerHTML,/Select a theme in Portfolio Exposure Dashboard and import a portfolio/);
   assert.doesNotMatch(node('#page-content').innerHTML,/source-portfolio-select|source-form/);
 });
 
@@ -186,20 +186,47 @@ test('Dashboard New theme sits above the selector and opens a blank editor',asyn
   await run('viewDashboard()');
   const html = node('#page-content').innerHTML;
   assert.ok(html.indexOf('id="btn-new-theme"') < html.indexOf('id="dashboard-theme-select"'));
+  assert.match(html,/class="dashboard-selectors">[\s\S]*class="dashboard-setup-header"[\s\S]*id="btn-new-theme"/);
+  assert.match(html,/Analysis setup/);
   node('#btn-new-theme').click();
   assert.match(node('#page-content').innerHTML,/New theme scope/);
   assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value=""/);
 });
 
-test('Theme Definition loads the dashboard theme without a New theme button',async()=>{
+test('Theme Definition opens a new theme by default and can explicitly load a saved theme',async()=>{
   const {run,node} = setup();
   run(`state.themes=[{id:'theme-1',theme_name:'AI Infrastructure',approved:true,nodes:[]}]`);
   await run("selectedDashboardThemeId='theme-1'; setView('theme')");
+  assert.match(node('#page-content').innerHTML,/New theme scope/);
+  assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value=""/);
+  await run("viewTheme('theme-1')");
   assert.match(node('#page-content').innerHTML,/Edit theme scope/);
   assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value="AI Infrastructure"/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Saved themes|data-load-theme/);
-  assert.doesNotMatch(node('#page-content').innerHTML,/id="btn-new-theme"/);
-  assert.equal(node('#page-actions').innerHTML,'');
+  assert.match(node('#page-actions').innerHTML,/id="btn-new-theme"/);
+  assert.match(node('#page-actions').innerHTML,/id="btn-saved-themes"/);
+  node('#btn-new-theme').click();
+  assert.match(node('#page-content').innerHTML,/New theme scope/);
+  assert.match(node('#page-content').innerHTML,/name="theme_name"[^>]*value=""/);
+});
+test('Theme Definition shows saved themes and loads one for editing',async()=>{
+  const {run,node,loadThemeButtons} = setup();
+  run(`state.themes=[
+    {id:'theme-a',theme_name:'AI Infrastructure',approved:true,nodes:[]},
+    {id:'theme-b',theme_name:'Renewable Energy',approved:true,nodes:[]}
+  ]`);
+  loadThemeButtons.push({
+    dataset:{loadTheme:'theme-b'},
+    addEventListener(type, handler) { this[type] = handler; }
+  });
+  await run('viewTheme()');
+  node('#btn-saved-themes').click();
+  assert.match(node('#page-content').innerHTML,/AI Infrastructure/);
+  assert.match(node('#page-content').innerHTML,/Renewable Energy/);
+  assert.match(node('#page-actions').innerHTML,/aria-expanded="true"/);
+  loadThemeButtons[0].onclick();
+  assert.match(node('#page-content').innerHTML,/Edit theme scope/);
+  assert.match(node('#page-content').innerHTML,/value="Renewable Energy"/);
 });
 test('Generate taxonomy updates the mind map draft without saving a theme',async()=>{
   const {run,node} = setup();
@@ -249,7 +276,7 @@ test('Portfolio Import defaults to Excel import, lists saved portfolios, and ope
         sedol:'6889106',country:'Taiwan',sector:'Semiconductors',
         portfolio_weight:0.2,reference_weight:0.1,active_weight:0.1}]
     }]
-  }; selectedDashboardThemeId='theme-1';`);
+  }; selectedDashboardThemeId='theme-1'; selectedDashboardPortfolioId='portfolio-1';`);
   portfolioCards.push({
     dataset:{openPortfolio:'portfolio-1'},
     addEventListener(type, handler) { this[type] = handler; }
@@ -265,7 +292,9 @@ test('Portfolio Import defaults to Excel import, lists saved portfolios, and ope
   assert.match(node('#page-content').innerHTML,/data-open-portfolio="portfolio-1"/);
   assert.match(node('#page-content').innerHTML,/data-del-portfolio="portfolio-1"/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Company universe/);
+  run("selectedDashboardPortfolioId=''");
   portfolioCards[0].click();
+  assert.equal(run('selectedDashboardPortfolioId'),'');
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.match(node('#page-content').innerHTML,/Portfolio wt/);
   assert.equal(node('#page-content').innerHTML.includes('20.0%'),true);
@@ -333,8 +362,8 @@ test('Dashboard hides bounds and export; Source Documents has no search header a
   assert.doesNotMatch(node('#page-actions').innerHTML,/Search for documents/);
   assert.match(node('#page-content').innerHTML,/btn-run-search/);
 });
-test('Source Documents follows dashboard portfolio and scopes the AI search',async()=>{
-  const {run,node,context} = setup();
+test('Source Documents has an independent portfolio selector and scopes the AI search',async()=>{
+  const {run,node,context,storage} = setup();
   run(`state = {
     companies:[
       {id:'company-a',name:'TSMC',bloomberg_ticker:'2330 TT',sedol:'6889106'},
@@ -350,29 +379,71 @@ test('Source Documents follows dashboard portfolio and scopes the AI search',asy
       {id:'portfolio-b',theme_id:'theme-1',name:'Korea Growth',rows:[{company_id:'company-b',portfolio_weight:1}]}
     ]
   };
-  selectedDashboardThemeId='theme-1'; selectedDashboardPortfolioId='portfolio-b';
+  selectedDashboardThemeId='theme-1'; selectedDashboardPortfolioId='portfolio-b'; selectedSourcePortfolioId='portfolio-b';
   const searchCalls=[];
   api=async(path,data)=>{searchCalls.push({path,data});return {results:[]};};
   refresh=async()=>{};
   render=async()=>{};`);
   await run('viewSources()');
-  assert.doesNotMatch(node('#page-content').innerHTML,/id="source-portfolio-select"/);
+  assert.match(node('#page-content').innerHTML,/id="source-portfolio-select"/);
   assert.match(node('#page-content').innerHTML,/Korea Growth/);
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
 
-  run("selectedDashboardPortfolioId='portfolio-a'");
-  await run('viewSources()');
+  await node('#source-portfolio-select').change({target:{value:'portfolio-a'}});
+  assert.equal(run('selectedSourcePortfolioId'),'portfolio-a');
+  assert.equal(run('selectedDashboardPortfolioId'),'portfolio-b');
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Samsung/);
+  assert.equal(storage.get('theme-lab-source-portfolio-selection'),'portfolio-a');
 
   context.document.querySelectorAll = selector =>
-    selector === 'input[name="company_ids"]:checked' ? [{value:'company-a'}] : [];
+    selector === 'input[name="company_ids"]:checked' ? [{value:'company-a'}] :
+      selector === 'input[name="source_types"]:checked' ? [{value:'annual_report'}] : [];
   await node('#btn-run-search').onclick();
   assert.equal(run('searchCalls[0].path'),'source/search');
   assert.equal(run('searchCalls[0].data.discover_web'),true);
   assert.equal(run('searchCalls[0].data.latest_documents'),true);
   assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.company_ids'))),['company-a']);
+  assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.source_types'))),['annual_report']);
+});
+test('Source search failure explains provider quota limits and search coverage',async()=>{
+  const {run,node} = setup();
+  run(`state = {
+    companies:[{id:'company-a',name:'TSMC'}],sources:[],cases:[],themes:[],
+    search_runs:[{
+      id:'search-failed',status:'failed',results_count:0,results:[],missing:[],
+      company_ids:Array.from({length:75},(_,i)=>'company-'+i),companies_completed:[],
+      errors:[{reason:'AI source provider rate limit exceeded (HTTP 429); retry after the quota resets.'}]
+    }],
+    portfolio_imports:[{id:'portfolio-a',theme_id:'theme-1',name:'Asia Core',rows:[{company_id:'company-a'}]}]
+  };
+  selectedDashboardThemeId='theme-1';`);
+  await run('viewSources()');
+  const html = node('#page-content').innerHTML;
+  assert.match(html,/0 documents saved; 0 of 75 companies searched/);
+  assert.match(html,/Check quota, billing, and Google Search grounding access/);
+});
+test('Source Documents can cancel an active AI search',async()=>{
+  const {run,node,context} = setup();
+  context.setTimeout=()=>1;
+  run(`state = {
+    companies:[{id:'company-a',name:'TSMC',bloomberg_ticker:'2330 TT',sedol:'6889106'}],
+    sources:[],cases:[],themes:[],search_runs:[{id:'search-1',status:'running',results:[]}],
+    portfolio_imports:[{id:'portfolio-a',theme_id:'theme-1',name:'Asia Core',rows:[{company_id:'company-a'}]}]
+  };
+  selectedDashboardThemeId='theme-1';
+  currentView='sources';
+  const calls=[];
+  api=async(path,data)=>{calls.push({path,data});state.search_runs[0].status='cancelled';return {search_run:state.search_runs[0]};};
+  refresh=async()=>{};`);
+  await run('viewSources()');
+  assert.match(node('#page-content').innerHTML,/Cancel search/);
+  await node('#btn-cancel-source-search').click();
+  assert.equal(run('calls[0].path'),'source/search/cancel');
+  assert.equal(run('calls[0].data.id'),'search-1');
+  assert.equal(run('state.search_runs[0].status'),'cancelled');
+  assert.match(node('#page-content').innerHTML,/Source search stopped/);
 });
 test('Evaluate page and navigation entry are removed',()=>{
   const {run} = setup();
@@ -422,11 +493,28 @@ test('Financials use evidence and keep missing values unknown',()=>{
 });
 test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   const {run,node} = setup(); await run('viewAnalysis()');
-  assert.match(node('#page-content').innerHTML,/Analysis &amp; Review Queue/);
+  assert.equal(node('#page-title').textContent,'Calculate Exposure');
+  assert.match(node('#page-content').innerHTML,/Company-level Exposure/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/analysis-company-search|Search company name/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/max-height:480px;overflow-y:auto/);
   assert.match(node('#page-content').innerHTML,/case-detail-panel/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Targeted passage analysis|Create manual case|btn-open-manual/);
+  assert.match(node('#page-content').innerHTML,/Analyse all ready companies/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Confidence color guide|Revenue figures align across all credible sources/);
   const sidebar = fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');
-  assert.match(sidebar,/AI Analysis &amp; Review/);
+  assert.match(sidebar,/<strong>Calculate Exposure<\/strong>/);
   assert.doesNotMatch(sidebar,/data-view="review"/);
+});
+test('Queue Upload opens manual upload with the clicked company selected',async()=>{
+  const {run,node} = setup();
+  run(`state.themes=[{id:'theme-a',approved:true}];
+    state.portfolio_imports=[{id:'portfolio-a',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'}]}];
+    selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='portfolio-a'`);
+  await run('viewAnalysis()');
+  assert.ok(node('#page-content').innerHTML.includes("openManualUploadForCompany('a')"));
+  run("window.openManualUploadForCompany('b')");
+  assert.equal(run('currentView'),'sources');
+  assert.match(node('#page-content').innerHTML,/<option value="b" selected>Samsung<\/option>/);
 });
 test('Company source rows expand and collapse',()=>{
   const {run,node}=setup(); node('#src-detail-a').style.display='none';
