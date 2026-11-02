@@ -166,7 +166,8 @@ def portfolio_delete(d):
 
 # ── Company / Security ────────────────────────────────────────────────────────
 
-def company_create(d):
+def _company_record(d):
+    """Build a normalized company record without performing database I/O."""
     name = str(d.get('name', '')).strip()
     if not name:
         raise ValueError('Company requires a name')
@@ -175,14 +176,6 @@ def company_create(d):
     cid    = str(d.get('id') or d.get('company_id') or '').strip()
     if not ticker and not sedol:
         raise ValueError('Provide at least one security identifier (bloomberg_ticker or sedol)')
-    # Deduplicate by ID, ticker or SEDOL
-    for existing in all_records('companies'):
-        if cid and existing.get('id') == cid:
-            return existing
-        if ticker and existing.get('bloomberg_ticker') == ticker:
-            return existing
-        if sedol and existing.get('sedol') == sedol:
-            return existing
     # Parse exchange-specific ticker symbol and exchange code from Bloomberg ticker
     # e.g. "2330 TT Equity" → symbol="2330", exchange_code="TT"
     # e.g. "BBCA IJ Equity" → symbol="BBCA", exchange_code="IJ"
@@ -207,7 +200,7 @@ def company_create(d):
                 exchange_code = code
                 break
 
-    company = {
+    return {
         'id': cid or ident('company'),
         'name': name,
         'bloomberg_ticker': ticker,
@@ -219,6 +212,18 @@ def company_create(d):
         'country': d.get('country', '') or d.get('jurisdiction', ''),
         'created_at': now()
     }
+
+
+def company_create(d):
+    company = _company_record(d)
+    # Deduplicate by ID, ticker or SEDOL.
+    for existing in all_records('companies'):
+        if company['id'] and existing.get('id') == company['id']:
+            return existing
+        if company['bloomberg_ticker'] and existing.get('bloomberg_ticker') == company['bloomberg_ticker']:
+            return existing
+        if company['sedol'] and existing.get('sedol') == company['sedol']:
+            return existing
     return put('companies', company)
 
 # ── Source ingestion ──────────────────────────────────────────────────────────
@@ -1027,12 +1032,14 @@ def export(theme_id, snapshot_id=None):
 
 # ── Snapshot ──────────────────────────────────────────────────────────────────
 
-def snapshot_create(d):
+def snapshot_create(d, known_company_ids=None):
+    """Create a snapshot, optionally reusing company IDs validated by the caller."""
+    known_company_ids = set(known_company_ids or ())
     for key in ('portfolio', 'benchmark'):
         engine.holdings(d[key])
         for r in d[key]:
             parse_date(r['as_of_date'])
-            if r['company_id'] != 'CASH':
+            if r['company_id'] != 'CASH' and r['company_id'] not in known_company_ids:
                 get('companies', r['company_id'])
     if d['portfolio'][0]['as_of_date'] != d['benchmark'][0]['as_of_date']:
         raise ValueError('Snapshot dates must match')
@@ -1104,6 +1111,22 @@ def portfolio_import(d):
     if not rows_data:
         raise ValueError('No holdings rows provided for import')
 
+    # A portfolio import can contain dozens of holdings. Load the company index
+    # once, then write all genuinely new companies in one request instead of
+    # repeatedly fetching and saving the full company list for every row.
+    existing_companies = all_records('companies')
+    company_by_id = {company.get('id'): company for company in existing_companies if company.get('id')}
+    company_by_ticker = {
+        company.get('bloomberg_ticker'): company
+        for company in existing_companies if company.get('bloomberg_ticker')
+    }
+    company_by_sedol = {
+        company.get('sedol'): company
+        for company in existing_companies if company.get('sedol')
+    }
+    new_companies = []
+    import_companies = {}
+
     def parse_wt(val):
         if val is None or val == '':
             return 0.0
@@ -1132,14 +1155,26 @@ def portfolio_import(d):
         r_wt = parse_wt(r.get('reference_weight') if 'reference_weight' in r else r.get('reference_wt', r.get('Reference wt', 0)))
         act_wt = round(p_wt - r_wt, 6)
 
-        comp = company_create({
+        company_input = {
             'name': cname,
             'bloomberg_ticker': ticker,
             'sedol': sedol,
             'country': country,
             'sector': sector,
             'jurisdiction': country
-        })
+        }
+        comp = company_by_ticker.get(ticker) if ticker else None
+        if comp is None and sedol:
+            comp = company_by_sedol.get(sedol)
+        if comp is None:
+            comp = _company_record(company_input)
+            new_companies.append(comp)
+            company_by_id[comp['id']] = comp
+            if ticker:
+                company_by_ticker[ticker] = comp
+            if sedol:
+                company_by_sedol[sedol] = comp
+        import_companies[comp['id']] = comp
         sec_id = ticker or sedol or comp['id']
 
         clean_row = {
@@ -1172,6 +1207,10 @@ def portfolio_import(d):
 
     if not clean_rows:
         raise ValueError('No valid company holdings rows found')
+
+    # Persist every new company in a single Supabase request before creating the
+    # snapshot that refers to those records.
+    put_many('companies', new_companies)
 
     # Normalize weights: portfolio weights must sum to 1.0 (with CASH plug if needed)
     p_sum = sum(h['weight'] for h in portfolio_holdings)
@@ -1208,7 +1247,7 @@ def portfolio_import(d):
         'name': f"{import_name} ({holdings_date})",
         'portfolio': portfolio_holdings,
         'benchmark': benchmark_holdings
-    })
+    }, known_company_ids=import_companies)
 
     import_record = {
         'theme_id': theme_id,
@@ -1235,6 +1274,7 @@ def portfolio_import(d):
     return {
         'import': import_record,
         'snapshot': snapshot,
+        'companies': list(import_companies.values()),
         'companies_matched': len(clean_rows)
     }
 

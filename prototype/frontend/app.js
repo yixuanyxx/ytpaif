@@ -125,15 +125,38 @@ function reviewStatusBadge(s) {
 }
 
 // ── API ────────────────────────────────────────────
-async function api(path, data) {
-  const r = await fetch('/api/' + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  });
-  const json = await r.json();
-  if (!r.ok) throw new Error(json.error || 'Request failed');
-  return json;
+async function api(path, data, { timeoutMs = 30000 } = {}) {
+  const controller = typeof AbortController === 'undefined' ? null : new AbortController();
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const action = path === 'portfolio/import' ? 'Portfolio import' : 'Request';
+  try {
+    const r = await fetch('/api/' + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal: controller?.signal
+    });
+    let json;
+    try {
+      json = await r.json();
+    } catch {
+      // A reverse proxy can return an HTML 413/502/504 page. Never leave the
+      // page spinning or expose its raw JSON parsing error to the user.
+      if (r.status === 413) {
+        throw new Error('Portfolio file is too large for the production server. Please try a smaller file.');
+      }
+      throw new Error(`${action} could not be completed by the server (HTTP ${r.status || 'unknown'}). Please try again.`);
+    }
+    if (!r.ok) throw new Error(json.error || `${action} failed (HTTP ${r.status}).`);
+    return json;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`${action} took too long. No portfolio was imported; please try again.`);
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function apiGet(path) {
@@ -2046,10 +2069,18 @@ function bindEditTable(rows) {
         rows: clean,
         file_name: rows._fileName,
         file_content: await fileToBase64(_stagingFileObject)
-      });
+      }, { timeoutMs: 120000 });
       _stagingRows = null;
       _stagingFileObject = null;
-      await refresh();
+      // The response contains everything needed for the next screen. Avoid a
+      // full state reload here: that can be very large once source documents
+      // exist and used to keep the import overlay open long after the save.
+      state.portfolio_imports = [...(state.portfolio_imports || []).filter(p => p.id !== res.import.id), res.import];
+      state.snapshots = [...(state.snapshots || []).filter(s => s.id !== res.snapshot.id), res.snapshot];
+      const companiesById = new Map((state.companies || []).map(company => [company.id, company]));
+      (res.companies || []).forEach(company => companiesById.set(company.id, company));
+      state.companies = [...companiesById.values()];
+      updateSidebarBadges();
       selectedDashboardPortfolioId = res.import.id;
       saveDashboardSelection();
       notice(`"${name}" imported — ${clean.length} companies registered and snapshot created. Dashboard is ready.`);

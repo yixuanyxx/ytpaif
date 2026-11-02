@@ -458,6 +458,33 @@ class AppFlowTest(unittest.TestCase):
         self.assertIn('portfolio', dash['summary'])
         self.assertEqual(len(self.app.all_records('portfolio_imports')), 1)
 
+    def test_portfolio_import_batches_company_lookup_and_writes(self):
+        rows = [
+            {'company_name': f'Company {index}', 'bloomberg_ticker': f'{index:04d} TT',
+             'sedol': f'SEDOL{index:05d}', 'country': 'Taiwan',
+             'portfolio_wt': 1 / 80, 'reference_wt': 1 / 80}
+            for index in range(80)
+        ]
+        original_all_records = self.app.all_records
+        company_reads = 0
+
+        def count_company_reads(kind):
+            nonlocal company_reads
+            if kind == 'companies':
+                company_reads += 1
+            return original_all_records(kind)
+
+        with patch.object(self.app, 'all_records', side_effect=count_company_reads), \
+                patch.object(self.app, 'put_many', wraps=self.app.put_many) as put_many:
+            result = self.app.portfolio_import({
+                'name': 'Large portfolio', 'holdings_date': '2026-10-03', 'rows': rows
+            })
+
+        self.assertEqual(company_reads, 1)
+        put_many.assert_called_once()
+        self.assertEqual(len(put_many.call_args.args[1]), 80)
+        self.assertEqual(len(result['companies']), 80)
+
     def test_portfolio_import_saves_uploaded_excel_to_storage_and_record(self):
         rows = [{
             'company_name': 'TSMC', 'bloomberg_ticker': '2330 TT',

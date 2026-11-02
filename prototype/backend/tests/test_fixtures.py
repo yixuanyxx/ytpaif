@@ -21,6 +21,11 @@ class MemoryStore:
         self.records.setdefault(kind, {})[record['id']] = record
         return record
 
+    def put_many(self, kind, records):
+        for record in records:
+            self.put(kind, record)
+        return records
+
     def delete(self, kind, record_id):
         del self.records[kind][record_id]
 

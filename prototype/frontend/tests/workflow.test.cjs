@@ -61,6 +61,12 @@ test('Portfolio format accepts extra columns and extracts only relevant fields',
   assert.equal(rows[0].portfolio_wt,1);
   assert.doesNotMatch(JSON.stringify(rows),/Ignored rationale|Ignored remark/);
 });
+test('Portfolio import reports an HTML proxy error clearly', async()=>{
+  const {context,run} = setup();
+  context.fetch = async()=>({status:502, json:async()=>{ throw new SyntaxError('Unexpected token <'); }});
+  await assert.rejects(run("api('portfolio/import', {}, {timeoutMs: 50})"),
+    /Portfolio import could not be completed by the server \(HTTP 502\)/);
+});
 test('Dashboard selection survives reload and rejects a mismatched portfolio',()=>{
   const first=setup();
   first.run("selectedDashboardThemeId='t1'; selectedDashboardPortfolioId='p1'; saveDashboardSelection()");
