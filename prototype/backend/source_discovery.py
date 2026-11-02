@@ -236,19 +236,51 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     citations = {normalized_url(a.get('url')) for b in blocks for a in b.get('annotations', [])
                  if a.get('type') == 'url_citation' and a.get('url')}
     text = ''.join(b.get('text', '') for b in blocks)
+    search_call_count = sum(step.get('type') == 'google_search_call' for step in steps)
+    fallback_used = False
+    # The current Interactions API can legitimately return an uncited response
+    # when a model decides not to search. In that situation, retry once using
+    # Gemini's supported GenerateContent grounding interface, whose structured
+    # groundingMetadata gives us a second independently verifiable citation
+    # source. Do not fall back after a cited Interaction response.
+    if not citations:
+        fallback_used = True
+        legacy_request = Request(
+            f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+            data=json.dumps({
+                'contents': [{'parts': [{'text': prompt}]}],
+                'tools': [{'google_search': {}}],
+            }).encode(),
+            headers={'x-goog-api-key': key, 'Content-Type': 'application/json'},
+        )
+        try:
+            with urlopen(legacy_request, timeout=timeout) as response:
+                legacy_output = json.load(response)
+        except HTTPError as error:
+            if error.code in (400, 401, 403, 404):
+                raise ProviderError(f'Gemini rejected the grounded fallback request (HTTP {error.code}). '
+                                    'Check model access, credentials and configuration.') from error
+            raise
+        candidate = (legacy_output.get('candidates') or [{}])[0]
+        metadata = candidate.get('groundingMetadata') or {}
+        chunks = metadata.get('groundingChunks') or []
+        citations = {normalized_url(chunk.get('web', {}).get('uri')) for chunk in chunks
+                     if chunk.get('web', {}).get('uri')}
+        text = ''.join(part.get('text', '') for part in candidate.get('content', {}).get('parts', []))
+        search_call_count = len(metadata.get('webSearchQueries') or [])
     text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
     try:
         rows = json.loads(text).get('sources', [])
     except (TypeError, ValueError) as error:
         raise ProviderError('Gemini returned an unreadable source-search response. No documents were saved.') from error
     rows = [r for r in rows if isinstance(r, dict)]
-    search_call_count = sum(step.get('type') == 'google_search_call' for step in steps)
     grounded = bool(search_call_count and citations)
     accepted = [r for r in rows if grounded and normalized_url(r.get('url')) in citations
                 and r.get('source_type') in types
                 and not website_is_excluded(r.get('url'), excluded_sites_by_type.get(r.get('source_type'), ()))]
     diagnostics = {
         'model': model,
+        'fallback_used': fallback_used,
         'step_types': [step.get('type') for step in steps if step.get('type')],
         'google_search_calls': search_call_count,
         'candidate_count': len(rows),

@@ -31,7 +31,8 @@ def saved_document(app, run, company, row, timeout=20):
 
 class DiscoveryTest(unittest.TestCase):
     def test_both_grounded_search_models_share_one_api_key(self):
-        output = {'steps': [{'type': 'model_output', 'content': [{'text': '{"sources":[]}'}]}]}
+        output = {'steps': [{'type': 'google_search_call'}, {'type': 'model_output', 'content': [{
+            'text': '{"sources":[]}', 'annotations': [{'type': 'url_citation', 'url': 'https://example.com'}]}]}]}
         for broad, expected in ((False, 'gemini-3.5-flash-lite'), (True, 'gemini-3.8-flash')):
             with self.subTest(broad=broad), patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'shared-test-key'}), \
                     patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as send:
@@ -415,14 +416,36 @@ class DiscoveryTest(unittest.TestCase):
     def test_uncited_or_ungrounded_candidates_are_diagnosed_and_rejected(self):
         rows = [{'url': 'https://example.com/report', 'source_type': 'annual_report'}]
         output = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({'sources': rows})}]}]}
+        fallback = {'candidates': [{'content': {'parts': [{'text': json.dumps({'sources': rows})}]},
+                                    'groundingMetadata': {}}]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
-                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())):
+                patch.object(discovery, 'urlopen', side_effect=[io.BytesIO(json.dumps(output).encode()),
+                                                                 io.BytesIO(json.dumps(fallback).encode())]):
             result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
         self.assertEqual(result, [])
         self.assertEqual(result.diagnostics['candidate_count'], 1)
         self.assertEqual(result.diagnostics['google_search_calls'], 0)
         self.assertEqual(result.diagnostics['citation_count'], 0)
         self.assertEqual(result.diagnostics['outcome'], 'search_not_invoked')
+        self.assertTrue(result.diagnostics['fallback_used'])
+
+    def test_uncited_interaction_retries_with_generate_content_grounding(self):
+        rows = [{'url': 'https://example.com/report', 'source_type': 'annual_report'}]
+        interaction = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({'sources': rows})}]}]}
+        fallback = {'candidates': [{'content': {'parts': [{'text': json.dumps({'sources': rows})}]},
+                                    'groundingMetadata': {
+                                        'webSearchQueries': ['Example annual report'],
+                                        'groundingChunks': [{'web': {'uri': rows[0]['url']}}],
+                                    }}]}
+        with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
+                patch.object(discovery, 'urlopen', side_effect=[io.BytesIO(json.dumps(interaction).encode()),
+                                                                 io.BytesIO(json.dumps(fallback).encode())]) as request:
+            result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
+        self.assertEqual(result, rows)
+        self.assertTrue(result.diagnostics['fallback_used'])
+        self.assertEqual(result.diagnostics['google_search_calls'], 1)
+        self.assertEqual(result.diagnostics['citation_count'], 1)
+        self.assertIn(':generateContent', request.call_args_list[1].args[0].full_url)
 
     def test_recovery_starts_durable_worker_without_a_time_limit(self):
         with patch('source_jobs.ensure_worker') as worker:
