@@ -438,6 +438,22 @@ test('Source search failure explains provider quota limits and search coverage',
   assert.match(html,/0 documents saved; 0 of 75 companies searched/);
   assert.match(html,/Check quota, billing, and Google Search grounding access/);
 });
+test('Source search quota completion shows actual completed companies',async()=>{
+  const {run,node} = setup();
+  run(`state = {
+    companies:[{id:'company-a',name:'TSMC'}],sources:[],cases:[],themes:[],
+    search_runs:[{
+      id:'search-quota',status:'incomplete',completion_reason:'provider_quota',results_count:3,
+      missing:[{},{}], company_ids:['company-a','company-b','company-c'], companies_completed:['company-a','company-b'],
+      errors:[{reason:'Gemini returned no Google Search citations'},{reason:'Google Search quota reached (HTTP 429)'}]
+    }],
+    portfolio_imports:[{id:'portfolio-a',theme_id:'theme-1',name:'Asia Core',rows:[{company_id:'company-a'}]}]
+  }; selectedDashboardThemeId='theme-1';`);
+  await run('viewSources()');
+  const html = node('#page-content').innerHTML;
+  assert.match(html,/stopped after 2 of 3 companies because Google Search quota was reached/);
+  assert.match(html,/3 documents saved/);
+});
 test('Source Documents can cancel an active AI search',async()=>{
   const {run,node,context} = setup();
   context.setTimeout=()=>1;

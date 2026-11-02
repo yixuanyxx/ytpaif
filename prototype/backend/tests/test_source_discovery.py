@@ -110,20 +110,20 @@ class DiscoveryTest(unittest.TestCase):
         })
 
     def test_grounded_search_rejects_an_already_searched_website_for_that_type(self):
-        rows = [
-            {'url': 'https://capitaliq.com/report/tsmc', 'source_type': 'annual_report'},
-            {'url': 'https://reuters.com/article/tsmc-report', 'source_type': 'annual_report'},
-        ]
+        urls = ['https://capitaliq.com/report/tsmc', 'https://reuters.com/article/tsmc-report']
         output = {'steps': [
             {'type': 'google_search_call'},
-            {'type': 'model_output', 'content': [{'text': json.dumps({'sources': rows}), 'annotations': [
-                {'type': 'url_citation', 'url': row['url']} for row in rows]}]},
+            {'type': 'model_output', 'content': [{'text': '\n'.join(
+                f'annual_report | 2026-01-01 | 2025 | TSMC annual report {index}' for index in range(2)),
+                'annotations': [
+                    {'type': 'url_citation', 'url': url, 'start_index': index * 60, 'end_index': index * 60 + 10}
+                    for index, url in enumerate(urls)]}]},
         ]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
                 patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as request:
             result = discovery.grounded_search({'name': 'TSMC'}, ['annual_report'], '', '2026-11-02', False, 5,
                                                 excluded_sites_by_type={'annual_report': ['capitaliq.com']})
-        self.assertEqual(result, rows[1:])
+        self.assertEqual([row['url'] for row in result], urls[1:])
         self.assertIn('capitaliq.com', request.call_args.args[0].data.decode())
 
     def test_expired_search_flushes_already_found_documents_without_new_provider_calls(self):
@@ -391,6 +391,17 @@ class DiscoveryTest(unittest.TestCase):
                 discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 1)
         self.assertEqual(request.call_count, 1)
 
+    def test_quota_ends_a_worker_run_as_incomplete_with_real_progress(self):
+        run = {'id': 'job', 'source_types': ['annual_report'], 'period': None, 'cutoff': '2026-11-02',
+               'latest_documents': True, 'results': [], 'errors': [], 'status': 'running'}
+        app = worker_app([], [])
+        with patch.object(discovery, 'grounded_search', side_effect=discovery.ProviderError('quota reached', 429)):
+            discovery.worker(app, run, [{'id': 'a', 'name': 'A'}])
+        self.assertEqual(run['status'], 'incomplete')
+        self.assertEqual(run['completion_reason'], 'provider_quota')
+        self.assertEqual(run['companies_completed'], [])
+        self.assertEqual(run['errors'][-1]['reason'], 'quota reached')
+
     def test_unavailable_models_report_project_access_restriction(self):
         body = json.dumps({'error': {'message': 'This model is no longer available to new users.'}}).encode()
         for broad, model in ((False, 'gemini-3.5-flash-lite'), (True, 'gemini-3.8-flash')):
@@ -400,52 +411,43 @@ class DiscoveryTest(unittest.TestCase):
                     discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', broad, 5)
 
     def test_only_cited_urls_are_accepted(self):
-        rows = [{'url': 'https://example.com/report', 'source_type': 'annual_report'},
-                {'url': 'https://invented.example/report', 'source_type': 'annual_report'}]
+        cited = 'https://example.com/report'
         output = {'steps': [{'type': 'google_search_call', 'arguments': {'queries': ['example annual report']}},
-                            {'type': 'model_output', 'content': [{'text': json.dumps({'sources': rows}),
-                  'annotations': [{'type': 'url_citation', 'url': rows[0]['url']}]}]}]}
+                            {'type': 'model_output', 'content': [{'text': 'annual_report | 2026-01-01 | 2025 | Example annual report',
+                  'annotations': [{'type': 'url_citation', 'url': cited, 'start_index': 0, 'end_index': 20}]}]}]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
                 patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as request:
             result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], 'FY2025', '2026-11-01', False, 5)
-        self.assertEqual(result, rows[:1])
+        self.assertEqual([row['url'] for row in result], [cited])
+        self.assertEqual(result[0]['source_type'], 'annual_report')
         body = json.loads(request.call_args.args[0].data)
         self.assertEqual(body['tools'], [{'type': 'google_search', 'search_types': ['web_search']}])
         self.assertNotIn('generation_config', body)
 
     def test_uncited_or_ungrounded_candidates_are_diagnosed_and_rejected(self):
-        rows = [{'url': 'https://example.com/report', 'source_type': 'annual_report'}]
-        output = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({'sources': rows})}]}]}
-        fallback = {'candidates': [{'content': {'parts': [{'text': json.dumps({'sources': rows})}]},
-                                    'groundingMetadata': {}}]}
+        output = {'steps': [{'type': 'model_output', 'content': [{'text': 'annual_report | 2026-01-01 | 2025 | Example annual report'}]}]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
-                patch.object(discovery, 'urlopen', side_effect=[io.BytesIO(json.dumps(output).encode()),
-                                                                 io.BytesIO(json.dumps(fallback).encode())]):
+                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as request:
             result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
         self.assertEqual(result, [])
-        self.assertEqual(result.diagnostics['candidate_count'], 1)
+        self.assertEqual(result.diagnostics['candidate_count'], 0)
         self.assertEqual(result.diagnostics['google_search_calls'], 0)
         self.assertEqual(result.diagnostics['citation_count'], 0)
         self.assertEqual(result.diagnostics['outcome'], 'search_not_invoked')
-        self.assertTrue(result.diagnostics['fallback_used'])
+        self.assertFalse(result.diagnostics['fallback_used'])
+        self.assertEqual(request.call_count, 1)
 
-    def test_uncited_interaction_retries_with_generate_content_grounding(self):
-        rows = [{'url': 'https://example.com/report', 'source_type': 'annual_report'}]
-        interaction = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({'sources': rows})}]}]}
-        fallback = {'candidates': [{'content': {'parts': [{'text': json.dumps({'sources': rows})}]},
-                                    'groundingMetadata': {
-                                        'webSearchQueries': ['Example annual report'],
-                                        'groundingChunks': [{'web': {'uri': rows[0]['url']}}],
-                                    }}]}
+    def test_uncited_interaction_does_not_use_an_ungrounded_fallback(self):
+        interaction = {'steps': [{'type': 'google_search_call'}, {'type': 'model_output', 'content': [
+            {'text': 'annual_report | 2026-01-01 | 2025 | Example annual report'}]}]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
-                patch.object(discovery, 'urlopen', side_effect=[io.BytesIO(json.dumps(interaction).encode()),
-                                                                 io.BytesIO(json.dumps(fallback).encode())]) as request:
+                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(interaction).encode())) as request:
             result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
-        self.assertEqual(result, rows)
-        self.assertTrue(result.diagnostics['fallback_used'])
+        self.assertEqual(result, [])
+        self.assertFalse(result.diagnostics['fallback_used'])
         self.assertEqual(result.diagnostics['google_search_calls'], 1)
-        self.assertEqual(result.diagnostics['citation_count'], 1)
-        self.assertIn(':generateContent', request.call_args_list[1].args[0].full_url)
+        self.assertEqual(result.diagnostics['citation_count'], 0)
+        self.assertEqual(request.call_count, 1)
 
     def test_recovery_starts_durable_worker_without_a_time_limit(self):
         with patch('source_jobs.ensure_worker') as worker:

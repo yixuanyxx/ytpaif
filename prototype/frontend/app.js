@@ -19,7 +19,8 @@ function sourceSearchFailureSummary(search) {
   const saved = search.results_count || 0;
   const completed = search.companies_completed?.length || 0;
   const total = search.company_ids?.length || 0;
-  const reason = (search.errors?.[0]?.reason || 'Review the search run and try again.').replace(/[.!?]+$/, '');
+  const providerError = (search.errors || []).find(error => /429|rate limit|quota|credentials|configuration/i.test(error.reason || ''));
+  const reason = (providerError?.reason || search.errors?.[0]?.reason || 'Review the search run and try again.').replace(/[.!?]+$/, '');
   const quotaGuidance = /429|rate limit|quota/i.test(reason)
     ? ' Gemini rejected the request before completing a company search. Check quota, billing, and Google Search grounding access for the configured API project; retry only after the provider limit is available.'
     : '';
@@ -27,8 +28,13 @@ function sourceSearchFailureSummary(search) {
 }
 function sourceSearchCompletionSummary(search) {
   const count = search.results_count || 0;
+  const completed = search.companies_completed?.length || 0;
+  const total = search.company_ids?.length || 0;
   const gaps = search.missing?.length || 0;
   const ending = gaps ? ` ${gaps} company/source-type gaps remain; review Source Documents.` : ' All required source categories are covered.';
+  if (search.completion_reason === 'provider_quota') {
+    return `AI source search stopped after ${completed} of ${total} companies because Google Search quota was reached. ${count} documents saved.${ending}`;
+  }
   return search.completion_reason === 'time_limit_reached'
     ? `AI source search reached its 10-minute limit. ${count} documents saved.${ending}`
     : `AI source search is over. ${count} documents saved.${ending}`;
@@ -2285,6 +2291,8 @@ async function viewSources() {
         ? `Source search stopped. ${esc(latestSearchRun.cancel_reason || '')}`
         : latestSearchRun?.status === 'failed'
             ? esc(sourceSearchFailureSummary(latestSearchRun))
+          : latestSearchRun?.completion_reason === 'provider_quota'
+            ? esc(sourceSearchCompletionSummary(latestSearchRun))
           : latestSearchRun?.completion_reason === 'time_limit_reached'
             ? esc(sourceSearchCompletionSummary(latestSearchRun))
           : '';
