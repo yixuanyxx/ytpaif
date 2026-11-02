@@ -24,7 +24,7 @@ def worker_app(sources, snapshots):
         put=lambda kind, record: snapshots.append(copy.deepcopy(record)))
 
 
-def saved_document(app, run, company, row):
+def saved_document(app, run, company, row, timeout=20):
     return {**row, 'id': row['url'], 'company_id': company['id'], 'company_name': company['name'],
             'link_status': 'verified', 'storage_mode': 'url_only'}
 
@@ -59,6 +59,8 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result['search_models'], {'first_pass': 'gemini-3.5-flash-lite',
                                                  'missing_results': 'gemini-3.8-flash'})
         self.assertEqual(result['storage_mode'], 'url_only')
+        self.assertEqual(result['time_limit_seconds'], 600)
+        self.assertGreater(result['deadline_unix'], discovery.time.time())
         self.assertEqual(len(result['missing']), 2)
         queue.return_value.enqueue.assert_called_once()
 
@@ -91,6 +93,68 @@ class DiscoveryTest(unittest.TestCase):
                    {**source, 'url': 'https://example.com/verified.pdf', 'link_status': 'verified'}]
         self.assertEqual(discovery.coverage_gaps(run, [{'id': 'a'}], sources)[0]['found'], 1)
 
+    def test_existing_website_is_excluded_only_for_its_company_and_source_type(self):
+        sources = [
+            {'company_id': 'tsmc', 'source_type': 'annual_report', 'link_status': 'verified',
+             'discovery_url': 'https://www.capitaliq.com/report/tsmc-2025',
+             'url': 'https://files.capitaliq.com/tsmc-2025.pdf'},
+            {'company_id': 'tsmc', 'source_type': 'regulatory_filing', 'link_status': 'verified',
+             'url': 'https://www.capitaliq.com/filing/tsmc'},
+            {'company_id': 'other', 'source_type': 'annual_report', 'link_status': 'verified',
+             'url': 'https://capitaliq.com/report/other'},
+        ]
+        self.assertEqual(discovery.excluded_websites(sources, 'tsmc', ['annual_report', 'regulatory_filing']), {
+            'annual_report': ['capitaliq.com', 'files.capitaliq.com'],
+            'regulatory_filing': ['capitaliq.com'],
+        })
+
+    def test_grounded_search_rejects_an_already_searched_website_for_that_type(self):
+        rows = [
+            {'url': 'https://capitaliq.com/report/tsmc', 'source_type': 'annual_report'},
+            {'url': 'https://reuters.com/article/tsmc-report', 'source_type': 'annual_report'},
+        ]
+        output = {'steps': [
+            {'type': 'google_search_call'},
+            {'type': 'model_output', 'content': [{'text': json.dumps({'sources': rows}), 'annotations': [
+                {'type': 'url_citation', 'url': row['url']} for row in rows]}]},
+        ]}
+        with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
+                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as request:
+            result = discovery.grounded_search({'name': 'TSMC'}, ['annual_report'], '', '2026-11-02', False, 5,
+                                                excluded_sites_by_type={'annual_report': ['capitaliq.com']})
+        self.assertEqual(result, rows[1:])
+        self.assertIn('capitaliq.com', request.call_args.args[0].data.decode())
+
+    def test_expired_search_flushes_already_found_documents_without_new_provider_calls(self):
+        run = {'id': 'job', 'source_types': ['annual_report'], 'period': None, 'cutoff': '2026-11-02',
+               'results': [], 'errors': [], 'status': 'running', 'deadline_unix': discovery.time.time() - 1}
+        sources, snapshots = [], []
+        app = worker_app(sources, snapshots)
+        app.stage_source({'id': 'saved', 'company_id': 'a', 'source_type': 'annual_report',
+            'url': 'https://example.com/report.pdf', 'publication_date': '2026-01-01', 'period': '2025',
+            'link_status': 'verified'})
+        with patch.object(discovery, 'grounded_search') as search:
+            discovery.worker(app, run, [{'id': 'a', 'name': 'A'}])
+        search.assert_not_called()
+        self.assertEqual(run['status'], 'incomplete')
+        self.assertEqual(run['completion_reason'], 'time_limit_reached')
+        self.assertEqual(len(sources), 1)
+
+    def test_subsequent_search_skips_a_company_type_already_covered_by_two_verified_links(self):
+        run = {'id': 'job', 'source_types': ['annual_report'], 'period': None, 'cutoff': '2026-11-02',
+               'results': [], 'errors': [], 'status': 'running'}
+        sources = [
+            {'id': f'source-{n}', 'company_id': 'tsmc', 'source_type': 'annual_report',
+             'url': f'https://capitaliq.com/tsmc/report-{n}', 'publication_date': '2026-01-01',
+             'period': '2025', 'link_status': 'verified', 'storage_mode': 'url_only'}
+            for n in range(2)
+        ]
+        app = worker_app(sources, [])
+        with patch.object(discovery, 'grounded_search') as search:
+            discovery.worker(app, run, [{'id': 'tsmc', 'name': 'TSMC'}])
+        search.assert_not_called()
+        self.assertEqual(run['status'], 'completed')
+
     def test_worker_keeps_searching_until_two_per_type_for_every_stock(self):
         companies = [{'id': cid, 'name': cid} for cid in ('a', 'b')]
         selected = ['annual_report', 'regulatory_filing']
@@ -98,8 +162,8 @@ class DiscoveryTest(unittest.TestCase):
                'latest_documents': True, 'results': [], 'errors': [], 'status': 'running'}
         sources, snapshots, calls = [], [], []
 
-        def search(company, types, period, cutoff, broad, timeout, known):
-            calls.append((company['id'], list(types), broad, timeout, known))
+        def search(company, types, period, cutoff, broad, timeout, known, excluded_sites):
+            calls.append((company['id'], list(types), broad, timeout, known, excluded_sites))
             number = 2 if broad else 1
             # Even a provider that returns an unticked category cannot save it.
             return [{'url': f'https://example.com/{company["id"]}/{t}/{number}',
@@ -134,7 +198,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(search.call_count, 2)
         sleep.assert_not_called()
 
-    def test_first_pass_searches_and_downloads_are_concurrent_and_uncapped(self):
+    def test_first_pass_searches_and_downloads_are_concurrent_within_the_time_limit(self):
         companies = [{'id': str(i), 'name': str(i)} for i in range(4)]
         run = {'id': 'job', 'source_types': ['annual_report'], 'period': None, 'cutoff': '2026-11-02',
                'latest_documents': False, 'results': [], 'errors': [], 'status': 'running'}
@@ -150,13 +214,13 @@ class DiscoveryTest(unittest.TestCase):
         lock = threading.Lock()
         download_calls = []
 
-        def search(company, types, period, cutoff, broad, timeout, known):
+        def search(company, types, period, cutoff, broad, timeout, known, excluded_sites):
             self.assertFalse(broad)
             search_gate.wait(timeout=5)
             return [{'url': f'https://example.com/{company["id"]}/{n}', 'source_type': 'annual_report',
                      'publication_date': '2026-01-01', 'period': '2025'} for n in range(3)]
 
-        def save(app, run, company, row):
+        def save(app, run, company, row, timeout=20):
             with lock:
                 download_calls.append(row['url'])
                 first_two = len(download_calls) <= 2
@@ -187,7 +251,7 @@ class DiscoveryTest(unittest.TestCase):
         sources, snapshots, called = [], [], []
         app = worker_app(sources, snapshots)
 
-        def search(company, types, period, cutoff, broad, timeout, known):
+        def search(company, types, period, cutoff, broad, timeout, known, excluded_sites):
             called.append((company['id'], broad, types))
             if broad:
                 self.assertTrue(run['first_pass_completed'])

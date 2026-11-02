@@ -18,6 +18,7 @@ TYPES = ('annual_report', 'regulatory_filing', 'earnings_call',
 FIRST_PASS_MODEL = 'gemini-3.5-flash-lite'
 MISSING_RESULTS_MODEL = 'gemini-3.8-flash'
 DOCUMENTS_PER_TYPE = 2
+SEARCH_TIME_LIMIT_SECONDS = 10 * 60
 COMPANY_WORKERS = 4
 LINK_WORKERS = 8
 SAVE_BATCH_SIZE = 20
@@ -37,6 +38,32 @@ class GroundedSearchResults(list):
 
 def normalized_url(url):
     return urldefrag(str(url or ''))[0].rstrip('/')
+
+
+def website_key(url):
+    """Return a stable website identifier for source-reuse rules."""
+    host = (urlparse(normalized_url(url)).hostname or '').lower()
+    return host[4:] if host.startswith('www.') else host
+
+
+def excluded_websites(sources, company_id, source_types):
+    """Sites already used for a company/type are not searched for that pair again."""
+    excluded = {source_type: set() for source_type in source_types}
+    for source in sources:
+        source_type = source.get('source_type')
+        if (source.get('company_id') != company_id or source_type not in excluded
+                or source.get('link_status') != 'verified'):
+            continue
+        for url in (source.get('discovery_url'), source.get('url')):
+            site = website_key(url)
+            if site:
+                excluded[source_type].add(site)
+    return {source_type: sorted(sites) for source_type, sites in excluded.items() if sites}
+
+
+def website_is_excluded(url, excluded_sites):
+    site = website_key(url)
+    return any(site == excluded or site.endswith('.' + excluded) for excluded in excluded_sites)
 
 
 def public_url(url):
@@ -150,12 +177,13 @@ def verify_document_link(row, timeout=20):
     return final_url, mime
 
 
-def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls=()):
+def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls=(), excluded_sites_by_type=None):
     key = os.environ.get('GEMINI_API_KEY') or os.environ.get('LLM_API_KEY')
     if not key: raise ValueError('Configure a Gemini API key')
     model = MISSING_RESULTS_MODEL if broad else FIRST_PASS_MODEL
     scope = ('Search all other publicly accessible websites as well.' if broad else
              'Search Yahoo Finance, Reuters, Bloomberg, Capital IQ, and official company filings / investor relations first.')
+    excluded_sites_by_type = excluded_sites_by_type or {}
     prompt = (f'Find actual source documents for {company["name"]}, ticker {company.get("bloomberg_ticker", "")}, '
               f'SEDOL {company.get("sedol", "")}. Categories: {types}. Fiscal period: {period or "LATEST AVAILABLE: find the two most up-to-date documents per category regardless of fiscal period"}. Publication cutoff: {cutoff}. '
               f'{scope} Use Google Search. Keep multiple sources from different websites. Do not bypass paywalls. '
@@ -164,6 +192,9 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
               'Never return homepages, IR landing pages, document lists, quote pages or search results. '
               'For annual reports and regulatory filings, return the complete document, not a news release announcing it. '
               f'Do not repeat these already saved URLs: {json.dumps(list(exclude_urls))}. '
+              f'Website exclusions by source type: {json.dumps(excluded_sites_by_type)}. '
+              'For each source type, do not search or return results from any excluded website for that type, including its subdomains. '
+              'Those websites remain eligible for other source types that do not list them as excluded. '
               'Return only JSON {"sources":[{"url":"https://...","title":"...","source_type":"...",'
               '"publication_date":"YYYY-MM-DD","period":"..."}]}. Include only URLs supported by search citations. '
               'Do not invent dates or documents. Omit documents whose publication date cannot be established. '
@@ -211,7 +242,9 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     rows = [r for r in rows if isinstance(r, dict)]
     search_call_count = sum(step.get('type') == 'google_search_call' for step in steps)
     grounded = bool(search_call_count and citations)
-    accepted = [r for r in rows if grounded and normalized_url(r.get('url')) in citations and r.get('source_type') in types]
+    accepted = [r for r in rows if grounded and normalized_url(r.get('url')) in citations
+                and r.get('source_type') in types
+                and not website_is_excluded(r.get('url'), excluded_sites_by_type.get(r.get('source_type'), ()))]
     diagnostics = {
         'model': model,
         'step_types': [step.get('type') for step in steps if step.get('type')],
@@ -219,6 +252,7 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
         'candidate_count': len(rows),
         'citation_count': len(citations),
         'cited_candidate_count': len(accepted),
+        'excluded_site_count': sum(len(sites) for sites in excluded_sites_by_type.values()),
         'outcome': ('grounded' if grounded else 'search_without_citations'
                     if search_call_count else 'search_not_invoked'),
     }
@@ -250,6 +284,8 @@ def start(app, data):
     run = {'id': app.ident('searchrun'), 'created_at': app.now(), 'status': 'running',
            'portfolio_id': portfolio['id'], 'company_ids': company_ids, 'source_types': types,
            'documents_per_type': DOCUMENTS_PER_TYPE, 'cutoff': data['cutoff'],
+            'time_limit_seconds': SEARCH_TIME_LIMIT_SECONDS,
+            'deadline_unix': time.time() + SEARCH_TIME_LIMIT_SECONDS,
            'period': None if data.get('latest_documents', True) else data.get('period'),
            'latest_documents': data.get('latest_documents', True),
            'first_pass_completed': False, 'phase': 'preferred_websites',
@@ -277,11 +313,7 @@ def cancel(app, data):
 
 
 def recover_stale_runs(app):
-    """Ensure the durable supervisor resumes queued/running jobs after an app restart.
-
-    The persistent queue owns recovery, so there is deliberately no elapsed-time
-    cancellation here.
-    """
+    """Ensure the durable supervisor resumes queued/running jobs after an app restart."""
     import source_jobs
     source_jobs.ensure_worker()
 
@@ -290,9 +322,9 @@ def source_identity(source):
     return (source['company_id'], source['source_type'], urldefrag(source.get('url', ''))[0].rstrip('/'))
 
 
-def save_document(app, run, company, row):
+def save_document(app, run, company, row, timeout=20):
     """Save metadata for a verified online document; never upload source files."""
-    url, mime = verify_document_link(row)
+    url, mime = verify_document_link(row, timeout=timeout)
     identity = json.dumps([source_identity({**row, 'url': url, 'company_id': company['id']}),
                            row['publication_date'], row['period']])
     sid = 'source_' + hashlib.sha256(identity.encode()).hexdigest()[:32]
@@ -316,8 +348,24 @@ def worker(app, run, companies):
     failures = run.setdefault('provider_failures', {})
     run.setdefault('first_pass_completed', False)
     run.setdefault('grounding_diagnostics', [])
+    run.setdefault('time_limit_seconds', SEARCH_TIME_LIMIT_SECONDS)
+    # Older durable jobs have no deadline. Give them one bounded run once this
+    # version of the worker resumes them instead of allowing an indefinite job.
+    run.setdefault('deadline_unix', time.time() + run['time_limit_seconds'])
     run['storage_mode'] = 'url_only'
     stop = threading.Event()
+
+    def seconds_remaining():
+        return max(0, run['deadline_unix'] - time.time())
+
+    def time_limit_reached():
+        return seconds_remaining() <= 0
+
+    def finish_for_time_limit():
+        stop.set()
+        run['status'] = 'incomplete'
+        run['completion_reason'] = 'time_limit_reached'
+        run['time_limit_reached_at'] = app.now()
 
     def checkpoint():
         run['results_count'] = len(run['results'])
@@ -343,24 +391,45 @@ def worker(app, run, companies):
             del pending[:len(batch)]
         last_save = time.monotonic()
 
-    def search(company, types, broad, known_urls):
-        if stop.is_set():
+    def search(company, types, broad, known_urls, sites_by_type, timeout):
+        if stop.is_set() or time_limit_reached():
             return []
         try:
-            return grounded_search(company, types, run['period'], run['cutoff'], broad, 90, known_urls)
+            timeout = max(1, min(timeout, int(seconds_remaining())))
+            return grounded_search(company, types, run['period'], run['cutoff'], broad, timeout,
+                                   known_urls, sites_by_type)
         except ProviderError:
             stop.set()
             raise
+
+    def verify(company, row, timeout):
+        if stop.is_set() or time_limit_reached():
+            raise TimeoutError('Source-search time limit reached')
+        timeout = max(1, min(timeout, int(seconds_remaining())))
+        return save_document(app, run, company, row, timeout)
 
     try:
         sources = app.all_records('sources')
         pending.extend(app.pending_sources())
         flush()  # Replay uploaded metadata that had not been committed before restart.
         seen = {source_identity(s) for s in sources if s.get('url') and s.get('link_status') == 'verified'}
+        initially_satisfied = {
+            (company['id'], source_type)
+            for company in companies
+            for source_type in run['source_types']
+            if not any(gap['company_id'] == company['id'] and gap['source_type'] == source_type
+                       for gap in coverage_gaps(run, [company], sources))
+        }
         checkpoint()
+        if time_limit_reached():
+            finish_for_time_limit()
+            return
         with ThreadPoolExecutor(max_workers=COMPANY_WORKERS) as searches, \
                 ThreadPoolExecutor(max_workers=LINK_WORKERS) as downloads:
             while True:
+                if time_limit_reached():
+                    finish_for_time_limit()
+                    break
                 broad = run['first_pass_completed']
                 run['phase'] = 'other_public_websites' if broad else 'preferred_websites'
                 run['current_search_model'] = MISSING_RESULTS_MODEL if broad else FIRST_PASS_MODEL
@@ -379,19 +448,32 @@ def worker(app, run, companies):
                     if len(pending) >= SAVE_BATCH_SIZE or (pending and time.monotonic()-last_save >= SAVE_INTERVAL):
                         flush()
 
+                timed_out = False
                 for company in companies:
-                    # Every company/type gets a first pass, even if coverage already
-                    # meets the target. Only subsequent passes skip satisfied pairs.
+                    if time_limit_reached():
+                        timed_out = True
+                        break
+                    # A new run starts with a complete preferred-sites pass for
+                    # every uncovered pair. Pairs already covered by prior runs
+                    # are skipped altogether, while the current first pass still
+                    # completes before gap-only follow-up work begins.
                     types = ([g['source_type'] for g in coverage_gaps(run, [company], sources)]
-                             if broad else list(run['source_types']))
+                             if broad else [source_type for source_type in run['source_types']
+                                            if (company['id'], source_type) not in initially_satisfied])
                     if not types:
                         continue
                     known_urls = [s['url'] for s in sources if s['company_id'] == company['id']
                                   and s.get('source_type') in types and s.get('url') and s.get('link_status') == 'verified']
-                    tasks[searches.submit(search, company, types, broad, known_urls)] = (company, types)
+                    sites_by_type = excluded_websites(sources, company['id'], types)
+                    timeout = max(1, min(90, int(seconds_remaining())))
+                    tasks[searches.submit(search, company, types, broad, known_urls, sites_by_type, timeout)] = (company, types)
 
                 while tasks or documents:
-                    done, _ = wait([*tasks, *documents], timeout=1, return_when=FIRST_COMPLETED)
+                    remaining = seconds_remaining()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    done, _ = wait([*tasks, *documents], timeout=min(1, remaining), return_when=FIRST_COMPLETED)
                     for future in done:
                         if future in documents:
                             collect(future)
@@ -433,12 +515,16 @@ def worker(app, run, companies):
                                 identity = source_identity({**row, 'company_id': company['id']})
                                 if identity in seen: continue
                                 seen.add(identity)
-                                documents[downloads.submit(save_document, app, run, company, dict(row))] = (company, row, identity)
+                                verify_timeout = max(1, min(20, int(seconds_remaining())))
+                                documents[downloads.submit(verify, company, dict(row), verify_timeout)] = (company, row, identity)
                             except Exception as error:
                                 run['errors'].append({'company_id': company['id'], 'url': row.get('url'), 'reason': type(error).__name__})
                     if pending and time.monotonic()-last_save >= SAVE_INTERVAL:
                         flush()
                 flush()
+                if timed_out:
+                    finish_for_time_limit()
+                    break
                 if fatal:
                     raise fatal
                 # A persisted barrier: no gap-only follow-up or completion before

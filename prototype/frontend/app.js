@@ -25,6 +25,14 @@ function sourceSearchFailureSummary(search) {
     : '';
   return `AI source search failed. ${saved} documents saved; ${completed} of ${total} companies searched. ${reason}.${quotaGuidance}`;
 }
+function sourceSearchCompletionSummary(search) {
+  const count = search.results_count || 0;
+  const gaps = search.missing?.length || 0;
+  const ending = gaps ? ` ${gaps} company/source-type gaps remain; review Source Documents.` : ' All required source categories are covered.';
+  return search.completion_reason === 'time_limit_reached'
+    ? `AI source search reached its 10-minute limit. ${count} documents saved.${ending}`
+    : `AI source search is over. ${count} documents saved.${ending}`;
+}
 function notifyFinishedSourceSearches() {
   for (const search of state.search_runs || []) {
     if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed', 'cancelled'].includes(search.status)) continue;
@@ -36,7 +44,7 @@ function notifyFinishedSourceSearches() {
     } else if (search.status === 'cancelled') {
       notice(`AI source search stopped. ${count} documents were saved before it stopped.`, 'warning');
     } else {
-      notice(`AI source search is over. ${count} documents saved.${gaps ? ` ${gaps} company/source-type gaps remain; review Source Documents.` : ' All required source categories are covered.'}`, gaps ? 'warning' : 'success');
+      notice(sourceSearchCompletionSummary(search), gaps ? 'warning' : 'success');
     }
   }
 }
@@ -2277,6 +2285,8 @@ async function viewSources() {
         ? `Source search stopped. ${esc(latestSearchRun.cancel_reason || '')}`
         : latestSearchRun?.status === 'failed'
             ? esc(sourceSearchFailureSummary(latestSearchRun))
+          : latestSearchRun?.completion_reason === 'time_limit_reached'
+            ? esc(sourceSearchCompletionSummary(latestSearchRun))
           : '';
   monitorSourceSearches();
   const portfolioCompanyIds = new Set(companies.map(company => company.id));
