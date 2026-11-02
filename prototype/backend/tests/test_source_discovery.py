@@ -40,9 +40,7 @@ class DiscoveryTest(unittest.TestCase):
             body = json.loads(request.data)
             self.assertEqual(body['model'], expected)
             self.assertEqual(body['tools'], [{'type': 'google_search', 'search_types': ['web_search']}])
-            self.assertEqual(body['generation_config']['tool_choice'], {
-                'allowed_tools': {'mode': 'any', 'tools': ['google_search']},
-            })
+            self.assertNotIn('generation_config', body)
             self.assertEqual(request.get_header('X-goog-api-key'), 'shared-test-key')
 
     def test_submission_uses_selected_types_and_all_portfolio_stocks(self):
@@ -412,9 +410,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result, rows[:1])
         body = json.loads(request.call_args.args[0].data)
         self.assertEqual(body['tools'], [{'type': 'google_search', 'search_types': ['web_search']}])
-        self.assertEqual(body['generation_config']['tool_choice'], {
-            'allowed_tools': {'mode': 'any', 'tools': ['google_search']},
-        })
+        self.assertNotIn('generation_config', body)
 
     def test_uncited_or_ungrounded_candidates_are_diagnosed_and_rejected(self):
         rows = [{'url': 'https://example.com/report', 'source_type': 'annual_report'}]
