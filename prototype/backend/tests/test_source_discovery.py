@@ -361,6 +361,11 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result.diagnostics['citation_count'], 0)
         self.assertEqual(result.diagnostics['outcome'], 'search_not_invoked')
 
+    def test_recovery_starts_durable_worker_without_a_time_limit(self):
+        with patch('source_jobs.ensure_worker') as worker:
+            discovery.recover_stale_runs(None)
+        worker.assert_called_once()
+
     def test_private_urls_are_rejected(self):
         with self.assertRaises(ValueError):
             discovery.public_url('http://127.0.0.1/secrets')

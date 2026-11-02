@@ -281,6 +281,16 @@ def cancel(app, data):
     return run
 
 
+def recover_stale_runs(app):
+    """Ensure the durable supervisor resumes queued/running jobs after an app restart.
+
+    The persistent queue owns recovery, so there is deliberately no elapsed-time
+    cancellation here.
+    """
+    import source_jobs
+    source_jobs.ensure_worker()
+
+
 def source_identity(source):
     return (source['company_id'], source['source_type'], urldefrag(source.get('url', ''))[0].rstrip('/'))
 
