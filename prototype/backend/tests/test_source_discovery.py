@@ -53,13 +53,15 @@ class DiscoveryTest(unittest.TestCase):
                               put=lambda kind, record: record)
         with patch('source_jobs.Queue') as queue, patch('source_jobs.ensure_worker'):
             result = discovery.start(app, {'portfolio_id': 'portfolio', 'company_ids': ['a'],
-                'source_types': ['annual_report', 'annual_report'], 'cutoff': '2026-11-02'})['search_run']
+                'source_types': ['annual_report', 'annual_report'], 'period': '2025',
+                'cutoff': '2026-11-02'})['search_run']
         self.assertEqual(result['company_ids'], ['a', 'b'])
         self.assertEqual(result['source_types'], ['annual_report'])
         self.assertEqual(result['documents_per_type'], 2)
         self.assertEqual(result['search_models'], {'first_pass': 'gemini-3.5-flash-lite',
                                                  'missing_results': 'gemini-3.8-flash'})
         self.assertEqual(result['storage_mode'], 'url_only')
+        self.assertEqual(result['period'], '2025')
         self.assertEqual(result['time_limit_seconds'], 600)
         self.assertGreater(result['deadline_unix'], discovery.time.time())
         self.assertEqual(len(result['missing']), 2)
@@ -71,6 +73,16 @@ class DiscoveryTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'source type'):
                     discovery.start(None, {'source_types': types})
             queue.assert_not_called()
+
+    def test_reporting_year_is_required_even_when_using_latest_documents(self):
+        with self.assertRaisesRegex(ValueError, 'four-digit year'):
+            discovery.start(None, {'latest_documents': True, 'period': '', 'source_types': ['annual_report']})
+
+    def test_more_than_two_source_types_are_rejected_before_queueing(self):
+        with self.assertRaisesRegex(ValueError, 'at most 2 source types'):
+            discovery.start(None, {'period': '2025', 'source_types': [
+                'annual_report', 'regulatory_filing', 'earnings_call'
+            ]})
 
     def test_coverage_counts_two_unique_eligible_urls_only_for_selected_types(self):
         run = {'source_types': ['annual_report'], 'period': '2025', 'cutoff': '2026-11-02'}

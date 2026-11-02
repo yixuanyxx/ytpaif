@@ -18,6 +18,7 @@ TYPES = ('annual_report', 'regulatory_filing', 'earnings_call',
 FIRST_PASS_MODEL = 'gemini-3.5-flash-lite'
 MISSING_RESULTS_MODEL = 'gemini-3.8-flash'
 DOCUMENTS_PER_TYPE = 2
+MAX_SOURCE_TYPES_PER_SEARCH = 2
 SEARCH_TIME_LIMIT_SECONDS = 10 * 60
 COMPANY_WORKERS = 4
 LINK_WORKERS = 8
@@ -224,8 +225,10 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     scope = ('Search all other publicly accessible websites as well.' if broad else
              'Search Yahoo Finance, Reuters, Bloomberg, Capital IQ, and official company filings / investor relations first.')
     excluded_sites_by_type = excluded_sites_by_type or {}
+    period_instruction = (f'Fiscal period: {period}. Find the most up-to-date documents available for that financial year.'
+                          if period else 'Fiscal period: latest available.')
     prompt = (f'Find actual source documents for {company["name"]}, ticker {company.get("bloomberg_ticker", "")}, '
-              f'SEDOL {company.get("sedol", "")}. Categories: {types}. Fiscal period: {period or "LATEST AVAILABLE: find the two most up-to-date documents per category regardless of fiscal period"}. Publication cutoff: {cutoff}. '
+              f'SEDOL {company.get("sedol", "")}. Categories: {types}. {period_instruction} Publication cutoff: {cutoff}. '
               f'{scope} This is a document-discovery task: perform Google Search before responding and never answer from model knowledge. '
               'Keep multiple sources from different websites. Do not bypass paywalls. '
               'Find at least two different document URLs for each requested category. Search only the requested categories. '
@@ -298,14 +301,16 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
 
 
 def start(app, data):
-    if not data.get('latest_documents', True) and not re.fullmatch(r'\d{4}', str(data.get('period', ''))):
-        raise ValueError('Reporting period must be a four-digit year, for example 2025')
     types = data.get('source_types')
     if not isinstance(types, list) or not types:
         raise ValueError('Select at least one source type')
     if any(t not in TYPES for t in types):
         raise ValueError('Unknown source type selected')
+    if not re.fullmatch(r'\d{4}', str(data.get('period', ''))):
+        raise ValueError('Reporting period must be a four-digit year, for example 2025')
     types = list(dict.fromkeys(types))
+    if len(types) > MAX_SOURCE_TYPES_PER_SEARCH:
+        raise ValueError(f'Select at most {MAX_SOURCE_TYPES_PER_SEARCH} source types per search')
     if not data.get('portfolio_id'):
         raise ValueError('Select a portfolio in Portfolio Exposure Dashboard')
     portfolio = app.get('portfolio_imports', data['portfolio_id'])
@@ -324,7 +329,7 @@ def start(app, data):
            'documents_per_type': DOCUMENTS_PER_TYPE, 'cutoff': data['cutoff'],
             'time_limit_seconds': SEARCH_TIME_LIMIT_SECONDS,
             'deadline_unix': time.time() + SEARCH_TIME_LIMIT_SECONDS,
-           'period': None if data.get('latest_documents', True) else data.get('period'),
+           'period': data.get('period'),
            'latest_documents': data.get('latest_documents', True),
            'first_pass_completed': False, 'phase': 'preferred_websites',
            'search_models': {'first_pass': FIRST_PASS_MODEL, 'missing_results': MISSING_RESULTS_MODEL},

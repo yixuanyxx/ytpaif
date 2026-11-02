@@ -2332,14 +2332,15 @@ async function viewSources() {
           <div style="margin-bottom:12px;padding:10px 12px;background:var(--teal-50);border-radius:6px;border:1px solid var(--teal-200)">
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--teal-900);cursor:pointer">
               <input type="checkbox" id="src-latest-documents" style="width:auto" checked>
-              <span id="latest-documents-label">Using latest documents</span>
+              <span id="latest-documents-label">Use latest documents for the selected reporting year</span>
             </label>
             <div class="text-muted text-small" style="margin-left:22px;margin-top:2px">
-              Find the most up-to-date documents in every source category, published on or before the cutoff date. Fiscal period is ignored when enabled.
+              Find the most up-to-date documents in every source category for the selected financial year, published on or before the cutoff date.
             </div>
           </div>
 
           <div class="form-section-title">Source types</div>
+          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Select up to 2 source types per search.</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
             ${SOURCE_TYPES.map(t => `
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
@@ -2355,11 +2356,12 @@ async function viewSources() {
           <div class="form-grid">
             <div class="form-group">
               <label class="field-label">Reporting period</label>
-              <input type="number" id="src-period" inputmode="numeric" min="1000" max="9999" step="1" placeholder="e.g. 2025" disabled>
+              <input type="number" id="src-period" inputmode="numeric" min="1000" max="9999" step="1" placeholder="e.g. 2025" required>
             </div>
             <div class="form-group">
               <label class="field-label">Evidence cutoff date</label>
               <input type="date" id="src-cutoff" disabled>
+              <div class="field-hint">For a completed year, this is 31 December of that year. For the current year, it is today.</div>
             </div>
           </div>
         </div>
@@ -2497,27 +2499,50 @@ async function viewSources() {
     const parts = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
     const part = type => parts.find(p => p.type === type).value;
     const today = `${part('year')}-${part('month')}-${part('day')}`;
-    periodInput.disabled = latest;
+    const reportingYear = Number(periodInput.value);
+    const currentYear = Number(part('year'));
+    periodInput.disabled = false;
     cutoffInput.disabled = latest;
-    $('#latest-documents-label').textContent = latest ? 'Using latest documents' : 'Use latest available documents';
-    for (const input of [periodInput, cutoffInput]) {
+    $('#latest-documents-label').textContent = latest
+      ? 'Use latest documents for the selected reporting year'
+      : 'Use documents from the selected reporting year';
+    for (const input of [cutoffInput]) {
       input.style.backgroundColor = latest ? '#f1f5f9' : '';
       input.style.color = latest ? '#64748b' : '';
       input.style.cursor = latest ? 'not-allowed' : '';
       input.setAttribute?.('aria-disabled', String(latest));
     }
     if (latest) {
-      periodInput.value = '';
-      periodInput.placeholder = 'Using latest documents';
-      cutoffInput.value = today;
+      cutoffInput.value = Number.isInteger(reportingYear) && reportingYear >= 1000 && reportingYear < currentYear
+        ? `${reportingYear}-12-31`
+        : today;
     } else {
-      periodInput.value = '';
-      periodInput.placeholder = 'e.g. 2025';
       cutoffInput.value = theme?.cutoff || today;
     }
   };
   $('#src-latest-documents').addEventListener('change', updateLatestDocumentFields);
+  $('#src-period').addEventListener('input', () => {
+    if ($('#src-latest-documents').checked) updateLatestDocumentFields();
+  });
   updateLatestDocumentFields();
+
+  const sourceTypeInputs = Array.from($$('input[name="source_types"]'));
+  const updateSourceTypeLimit = () => {
+    const selectedCount = sourceTypeInputs.filter(input => input.checked).length;
+    sourceTypeInputs.forEach(input => {
+      input.disabled = !input.checked && selectedCount >= 2;
+      if (input.parentElement) input.parentElement.style.opacity = input.disabled ? '0.55' : '';
+    });
+  };
+  sourceTypeInputs.forEach(input => input.addEventListener('change', () => {
+    const selectedCount = sourceTypeInputs.filter(option => option.checked).length;
+    if (selectedCount > 2) {
+      input.checked = false;
+      showAlert('Select up to two source types per search.', 'Source type limit');
+    }
+    updateSourceTypeLimit();
+  }));
+  updateSourceTypeLimit();
 
   $('#btn-run-search').onclick = async () => {
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
@@ -2526,7 +2551,11 @@ async function viewSources() {
     const period = $('#src-period')?.value || '';
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
     const latestDocuments = $('#src-latest-documents')?.checked ?? true;
-    if (!latestDocuments && !/^\d{4}$/.test(period)) {
+    if (selectedTypes.length > 2) {
+      showAlert('Select up to two source types per search.', 'Source type limit');
+      return;
+    }
+    if (!/^\d{4}$/.test(period)) {
       showAlert('Enter a four-digit reporting year, for example 2025.', 'Invalid reporting year');
       return;
     }
