@@ -10,6 +10,8 @@ let state = null;
 let currentView = 'dashboard';
 let selectedDashboardThemeId = '';
 let selectedDashboardPortfolioId = '';
+let selectedSourcePortfolioId = '';
+let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
 let sourceSearchPollTimer = null;
 const trackedSourceSearches = new Set();
@@ -53,6 +55,7 @@ function monitorSourceSearches() {
 }
 const VIEW_STORAGE_KEY = 'theme-lab-current-view';
 const SELECTION_STORAGE_KEY = 'theme-lab-dashboard-selection';
+const SOURCE_PORTFOLIO_STORAGE_KEY = 'theme-lab-source-portfolio-selection';
 function saveDashboardSelection() {
   try {
     localStorage.setItem(SELECTION_STORAGE_KEY, JSON.stringify({
@@ -69,6 +72,11 @@ function restoreDashboardSelection() {
     selectedDashboardThemeId = '';
     selectedDashboardPortfolioId = '';
   }
+}
+function saveSourcePortfolioSelection() {
+  try {
+    localStorage.setItem(SOURCE_PORTFOLIO_STORAGE_KEY, selectedSourcePortfolioId);
+  } catch { /* Source navigation still works when storage is unavailable. */ }
 }
 const VALID_VIEWS = new Set([
   'theme', 'portfolio', 'sources', 'analysis', 'dashboard'
@@ -228,9 +236,6 @@ function setView(view) {
   if (!VALID_VIEWS.has(view)) return;
   if (currentView === 'theme') captureThemeDraft();
   if (view !== currentView) clearNotice();
-  if (view === 'theme' && view !== currentView) {
-    _activeThemeId = selectedDashboardThemeId || (state.themes || []).filter(t => t.approved).at(-1)?.id || '';
-  }
   currentView = view;
   try {
     localStorage.setItem(VIEW_STORAGE_KEY, view);
@@ -329,6 +334,7 @@ function waterfallChart(companies, state) {
 // ══════════════════════════════════════════════════════
 let _activeThemeId = null;
 let _themeEditorKey = 'new';
+let showSavedThemes = false;
 const themeDrafts = new Map();
 
 function captureThemeDraft() {
@@ -348,7 +354,6 @@ function savedThemesListHtml(savedThemes, activeTheme) {
     <div class="panel saved-themes-panel">
       <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <span>Saved themes <span class="badge badge-neutral">${savedThemes.length}</span></span>
-        <button type="button" class="btn btn-sm btn-primary" id="btn-new-theme">+ New theme</button>
       </div>
       <div class="panel-subtitle">${savedThemes.length
         ? 'Click a theme to load its definition and sub-theme taxonomy into the editor.'
@@ -380,7 +385,7 @@ async function viewTheme(overrideThemeId) {
   }
   const savedThemes = (state.themes || []).filter(t => t.approved);
   if (_activeThemeId === null) {
-    _activeThemeId = selectedDashboardThemeId || savedThemes.at(-1)?.id || '';
+    _activeThemeId = '';
   }
   // An empty active ID means "new blank theme"; saved themes are only loaded
   // after an explicit selection.
@@ -395,7 +400,15 @@ async function viewTheme(overrideThemeId) {
 
   setPageHeader('STEP 1', 'Theme Definition',
     'Define an investment theme and its sub-theme taxonomy');
-  $('#page-actions').innerHTML = '';
+  $('#page-actions').innerHTML = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button type="button" class="btn btn-secondary" id="btn-saved-themes" aria-expanded="${showSavedThemes}">
+        ${showSavedThemes ? 'Hide saved themes' : 'Saved themes'}
+      </button>
+      <button type="button" class="btn btn-primary" id="btn-new-theme">
+        <span aria-hidden="true">+</span> New theme
+      </button>
+    </div>`;
 
   const themeFormHtml = `
     <form id="theme-form">
@@ -461,6 +474,7 @@ async function viewTheme(overrideThemeId) {
 
   $('#page-content').innerHTML = `
     <div class="theme-layout">
+      ${showSavedThemes ? savedThemesListHtml(savedThemes, theme) : ''}
 
       <!-- 1. Theme Scope Card (Top, full width) -->
       <details class="panel theme-scope" open>
@@ -493,6 +507,11 @@ async function viewTheme(overrideThemeId) {
   if (draft) $('#taxonomy-json-area').value = draft.taxonomyJson;
   $('#theme-form').addEventListener('input', captureThemeDraft);
   $('#btn-map-export').onclick = exportMindmap;
+  $('#btn-saved-themes')?.addEventListener('click', () => {
+    captureThemeDraft();
+    showSavedThemes = !showSavedThemes;
+    viewTheme();
+  });
   updateTaxonomyMindmap();
   $('#taxonomy-json-area').addEventListener('input', updateTaxonomyMindmap);
   $('#theme-form [name="theme_name"]').addEventListener('input', updateTaxonomyMindmap);
@@ -1410,11 +1429,6 @@ async function viewPortfolio() {
     $('#page-content').innerHTML = '<div class="panel">Select a theme in Portfolio Exposure Dashboard before importing a portfolio.</div>';
     return;
   }
-  const selected = (state.portfolio_imports || []).find(p => p.id === selectedDashboardPortfolioId && p.theme_id === selectedDashboardThemeId);
-  if (selected && !_stagingRows) {
-    renderPortfolioDetails(selected);
-    return;
-  }
   setPageHeader('STEP 2', 'Portfolio Import',
     'Upload holdings and match companies');
 
@@ -1514,11 +1528,7 @@ function renderUploadZone() {
     button.addEventListener('click', () => {
       const portfolio = (state.portfolio_imports || [])
         .find(item => item.id === button.dataset.openPortfolio);
-      if (portfolio) {
-        selectedDashboardPortfolioId = portfolio.id;
-        saveDashboardSelection();
-        renderPortfolioDetails(portfolio);
-      }
+      if (portfolio) renderPortfolioDetails(portfolio);
     });
   });
   $$('[data-del-portfolio]').forEach(button => {
@@ -2125,9 +2135,9 @@ function renderExistingPortfolioCards() {
       <div class="panel-subtitle">Select a portfolio to view its saved holdings.</div>
       <ul class="saved-theme-list">
         ${portfolios.map(portfolio => `
-          <li class="saved-theme-row ${portfolio.id === selectedDashboardPortfolioId ? 'portfolio-selected' : ''}">
+          <li class="saved-theme-row">
             <button type="button" class="saved-theme-main" data-open-portfolio="${esc(portfolio.id)}" title="View this portfolio's holdings">
-              <span class="saved-theme-name">${esc(portfolio.name)}${portfolio.id === selectedDashboardPortfolioId ? ' <span class="badge badge-amber">Selected</span>' : ''}</span>
+              <span class="saved-theme-name">${esc(portfolio.name)}</span>
               <span class="saved-theme-meta">${esc(portfolio.holdings_date || 'Date not specified')} · ${portfolio.rows?.length || 0} holdings · ${esc(portfolio.benchmark_name || 'Benchmark not specified')}${portfolio.file_name ? ` · Excel: ${esc(portfolio.file_name)}` : ''}</span>
             </button>
             <div class="saved-theme-actions">
@@ -2145,10 +2155,22 @@ async function viewSources() {
   setPageHeader('STEP 3', 'Source Documents',
     'Find and upload company filings');
   const portfolios = state.portfolio_imports || [];
-  const portfolio = portfolios.find(p => p.id === selectedDashboardPortfolioId && p.theme_id === selectedDashboardThemeId);
+  const eligiblePortfolios = portfolios.filter(p => p.theme_id === selectedDashboardThemeId);
+  let savedSourcePortfolioId = '';
+  try {
+    savedSourcePortfolioId = localStorage.getItem(SOURCE_PORTFOLIO_STORAGE_KEY) || '';
+  } catch {
+    // Keep using the current in-memory selection when browser storage is unavailable.
+  }
+  const preferredSourcePortfolioId = selectedSourcePortfolioId || savedSourcePortfolioId;
+  const sourcePortfolio = eligiblePortfolios.find(p => p.id === preferredSourcePortfolioId)
+    || eligiblePortfolios.at(-1);
+  selectedSourcePortfolioId = sourcePortfolio?.id || '';
+  saveSourcePortfolioSelection();
+  const portfolio = sourcePortfolio;
   if (!portfolio) {
     $('#page-actions').innerHTML = '';
-    $('#page-content').innerHTML = '<div class="panel">Select a theme and portfolio in Portfolio Exposure Dashboard to view source documents.</div>';
+    $('#page-content').innerHTML = '<div class="panel">Select a theme in Portfolio Exposure Dashboard and import a portfolio to view source documents.</div>';
     return;
   }
   const portfolioRows = portfolio?.rows || [];
@@ -2156,12 +2178,17 @@ async function viewSources() {
   const companies = (state.companies || []).filter(company => companyIds.has(company.id));
   const sources = (state.sources || []).filter(source => companyIds.has(source.company_id));
   const theme     = (state.themes || []).find(t => t.id === selectedDashboardThemeId);
+  const uploadCompanyId = companies.some(company => company.id === pendingManualUploadCompanyId)
+    ? pendingManualUploadCompanyId : '';
+  pendingManualUploadCompanyId = '';
 
   $('#page-actions').innerHTML = '';
   const portfolioSelectorHtml = `
     <div class="panel">
-      <div class="field-label">Portfolio</div>
-      <strong>${esc(portfolio.name)}</strong>
+      <label class="field-label" for="source-portfolio-select">Portfolio</label>
+      <select id="source-portfolio-select">
+        ${eligiblePortfolios.map(item => `<option value="${esc(item.id)}" ${item.id === portfolio.id ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}
+      </select>
     </div>`;
 
   const SOURCE_TYPES = [
@@ -2305,7 +2332,7 @@ async function viewSources() {
                 <label class="field-label">Company <span class="required">*</span></label>
                 <select name="company_id" required>
                   <option value="">${companies.length ? '— select company —' : 'No companies in selected portfolio'}</option>
-                  ${companies.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
+                  ${companies.map(c=>`<option value="${esc(c.id)}" ${c.id === uploadCompanyId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
                 </select>
               </div>
               <div class="form-group span-2">
@@ -2354,6 +2381,11 @@ async function viewSources() {
       </div>
     </div>`;
 
+  $('#source-portfolio-select').addEventListener('change', event => {
+    selectedSourcePortfolioId = event.target.value;
+    saveSourcePortfolioSelection();
+    viewSources();
+  });
 
   // Real-time filtering by SEDOL, ticker or company name
   const filterChecklist = (query) => {
@@ -2740,7 +2772,7 @@ window.copyDocModalContent = function() {
 // VIEW: AI ANALYSIS  (YTP-19, YTP-20)
 // ══════════════════════════════════════════════════════
 async function viewAnalysis() {
-  setPageHeader('STEP 4', 'AI Analysis & Case Review',
+  setPageHeader('STEP 4', 'Calculate Exposure',
     'Extract revenue facts, audit classifications with Claude Sonnet 5, and review cases');
 
   const theme     = (state.themes||[]).filter(t=>t.approved).at(-1);
@@ -2791,7 +2823,7 @@ async function viewAnalysis() {
       <div class="panel">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
           <div>
-            <div class="panel-title">Analysis &amp; Review Queue</div>
+            <div class="panel-title">Company-level Exposure</div>
             <div class="panel-subtitle">
               ${companies.length} companies · ${cases.length} cases · ${pending.length} awaiting review
             </div>
@@ -2804,14 +2836,14 @@ async function viewAnalysis() {
         </div>
 
         ${companyProgress.length > 0 ? `
-          <div class="table-wrap" style="max-height:480px;overflow-y:auto;margin-bottom:16px">
+          <div class="table-wrap" style="margin-bottom:16px">
             <table style="width:100%;font-size:12.5px">
               <thead>
                 <tr>
                   <th>Company</th>
                   <th>Sources</th>
                   <th class="td-num">Exposure</th>
-                  <th>Confidence</th>
+                  <th>AI confidence</th>
                   <th style="text-align:right">Action</th>
                 </tr>
               </thead>
@@ -2852,7 +2884,7 @@ async function viewAnalysis() {
                             ✧ Analyse
                           </button>
                         ` : `
-                          <button class="btn btn-sm" data-goto="sources">Upload</button>
+                          <button class="btn btn-sm" onclick="event.stopPropagation(); openManualUploadForCompany('${esc(c.id)}')">Upload</button>
                         `)}
                       </td>
                     </tr>`;
@@ -2866,46 +2898,6 @@ async function viewAnalysis() {
             <p><a href="#" data-goto="portfolio">Import a portfolio</a> to add companies for analysis.</p>
           </div>`}
 
-        <!-- Accordion 1: Targeted Single-Company Passage Selection -->
-        <details class="accordion" style="margin-bottom:8px">
-          <summary class="accordion-header" style="cursor:pointer;font-weight:600;font-size:13px;display:flex;justify-content:space-between;align-items:center">
-            <span>✧ Targeted passage analysis</span>
-            <span class="chevron">▾</span>
-          </summary>
-          <div class="accordion-body" style="padding:14px">
-            <div class="text-muted text-small mb-12">
-              Select a company to choose specific evidence passages to send to the AI model.
-            </div>
-            <div class="form-group mb-8">
-              <label class="field-label">Company</label>
-              <select id="analysis-company-select" onchange="openAnalysisPanel(this.value)">
-                <option value="">— select company —</option>
-                ${companies.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
-              </select>
-            </div>
-          </div>
-        </details>
-
-        <!-- Accordion 2: Manual Case Form -->
-        <details class="accordion">
-          <summary class="accordion-header" style="cursor:pointer;font-weight:600;font-size:13px;display:flex;justify-content:space-between;align-items:center">
-            <span>✍ Create manual case</span>
-            <span class="chevron">▾</span>
-          </summary>
-          <div class="accordion-body" style="padding:14px">
-            <div class="text-muted text-small mb-12">
-              Manually enter or override revenue numbers without running the AI.
-            </div>
-            <div class="form-group mb-8">
-              <label class="field-label">Company</label>
-              <select id="manual-company-select">
-                <option value="">— select company —</option>
-                ${companies.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
-              </select>
-            </div>
-            <button class="btn btn-sm btn-secondary" id="btn-open-manual">Open manual form in workspace</button>
-          </div>
-        </details>
       </div>
 
       <!-- Right Column: Case Review & Auditor Workspace -->
@@ -2945,12 +2937,6 @@ async function viewAnalysis() {
       render();
     }, 'Batch analyzing…');
   }
-
-  $('#btn-open-manual')?.addEventListener('click', () => {
-    const cid = $('#manual-company-select').value;
-    if (!cid) return notice('Select a company first.', 'error');
-    openManualCaseForm(cid);
-  });
 
   if (selectedCaseId) {
     openCase(selectedCaseId);
@@ -3055,6 +3041,11 @@ window.openAnalysisPanel = function(companyId) {
     bindAnalysisPanel(companyId);
     panel.scrollIntoView({ behavior: 'smooth' });
   }
+};
+
+window.openManualUploadForCompany = function(companyId) {
+  pendingManualUploadCompanyId = companyId;
+  setView('sources');
 };
 
 function bindAnalysisPanel(companyId) {
@@ -3563,10 +3554,16 @@ async function viewDashboard() {
   saveDashboardSelection();
 
   const selectorsHtml = `
-    <div style="margin-bottom:12px">
-      <button type="button" class="btn btn-sm btn-primary" id="btn-new-theme">+ New theme</button>
-    </div>
     <div class="dashboard-selectors">
+      <div class="dashboard-setup-header">
+        <div>
+          <div class="dashboard-setup-title">Analysis setup</div>
+          <div class="dashboard-setup-description">Choose a theme and portfolio to view exposure.</div>
+        </div>
+        <button type="button" class="btn btn-primary dashboard-new-theme" id="btn-new-theme">
+          <span aria-hidden="true">+</span> New theme
+        </button>
+      </div>
       <label class="dashboard-selector">
         <span>Theme</span>
         <select id="dashboard-theme-select" ${themes.length ? '' : 'disabled'}>
