@@ -15,14 +15,26 @@ let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
 let sourceSearchPollTimer = null;
 const trackedSourceSearches = new Set();
+function sourceSearchFailureSummary(search) {
+  const saved = search.results_count || 0;
+  const completed = search.companies_completed?.length || 0;
+  const total = search.company_ids?.length || 0;
+  const reason = (search.errors?.[0]?.reason || 'Review the search run and try again.').replace(/[.!?]+$/, '');
+  const quotaGuidance = /429|rate limit|quota/i.test(reason)
+    ? ' Gemini rejected the request before completing a company search. Check quota, billing, and Google Search grounding access for the configured API project; retry only after the provider limit is available.'
+    : '';
+  return `AI source search failed. ${saved} documents saved; ${completed} of ${total} companies searched. ${reason}.${quotaGuidance}`;
+}
 function notifyFinishedSourceSearches() {
   for (const search of state.search_runs || []) {
-    if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed'].includes(search.status)) continue;
+    if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed', 'cancelled'].includes(search.status)) continue;
     trackedSourceSearches.delete(search.id);
     const count = search.results_count || 0;
     const gaps = search.missing?.length || 0;
     if (search.status === 'failed') {
-      notice(`AI source search failed. ${count} documents were saved before the failure. Review Source Documents and try again.`, 'error');
+      notice(sourceSearchFailureSummary(search), 'error');
+    } else if (search.status === 'cancelled') {
+      notice(`AI source search stopped. ${count} documents were saved before it stopped.`, 'warning');
     } else {
       notice(`AI source search is over. ${count} documents saved.${gaps ? ` ${gaps} company/source-type gaps remain; review Source Documents.` : ' All required source categories are covered.'}`, gaps ? 'warning' : 'success');
     }
@@ -30,7 +42,7 @@ function notifyFinishedSourceSearches() {
 }
 function monitorSourceSearches() {
   for (const search of state.search_runs || []) {
-    if (search.status === 'running') trackedSourceSearches.add(search.id);
+    if (['running', 'cancelling'].includes(search.status)) trackedSourceSearches.add(search.id);
   }
   if (sourceSearchPollTimer) return;
   sourceSearchPollTimer = setTimeout(async () => {
@@ -40,17 +52,24 @@ function monitorSourceSearches() {
       if (!running.length) return;
       await refresh();
       notifyFinishedSourceSearches();
-      const pending = (state.search_runs || []).some(r => running.includes(r.id) && r.status === 'running');
+      const pending = (state.search_runs || []).some(r => running.includes(r.id) && ['running', 'cancelling'].includes(r.status));
+      const cancelling = (state.search_runs || []).some(r => running.includes(r.id) && r.status === 'cancelling');
       if (currentView === 'sources') {
         const status = $('#source-search-status');
         if (status) status.innerHTML = pending
-          ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Searching for source documents in the background… You can continue browsing.'
+          ? `<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> ${cancelling ? 'Stopping source search…' : 'Searching for source documents in the background… You can continue browsing.'}`
           : 'AI source search finished. Reopen Source Documents to view the latest results.';
         const button = $('#btn-run-search');
         if (button) button.disabled = pending;
+        const cancelButton = $('#btn-cancel-source-search');
+        if (cancelButton) cancelButton.disabled = cancelling;
       }
       if (pending) monitorSourceSearches();
-    } catch { monitorSourceSearches(); }
+    } catch (error) {
+      const status = $('#source-search-status');
+      if (currentView === 'sources' && status) status.textContent = `Could not check source-search status: ${error.message}`;
+      if (trackedSourceSearches.size) monitorSourceSearches();
+    }
   }, 5000);
 }
 const VIEW_STORAGE_KEY = 'theme-lab-current-view';
@@ -2214,6 +2233,16 @@ async function viewSources() {
   }).join('');
 
   const latestSearchRun = (state.search_runs || []).at(-1) || null;
+  const searchIsActive = ['running', 'cancelling'].includes(latestSearchRun?.status);
+  const searchStatus = latestSearchRun?.status === 'running'
+    ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Searching for source documents in the background… You can continue browsing.'
+    : latestSearchRun?.status === 'cancelling'
+      ? 'Stopping source search…'
+      : latestSearchRun?.status === 'cancelled'
+        ? `Source search stopped. ${esc(latestSearchRun.cancel_reason || '')}`
+        : latestSearchRun?.status === 'failed'
+            ? esc(sourceSearchFailureSummary(latestSearchRun))
+          : '';
   monitorSourceSearches();
   const portfolioCompanyIds = new Set(companies.map(company => company.id));
   const candidateResults = (latestSearchRun?.results || [])
@@ -2228,7 +2257,7 @@ async function viewSources() {
       <div class="panel">
         <div class="panel-title">Document search settings</div>
         <div class="panel-subtitle">
-          Searches your uploaded company documents. Upload real PDF or TXT filings below; automated web retrieval is unavailable.
+          Search for public company documents or upload PDF and TXT filings below. You can stop a search while it is running.
         </div>
 
         <div class="form-section-title">Companies to search</div>
@@ -2283,14 +2312,15 @@ async function viewSources() {
         </div>
 
         <div class="btn-group">
-          <button class="btn btn-primary" id="btn-run-search" ${companies.length===0 || latestSearchRun?.status === 'running' ? 'disabled' : ''}>
+          <button class="btn btn-primary" id="btn-run-search" ${companies.length===0 || searchIsActive ? 'disabled' : ''}>
             ✦ Ask AI for source documents
           </button>
+          ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${latestSearchRun.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
           <span class="text-muted text-small">
             Searches preferred websites first, then other public sources. Runs for up to 10 minutes.
           </span>
         </div>
-        <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${latestSearchRun?.status === 'running' ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Searching for source documents in the background… You can continue browsing.' : ''}</div>
+        <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${searchStatus}</div>
       </div>
 
       <!-- Source library + manual upload -->
@@ -2467,6 +2497,23 @@ async function viewSources() {
       if (currentView === 'sources') $('#source-search-status').textContent = `Could not start search: ${error.message}`;
     }
   };
+
+  $('#btn-cancel-source-search')?.addEventListener('click', async () => {
+    const button = $('#btn-cancel-source-search');
+    button.disabled = true;
+    $('#source-search-status').textContent = 'Stopping source search…';
+    try {
+      await api('source/search/cancel', { id: latestSearchRun.id });
+      await refresh();
+      if (currentView === 'sources') await viewSources();
+      monitorSourceSearches();
+    } catch (error) {
+      if (currentView === 'sources') {
+        $('#source-search-status').textContent = `Could not stop source search: ${error.message}`;
+      }
+      button.disabled = false;
+    }
+  });
 
   $('#source-form').onsubmit = e => {
     e.preventDefault();

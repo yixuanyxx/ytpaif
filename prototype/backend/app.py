@@ -1228,7 +1228,15 @@ def portfolio_import(d):
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
+def source_search_cancel(d):
+    import source_discovery
+    import sys
+    return {'search_run': source_discovery.cancel(sys.modules[__name__], d)}
+
 def state():
+    import source_discovery
+    import sys
+    source_discovery.recover_stale_runs(sys.modules[__name__])
     key = os.environ.get('LLM_API_KEY') or os.environ.get('GEMINI_API_KEY', '')
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
@@ -1261,6 +1269,7 @@ def _dispatch(path, d):
     if path in ('/api/case/check', '/api/check'): return check_case(d)
     if path == '/api/company':          return company_create(d)
     if path in ('/api/source/search', '/api/search'): return source_search(d)
+    if path == '/api/source/search/cancel': return source_search_cancel(d)
     if path == '/api/source':           return source_ingest(d)
     if path in ('/api/portfolio/import', '/api/portfolio_import'): return portfolio_import(d)
     if path == '/api/case':             return save_case(d)

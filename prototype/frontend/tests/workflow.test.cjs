@@ -398,12 +398,52 @@ test('Source Documents has an independent portfolio selector and scopes the AI s
   assert.equal(storage.get('theme-lab-source-portfolio-selection'),'portfolio-a');
 
   context.document.querySelectorAll = selector =>
-    selector === 'input[name="company_ids"]:checked' ? [{value:'company-a'}] : [];
+    selector === 'input[name="company_ids"]:checked' ? [{value:'company-a'}] :
+      selector === 'input[name="source_types"]:checked' ? [{value:'annual_report'}] : [];
   await node('#btn-run-search').onclick();
   assert.equal(run('searchCalls[0].path'),'source/search');
   assert.equal(run('searchCalls[0].data.discover_web'),true);
   assert.equal(run('searchCalls[0].data.latest_documents'),true);
   assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.company_ids'))),['company-a']);
+  assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.source_types'))),['annual_report']);
+});
+test('Source search failure explains provider quota limits and search coverage',async()=>{
+  const {run,node} = setup();
+  run(`state = {
+    companies:[{id:'company-a',name:'TSMC'}],sources:[],cases:[],themes:[],
+    search_runs:[{
+      id:'search-failed',status:'failed',results_count:0,results:[],missing:[],
+      company_ids:Array.from({length:75},(_,i)=>'company-'+i),companies_completed:[],
+      errors:[{reason:'AI source provider rate limit exceeded (HTTP 429); retry after the quota resets.'}]
+    }],
+    portfolio_imports:[{id:'portfolio-a',theme_id:'theme-1',name:'Asia Core',rows:[{company_id:'company-a'}]}]
+  };
+  selectedDashboardThemeId='theme-1';`);
+  await run('viewSources()');
+  const html = node('#page-content').innerHTML;
+  assert.match(html,/0 documents saved; 0 of 75 companies searched/);
+  assert.match(html,/Check quota, billing, and Google Search grounding access/);
+});
+test('Source Documents can cancel an active AI search',async()=>{
+  const {run,node,context} = setup();
+  context.setTimeout=()=>1;
+  run(`state = {
+    companies:[{id:'company-a',name:'TSMC',bloomberg_ticker:'2330 TT',sedol:'6889106'}],
+    sources:[],cases:[],themes:[],search_runs:[{id:'search-1',status:'running',results:[]}],
+    portfolio_imports:[{id:'portfolio-a',theme_id:'theme-1',name:'Asia Core',rows:[{company_id:'company-a'}]}]
+  };
+  selectedDashboardThemeId='theme-1';
+  currentView='sources';
+  const calls=[];
+  api=async(path,data)=>{calls.push({path,data});state.search_runs[0].status='cancelled';return {search_run:state.search_runs[0]};};
+  refresh=async()=>{};`);
+  await run('viewSources()');
+  assert.match(node('#page-content').innerHTML,/Cancel search/);
+  await node('#btn-cancel-source-search').click();
+  assert.equal(run('calls[0].path'),'source/search/cancel');
+  assert.equal(run('calls[0].data.id'),'search-1');
+  assert.equal(run('state.search_runs[0].status'),'cancelled');
+  assert.match(node('#page-content').innerHTML,/Source search stopped/);
 });
 test('Evaluate page and navigation entry are removed',()=>{
   const {run} = setup();

@@ -147,6 +147,8 @@ Explicitly out of scope for the presentation:
 12. The PM can choose an imported portfolio directly in Source Documents; this selection is independent of viewing portfolios or the dashboard selection and is retained for the next visit.
 12. Additional sources may support classification and explain business activities. Revenue figures used in exposure calculations must remain traceable to supporting disclosures; estimates are clearly distinguished from reported figures.
 13. The system retains the source list and document versions used for each analysis. A fresh search does not silently replace evidence used in a previous analysis.
+14. The PM can cancel a running source search. Interrupted or orphaned searches are shown as stopped rather than remaining indefinitely in a running state.
+15. Automated searches use only the selected companies and source types. If the search provider rate-limits a request, the system retries once only when the provider supplies a bounded retry delay; otherwise it reports the provider status, companies searched, documents saved, remaining company/source-type gaps, and quota or access checks.
 
 **Mentor notes (6 Oct):** Primary sources are SEC filings via EDGAR (10-K, 20-F, 40-F). Lagging (published) information only — no forward projections.
 
