@@ -87,10 +87,10 @@ test('AI source completion notifies on other pages only once',()=>{
   assert.equal(node('#notice-area').innerHTML,'');
 });
 
-test('AI source completion explains when the ten-minute limit is reached',()=>{
+test('AI source completion explains when the five-minute limit is reached',()=>{
   const {run,node}=setup();
   run("trackedSourceSearches.add('job1'); state.search_runs=[{id:'job1',status:'incomplete',completion_reason:'time_limit_reached',results_count:3,missing:[{}]}]; notifyFinishedSourceSearches()");
-  assert.match(node('#notice-area').innerHTML,/reached its 10-minute limit.*3 documents saved.*1 company/);
+  assert.match(node('#notice-area').innerHTML,/reached its 5-minute limit.*3 documents saved.*1 company/);
 });
 
 test('The selected page is restored after reloading the app',()=>{

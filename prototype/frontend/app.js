@@ -216,7 +216,10 @@ function clearNotice() {
 // Centred modal alert with a greyed-out backdrop and an OK button.
 function showAlert(message, title = 'Limit reached') {
   const dialog = $('#alert-modal');
-  if (!dialog) { alert(message); return; }
+  if (!dialog || typeof dialog.showModal !== 'function') {
+    if (typeof alert === 'function') alert(message);
+    return;
+  }
   $('#alert-modal-title').textContent = title;
   $('#alert-modal-message').textContent = message;
   const ok = $('#alert-modal-ok');
@@ -2348,7 +2351,7 @@ async function viewSources() {
           </div>
 
           <div class="form-section-title">Source types</div>
-          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Choose up to 2 source types per AI search. Each type stops at 2 verified sources or after 5 minutes.</div>
+          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Select up to 2 source types per search. Each type stops at 2 verified sources or after 5 minutes.</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
             ${SOURCE_TYPES.map(t => `
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
@@ -4329,19 +4332,15 @@ window.syncToSupabase = async function() {
   }
 };
 
-window.addEventListener('beforeunload', () => {
-  try {
-    navigator.sendBeacon('/api/sync');
-  } catch (e) {
-    // Keep browser unload synchronous and non-blocking
-  }
-});
-
-window.addEventListener('pagehide', () => {
-  try {
-    navigator.sendBeacon('/api/sync');
-  } catch (e) {
-    // Keep browser pagehide synchronous and non-blocking
-  }
-});
+if (typeof window.addEventListener === 'function') {
+  const syncSourcesOnExit = () => {
+    try {
+      navigator.sendBeacon('/api/sync');
+    } catch (e) {
+      // Keep browser unload synchronous and non-blocking.
+    }
+  };
+  window.addEventListener('beforeunload', syncSourcesOnExit);
+  window.addEventListener('pagehide', syncSourcesOnExit);
+}
 
