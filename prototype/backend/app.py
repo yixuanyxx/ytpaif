@@ -546,10 +546,10 @@ def dashboard(theme_id, snapshot_id=None):
 
 def llm(task, payload, run_rec):
     endpoint = os.environ.get('LLM_ENDPOINT') or DEFAULT_LLM_ENDPOINT
-    key   = os.environ.get('LLM_API_KEY') or os.environ.get('GEMINI_API_KEY', '')
+    key   = os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     if not key:
-        raise ValueError('Set LLM_API_KEY to enable AI; manual analysis is available now')
+        raise ValueError('Set FINANCIALS_LLM_API_KEY to enable AI; manual analysis is available now')
     if urlparse(endpoint).scheme != 'https' and urlparse(endpoint).hostname not in ('localhost', '127.0.0.1'):
         raise ValueError('Provider endpoint must use HTTPS')
     cache_key = hashlib.sha256(
@@ -1380,7 +1380,7 @@ def state():
     import source_discovery
     import sys
     source_discovery.recover_stale_runs(sys.modules[__name__])
-    key = os.environ.get('LLM_API_KEY') or os.environ.get('GEMINI_API_KEY', '')
+    key = os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
     checker_model = os.environ.get('CHECKER_LLM_MODEL') or DEFAULT_CHECKER_MODEL

@@ -23,7 +23,7 @@ class AppFlowTest(unittest.TestCase):
 
     def test_general_ai_uses_gemini_38_without_grounding(self):
         output = json.dumps({'choices': [{'message': {'content': '{}'}}]}).encode()
-        with patch.dict(os.environ, {'LLM_API_KEY': 'gemini-test-key', 'LLM_MODEL': ''}), \
+        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'gemini-test-key', 'LLM_API_KEY': 'billed-key', 'LLM_MODEL': ''}), \
                 patch.object(self.app, 'urlopen', side_effect=lambda *a, **kw: io.BytesIO(output)) as send:
             for task in ('taxonomy', 'node breakdown', 'extraction', 'classification'):
                 self.app.llm(task, {}, {'usage': []})
@@ -398,7 +398,7 @@ class AppFlowTest(unittest.TestCase):
     def test_failed_model_does_not_create_zero_case(self):
         evidence = self.app.all_records('sources')[0]['evidence'][0]['evidence_id']
         before = len(self.app.all_records('cases'))
-        with patch.dict(os.environ, {'LLM_API_KEY': '', 'LLM_MODEL': ''}):
+        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': '', 'LLM_MODEL': ''}):
             with self.assertRaises(ValueError):
                 self.app.analyze({'theme_id': self.theme['id'],
                                   'company_id': 'DEMO_A', 'evidence_ids': [evidence]})
@@ -406,7 +406,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(self.app.all_records('runs')[-1]['status'], 'failed')
 
     def test_provider_ignores_legacy_call_cap(self):
-        with patch.dict(os.environ, {'LLM_API_KEY': 'test', 'LLM_MODEL': 'test', 'LLM_MAX_CALLS': '0'}):
+        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'test', 'LLM_MODEL': 'test', 'LLM_MAX_CALLS': '0'}):
             with patch.object(self.app, 'urlopen') as send:
                 send.return_value.__enter__.return_value = io.BytesIO(
                     b'{"choices":[{"message":{"content":"{\\"nodes\\":[]}"}}]}')
