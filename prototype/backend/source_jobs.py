@@ -196,6 +196,17 @@ def execute(job_id):
                     self.last_mirror = time.monotonic()
                 return app.put(kind, record)
 
+            def put_many(self, kind, records):
+                # Discovery results stay in the session's Redis cache.  The
+                # browser logout/tab-close sync promotes its pending links to
+                # Supabase; other source workflows keep their existing
+                # immediate-persistence behaviour.
+                if kind == 'sources':
+                    if not app.source_cache.save_sources_to_redis(records):
+                        raise RuntimeError('Redis source cache is unavailable; source links were not persisted')
+                    return records
+                return app.put_many(kind, records)
+
             def stage_source(self, record):
                 queue.stage_source(job_id, record)
 

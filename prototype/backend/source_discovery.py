@@ -19,7 +19,7 @@ FIRST_PASS_MODEL = 'gemini-3.5-flash-lite'
 MISSING_RESULTS_MODEL = 'gemini-3.8-flash'
 DOCUMENTS_PER_TYPE = 2
 MAX_SOURCE_TYPES_PER_SEARCH = 2
-SEARCH_TIME_LIMIT_SECONDS = 10 * 60
+SEARCH_TIME_LIMIT_SECONDS = 5 * 60
 COMPANY_WORKERS = 4
 LINK_WORKERS = 8
 SAVE_BATCH_SIZE = 20
@@ -311,6 +311,10 @@ def start(app, data):
     types = list(dict.fromkeys(types))
     if len(types) > MAX_SOURCE_TYPES_PER_SEARCH:
         raise ValueError(f'Select at most {MAX_SOURCE_TYPES_PER_SEARCH} source types per search')
+    period = str(data.get('period')).strip()
+    # Search a bounded three-year window, newest first.  The two earlier years
+    # are only queried for company/source-type gaps left by the newer years.
+    search_periods = [str(int(period) - offset) for offset in range(3)]
     if not data.get('portfolio_id'):
         raise ValueError('Select a portfolio in Portfolio Exposure Dashboard')
     portfolio = app.get('portfolio_imports', data['portfolio_id'])
@@ -319,17 +323,19 @@ def start(app, data):
         raise ValueError('Match all portfolio stocks to companies before searching for documents')
     company_ids = list(dict.fromkeys(r['company_id'] for r in rows))
     if not company_ids: raise ValueError('The portfolio has no stocks to search')
-    app.parse_date(data['cutoff'])
+    cutoff = data.get('cutoff') or app.now()[:10]
+    app.parse_date(cutoff)
     company_index = {company['id']: company for company in app.all_records('companies')}
     if any(cid not in company_index for cid in company_ids):
         raise ValueError('Match all portfolio stocks to known companies before searching for documents')
     companies = [company_index[cid] for cid in company_ids]
     run = {'id': app.ident('searchrun'), 'created_at': app.now(), 'status': 'running',
            'portfolio_id': portfolio['id'], 'company_ids': company_ids, 'source_types': types,
-           'documents_per_type': DOCUMENTS_PER_TYPE, 'cutoff': data['cutoff'],
-            'time_limit_seconds': SEARCH_TIME_LIMIT_SECONDS,
-            'deadline_unix': time.time() + SEARCH_TIME_LIMIT_SECONDS,
-           'period': data.get('period'),
+           'documents_per_type': DOCUMENTS_PER_TYPE, 'cutoff': cutoff,
+           'time_limit_seconds': SEARCH_TIME_LIMIT_SECONDS,
+           'deadline_unix': time.time() + SEARCH_TIME_LIMIT_SECONDS,
+           'period': period,
+           'search_periods': search_periods,
            'latest_documents': data.get('latest_documents', True),
            'first_pass_completed': False, 'phase': 'preferred_websites',
            'search_models': {'first_pass': FIRST_PASS_MODEL, 'missing_results': MISSING_RESULTS_MODEL},
@@ -359,6 +365,12 @@ def recover_stale_runs(app):
     """Ensure the durable supervisor resumes queued/running jobs after an app restart."""
     import source_jobs
     source_jobs.ensure_worker()
+
+
+def source_link_records(app):
+    """Use Redis-backed source links when the app exposes them; keep tests portable."""
+    loader = getattr(app, 'source_link_records', None)
+    return loader() if callable(loader) else app.all_records('sources')
 
 
 def source_identity(source):
@@ -391,6 +403,11 @@ def worker(app, run, companies):
     failures = run.setdefault('provider_failures', {})
     completed_companies = set(run.setdefault('companies_completed', []))
     run.setdefault('first_pass_completed', False)
+    # Persist preferred-site progress per year.  A fallback year must still
+    # search listed websites before expanding to the rest of the web.
+    preferred_periods = set(run.setdefault('preferred_periods', []))
+    if run.get('first_pass_completed') and not preferred_periods:
+        preferred_periods.add(run.get('period'))
     run.setdefault('grounding_diagnostics', [])
     run.setdefault('time_limit_seconds', SEARCH_TIME_LIMIT_SECONDS)
     # Older durable jobs have no deadline. Give them one bounded run once this
@@ -436,12 +453,12 @@ def worker(app, run, companies):
             del pending[:len(batch)]
         last_save = time.monotonic()
 
-    def search(company, types, broad, known_urls, sites_by_type, timeout):
+    def search(company, types, search_period, broad, known_urls, sites_by_type, timeout):
         if stop.is_set() or time_limit_reached():
             return []
         try:
             timeout = max(1, min(timeout, int(seconds_remaining())))
-            return grounded_search(company, types, run['period'], run['cutoff'], broad, timeout,
+            return grounded_search(company, types, search_period, run['cutoff'], broad, timeout,
                                    known_urls, sites_by_type)
         except ProviderError:
             # A quota response must be recorded by the coordinator, after any
@@ -455,150 +472,178 @@ def worker(app, run, companies):
         return save_document(app, run, company, row, timeout)
 
     try:
-        sources = app.all_records('sources')
+        sources = source_link_records(app)
         pending.extend(app.pending_sources())
         flush()  # Replay uploaded metadata that had not been committed before restart.
         seen = {source_identity(s) for s in sources if s.get('url') and s.get('link_status') == 'verified'}
-        initially_satisfied = {
-            (company['id'], source_type)
-            for company in companies
-            for source_type in run['source_types']
-            if not any(gap['company_id'] == company['id'] and gap['source_type'] == source_type
-                       for gap in coverage_gaps(run, [company], sources))
-        }
         checkpoint()
         if time_limit_reached():
             finish_for_time_limit()
             return
+
+        if not coverage_gaps(run, companies, sources):
+            run['status'] = 'completed'
+            return
+
+        initial_period = run.get('period')
+        # New runs persist this field.  Keep older queued jobs compatible by
+        # deriving the same three-year window when possible.
+        if run.get('search_periods'):
+            years_to_search = list(dict.fromkeys(run['search_periods']))
+        elif initial_period and str(initial_period).isdigit():
+            years_to_search = [str(int(initial_period) - offset) for offset in range(3)]
+        elif initial_period:
+            years_to_search = [initial_period]
+        else:
+            years_to_search = [None]
+        run['search_periods'] = years_to_search
+        timed_out = False
+
         with ThreadPoolExecutor(max_workers=COMPANY_WORKERS) as searches, \
                 ThreadPoolExecutor(max_workers=LINK_WORKERS) as downloads:
-            while True:
-                if time_limit_reached():
-                    finish_for_time_limit()
+            for current_year in years_to_search:
+                if timed_out or time_limit_reached():
+                    timed_out = True
                     break
-                broad = run['first_pass_completed']
-                run['phase'] = 'other_public_websites' if broad else 'preferred_websites'
-                run['current_search_model'] = MISSING_RESULTS_MODEL if broad else FIRST_PASS_MODEL
-                tasks, documents = {}, {}
-                fatal = None
-                quota_blocked = False
+                # Check stopping condition: do any stocks still need sources?
+                current_gaps = coverage_gaps(run, companies, sources)
+                if not current_gaps:
+                    run['status'] = 'completed'
+                    break
 
-                def collect(future):
-                    company, row, identity = documents.pop(future)
-                    try:
-                        record = future.result()
-                        app.stage_source(record)
-                        pending.append(record)
-                    except Exception as error:
-                        seen.discard(identity)  # Failed downloads remain retryable.
-                        run['errors'].append({'company_id': company['id'], 'url': row['url'], 'reason': type(error).__name__})
-                    if len(pending) >= SAVE_BATCH_SIZE or (pending and time.monotonic()-last_save >= SAVE_INTERVAL):
-                        flush()
-
-                timed_out = False
-                for company in companies:
+                # Phase 1: Preferred websites (first search listed websites)
+                # Phase 2: Other public websites (then move onto search remainder of the web)
+                passes = (True,) if current_year in preferred_periods else (False, True)
+                for broad in passes:
                     if time_limit_reached():
                         timed_out = True
                         break
-                    # A new run starts with a complete preferred-sites pass for
-                    # every uncovered pair. Pairs already covered by prior runs
-                    # are skipped altogether, while the current first pass still
-                    # completes before gap-only follow-up work begins.
-                    types = ([g['source_type'] for g in coverage_gaps(run, [company], sources)]
-                             if broad else [source_type for source_type in run['source_types']
-                                            if (company['id'], source_type) not in initially_satisfied])
-                    if not types:
-                        continue
-                    known_urls = [s['url'] for s in sources if s['company_id'] == company['id']
-                                  and s.get('source_type') in types and s.get('url') and s.get('link_status') == 'verified']
-                    sites_by_type = excluded_websites(sources, company['id'], types)
-                    timeout = max(1, min(90, int(seconds_remaining())))
-                    tasks[searches.submit(search, company, types, broad, known_urls, sites_by_type, timeout)] = (company, types)
-
-                while tasks or documents:
-                    remaining = seconds_remaining()
-                    if remaining <= 0:
-                        timed_out = True
+                    current_gaps = coverage_gaps(run, companies, sources)
+                    if not current_gaps:
                         break
-                    done, _ = wait([*tasks, *documents], timeout=min(1, remaining), return_when=FIRST_COMPLETED)
-                    for future in done:
-                        if future in documents:
-                            collect(future)
-                            continue
-                        company, types = tasks.pop(future)
+
+                    run['phase'] = 'other_public_websites' if broad else 'preferred_websites'
+                    run['current_search_model'] = MISSING_RESULTS_MODEL if broad else FIRST_PASS_MODEL
+                    tasks, documents = {}, {}
+                    fatal = None
+                    quota_blocked = False
+
+                    def collect(future):
+                        company, row, identity = documents.pop(future)
                         try:
-                            rows = future.result()
-                            completed_companies.add(company['id'])
-                            diagnostics = getattr(rows, 'diagnostics', None)
-                            if diagnostics:
-                                run['grounding_diagnostics'].append({
-                                    'company_id': company['id'], 'source_types': types,
-                                    'phase': run['phase'], **diagnostics
-                                })
-                                # Keep durable job state informative without allowing it to grow
-                                # without bound during a large portfolio run.
-                                del run['grounding_diagnostics'][:-200]
-                                if not diagnostics['citation_count']:
-                                    run['errors'].append({
-                                        'company_id': company['id'],
-                                        'reason': 'Gemini returned no Google Search citations; no unverified URLs were saved.'
-                                    })
-                            failures[company['id']] = 0
-                        except ProviderError as error:
-                            if error.status_code == 429:
-                                quota_blocked = True
-                                run['errors'].append({'company_id': company['id'], 'reason': str(error)})
-                            else:
-                                fatal = error
-                            rows = []
+                            record = future.result()
+                            app.stage_source(record)
+                            pending.append(record)
                         except Exception as error:
-                            failures[company['id']] = failures.get(company['id'], 0) + 1
-                            run['errors'].append({'company_id': company['id'], 'reason': type(error).__name__})
-                            rows = []
-                            if failures[company['id']] >= 3:
-                                fatal = ProviderError('Source provider failed three consecutive attempts for a company. Please try again later.')
-                                stop.set()
-                        for row in rows:
+                            seen.discard(identity)
+                            run['errors'].append({'company_id': company['id'], 'url': row['url'], 'reason': type(error).__name__})
+                        if len(pending) >= SAVE_BATCH_SIZE or (pending and time.monotonic()-last_save >= SAVE_INTERVAL):
+                            flush()
+
+                    # Token minimization: only search companies with gaps (< 2 sources per type)
+                    gaps_by_company = {}
+                    for g in current_gaps:
+                        gaps_by_company.setdefault(g['company_id'], []).append(g['source_type'])
+
+                    for company in companies:
+                        if time_limit_reached():
+                            timed_out = True
+                            break
+                        types = gaps_by_company.get(company['id'])
+                        if not types:
+                            continue  # Company already has 2 sources per type, skip to minimize tokens!
+                        known_urls = [s['url'] for s in sources if s['company_id'] == company['id']
+                                      and s.get('source_type') in types and s.get('url') and s.get('link_status') == 'verified']
+                        sites_by_type = excluded_websites(sources, company['id'], types)
+                        timeout = max(1, min(90, int(seconds_remaining())))
+                        tasks[searches.submit(search, company, types, current_year, broad,
+                                              known_urls, sites_by_type, timeout)] = (company, types)
+
+                    while tasks or documents:
+                        remaining = seconds_remaining()
+                        if remaining <= 0:
+                            timed_out = True
+                            break
+                        done, _ = wait([*tasks, *documents], timeout=min(1, remaining), return_when=FIRST_COMPLETED)
+                        for future in done:
+                            if future in documents:
+                                collect(future)
+                                continue
+                            company, types = tasks.pop(future)
                             try:
-                                if row.get('source_type') not in types: continue
-                                if not row.get('period') or (run['period'] and row['period'] != run['period']): continue
-                                app.parse_date(row['publication_date'])
-                                if row['publication_date'] > run['cutoff']: continue
-                                identity = source_identity({**row, 'company_id': company['id']})
-                                if identity in seen: continue
-                                seen.add(identity)
-                                verify_timeout = max(1, min(20, int(seconds_remaining())))
-                                documents[downloads.submit(verify, company, dict(row), verify_timeout)] = (company, row, identity)
+                                rows = future.result()
+                                completed_companies.add(company['id'])
+                                diagnostics = getattr(rows, 'diagnostics', None)
+                                if diagnostics:
+                                    run['grounding_diagnostics'].append({
+                                        'company_id': company['id'], 'source_types': types,
+                                        'phase': run['phase'], **diagnostics
+                                    })
+                                    del run['grounding_diagnostics'][:-200]
+                                    if not diagnostics['citation_count']:
+                                        run['errors'].append({
+                                            'company_id': company['id'],
+                                            'reason': 'Gemini returned no Google Search citations; no unverified URLs were saved.'
+                                        })
+                                failures[company['id']] = 0
+                            except ProviderError as error:
+                                if error.status_code == 429:
+                                    quota_blocked = True
+                                    run['errors'].append({'company_id': company['id'], 'reason': str(error)})
+                                else:
+                                    fatal = error
+                                rows = []
                             except Exception as error:
-                                run['errors'].append({'company_id': company['id'], 'url': row.get('url'), 'reason': type(error).__name__})
-                    if pending and time.monotonic()-last_save >= SAVE_INTERVAL:
-                        flush()
-                flush()
-                if timed_out:
-                    finish_for_time_limit()
+                                failures[company['id']] = failures.get(company['id'], 0) + 1
+                                run['errors'].append({'company_id': company['id'], 'reason': type(error).__name__})
+                                rows = []
+                                if failures[company['id']] >= 3:
+                                    fatal = ProviderError('Source provider failed three consecutive attempts for a company. Please try again later.')
+                                    stop.set()
+                            for row in rows:
+                                try:
+                                    if row.get('source_type') not in types: continue
+                                    app.parse_date(row['publication_date'])
+                                    if row['publication_date'] > run['cutoff']: continue
+                                    row['period'] = row.get('period') or current_year
+                                    identity = source_identity({**row, 'company_id': company['id']})
+                                    if identity in seen: continue
+                                    seen.add(identity)
+                                    verify_timeout = max(1, min(20, int(seconds_remaining())))
+                                    documents[downloads.submit(verify, company, dict(row), verify_timeout)] = (company, row, identity)
+                                except Exception as error:
+                                    run['errors'].append({'company_id': company['id'], 'url': row.get('url'), 'reason': type(error).__name__})
+                        if pending and time.monotonic()-last_save >= SAVE_INTERVAL:
+                            flush()
+                    flush()
+                    if not broad:
+                        preferred_periods.add(current_year)
+                        run['preferred_periods'] = sorted(preferred_periods, reverse=True)
+                        run['first_pass_completed'] = True
+                    if timed_out:
+                        break
+                    if quota_blocked:
+                        run['status'] = 'incomplete'
+                        run['completion_reason'] = 'provider_quota'
+                        break
+                    if fatal:
+                        raise fatal
+                    checkpoint()
+                    if not coverage_gaps(run, companies, sources):
+                        run['status'] = 'completed'
+                        break
+                if run.get('status') == 'completed' or timed_out or quota_blocked or fatal:
                     break
-                if quota_blocked:
-                    run['status'] = 'incomplete'
-                    run['completion_reason'] = 'provider_quota'
-                    break
-                if fatal:
-                    raise fatal
-                # A persisted barrier: no gap-only follow-up or completion before
-                # ALL first-pass searches, downloads and metadata writes finish.
-                run['first_pass_completed'] = True
-                checkpoint()
-                if not run['missing']:
-                    run['status'] = 'completed'
-                    break
-                # Both required phases have run. Do not spin forever on companies
-                # whose documents are unavailable or whose provider response was
-                # uncited; preserve the gaps for a later manual retry instead.
-                if broad:
-                    run['status'] = 'incomplete'
-                    break
-                # Refresh once per round to include documents uploaded elsewhere.
-                sources = app.all_records('sources')
-                seen = {source_identity(s) for s in sources if s.get('url') and s.get('link_status') == 'verified'}
+
+            if timed_out or time_limit_reached():
+                finish_for_time_limit()
+            elif not coverage_gaps(run, companies, sources):
+                run['status'] = 'completed'
+            elif run.get('completion_reason') == 'provider_quota':
+                run['status'] = 'incomplete'
+            else:
+                run['status'] = 'incomplete'
+                run['completion_reason'] = 'coverage_window_exhausted'
     except Exception as error:
         run['status'] = 'failed'
         run['errors'].append({'reason': str(error) if isinstance(error, ProviderError) else type(error).__name__})
@@ -607,22 +652,39 @@ def worker(app, run, companies):
         checkpoint()
 
 
-def coverage_gaps(run, companies, sources):
+def coverage_gaps(run, companies, sources, target_period=None):
+    """Identify which stocks lack at least 2 distinct verified qualifying sources per source type."""
     gaps = []
+    cutoff = run.get('cutoff', '9999-12-31')
+    # For a normal portfolio search, every year in the bounded search window
+    # count towards the two-source target.  ``target_period`` remains useful
+    # for callers that intentionally inspect one reporting year in isolation.
+    active_period = target_period if target_period is not None else run.get('period')
+    eligible_periods = None
+    if target_period is None and run.get('search_periods'):
+        periods = {str(period) for period in run['search_periods'] if period is not None}
+        # ``None`` is the legacy "latest" mode and deliberately accepts a
+        # document from any reporting period.
+        eligible_periods = periods or None
     for company in companies:
         for source_type in run['source_types']:
             identities = set()
             for source in sources:
                 if run.get('storage_mode') == 'url_only' and (not source.get('url') or source.get('link_status') != 'verified'):
                     continue
-                if (source['company_id'] != company['id'] or source.get('source_type') != source_type
-                        or (run['period'] and source.get('period') != run['period'])
-                        or source.get('publication_date', '9999') > run['cutoff']):
+                if source['company_id'] != company['id'] or source.get('source_type') != source_type:
                     continue
-                # A repeated record or URL does not count as a second document.
+                if eligible_periods is not None and str(source.get('period', '')) not in eligible_periods:
+                    continue
+                if eligible_periods is None and active_period and str(source.get('period', '')) != str(active_period):
+                    continue
+                pub_date = source.get('publication_date', '9999')
+                if pub_date > cutoff:
+                    continue
                 identity = (urldefrag(source['url'])[0].rstrip('/') if source.get('url')
                             else source.get('sha256') or source.get('id'))
-                if identity: identities.add(identity)
+                if identity:
+                    identities.add(identity)
             if len(identities) < DOCUMENTS_PER_TYPE:
                 gaps.append({'company_id': company['id'], 'source_type': source_type,
                              'found': len(identities), 'required': DOCUMENTS_PER_TYPE})

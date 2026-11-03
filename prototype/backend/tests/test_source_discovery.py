@@ -62,7 +62,8 @@ class DiscoveryTest(unittest.TestCase):
                                                  'missing_results': 'gemini-3.8-flash'})
         self.assertEqual(result['storage_mode'], 'url_only')
         self.assertEqual(result['period'], '2025')
-        self.assertEqual(result['time_limit_seconds'], 600)
+        self.assertEqual(result['search_periods'], ['2025', '2024', '2023'])
+        self.assertEqual(result['time_limit_seconds'], 300)
         self.assertGreater(result['deadline_unix'], discovery.time.time())
         self.assertEqual(len(result['missing']), 2)
         queue.return_value.enqueue.assert_called_once()
@@ -78,11 +79,9 @@ class DiscoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'four-digit year'):
             discovery.start(None, {'latest_documents': True, 'period': '', 'source_types': ['annual_report']})
 
-    def test_more_than_two_source_types_are_rejected_before_queueing(self):
-        with self.assertRaisesRegex(ValueError, 'at most 2 source types'):
-            discovery.start(None, {'period': '2025', 'source_types': [
-                'annual_report', 'regulatory_filing', 'earnings_call'
-            ]})
+    def test_all_six_source_types_are_supported_with_two_per_search_limit(self):
+        self.assertEqual(discovery.MAX_SOURCE_TYPES_PER_SEARCH, 2)
+        self.assertEqual(len(discovery.TYPES), 6)
 
     def test_coverage_counts_two_unique_eligible_urls_only_for_selected_types(self):
         run = {'source_types': ['annual_report'], 'period': '2025', 'cutoff': '2026-11-02'}
@@ -210,6 +209,23 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(run['missing'][0]['found'], 0)
         self.assertEqual(search.call_count, 2)
         sleep.assert_not_called()
+
+    def test_exhausted_three_year_window_marks_remaining_gaps(self):
+        run = {'id': 'job', 'source_types': ['annual_report'], 'period': '2026',
+               'search_periods': ['2026', '2025', '2024'], 'cutoff': '2026-11-02',
+               'latest_documents': True, 'results': [], 'errors': [], 'status': 'running'}
+        app = worker_app([], [])
+        searched_periods = []
+
+        def no_results(company, source_types, period, cutoff, broad, timeout, known, excluded_sites):
+            searched_periods.append(period)
+            return []
+
+        with patch.object(discovery, 'grounded_search', side_effect=no_results):
+            discovery.worker(app, run, [{'id': 'a', 'name': 'A'}])
+        self.assertEqual(run['status'], 'incomplete')
+        self.assertEqual(run['completion_reason'], 'coverage_window_exhausted')
+        self.assertEqual(searched_periods, ['2026', '2026', '2025', '2025', '2024', '2024'])
 
     def test_first_pass_searches_and_downloads_are_concurrent_within_the_time_limit(self):
         companies = [{'id': str(i), 'name': str(i)} for i in range(4)]

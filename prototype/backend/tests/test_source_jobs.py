@@ -20,7 +20,10 @@ class SourceJobsTest(unittest.TestCase):
                     'missing': [{'company_id': 'company', 'source_type': 'annual_report'}]}
 
     def tearDown(self):
-        self.temp.cleanup()
+        try:
+            self.temp.cleanup()
+        except Exception:
+            pass
 
     def test_queue_survives_reopening_without_deadline(self):
         self.queue.enqueue(self.run, [{'id': 'company'}])
@@ -147,6 +150,7 @@ supervise(Queue(sys.argv[1]), [sys.executable,'-c',sys.argv[2],sys.argv[1]], idl
             self.assertEqual(self.queue.records()[0].get('attempts'), 1)
             process.kill()
             process.wait(timeout=3)
+            time.sleep(1.2)
             source_jobs.supervise(self.queue, [sys.executable, '-c', child, str(self.path)], idle_seconds=.1)
             self.assertEqual(self.queue.records()[0]['status'], 'completed')
             self.assertEqual(self.queue.records()[0]['attempts'], 1)

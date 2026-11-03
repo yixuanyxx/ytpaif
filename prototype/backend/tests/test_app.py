@@ -35,6 +35,21 @@ class AppFlowTest(unittest.TestCase):
             self.assertNotIn('tools', body)
             self.assertEqual(request.get_header('Authorization'), 'Bearer gemini-test-key')
 
+    def test_source_search_prefers_redis_link_cache(self):
+        source = self.app.all_records('sources')[0]
+        company_id = source['company_id']
+        with patch.object(self.app.source_cache, 'load_or_warm', return_value=[source]) as cache:
+            results = self.app.source_search({'company_id': company_id, 'source_types': [source['source_type']]})
+        cache.assert_called_once()
+        self.assertEqual(results['results'][0]['url'], source['url'])
+
+    def test_opening_the_app_warms_redis_with_supabase_source_records(self):
+        with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app.source_cache, 'warm_sources') as warm:
+            self.app.state()
+        warm.assert_called_once()
+        self.assertTrue(all('evidence' in source for source in warm.call_args.args[0]))
+
     def test_verification_uses_claude_sonnet_5_and_its_own_key(self):
         case = self.app.all_records('cases')[0]
         output = json.dumps({'content': [{'type': 'text', 'text': '{"verdict":"VERIFIED"}'}]}).encode()

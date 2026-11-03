@@ -36,7 +36,7 @@ function sourceSearchCompletionSummary(search) {
     return `AI source search stopped after ${completed} of ${total} companies because Google Search quota was reached. ${count} documents saved.${ending}`;
   }
   return search.completion_reason === 'time_limit_reached'
-    ? `AI source search reached its 10-minute limit. ${count} documents saved.${ending}`
+    ? `AI source search reached its 5-minute limit. ${count} documents saved.${ending}`
     : `AI source search is over. ${count} documents saved.${ending}`;
 }
 function notifyFinishedSourceSearches() {
@@ -51,6 +51,14 @@ function notifyFinishedSourceSearches() {
       notice(`AI source search stopped. ${count} documents were saved before it stopped.`, 'warning');
     } else {
       notice(sourceSearchCompletionSummary(search), gaps ? 'warning' : 'success');
+      if (search.completion_reason === 'time_limit_reached' && gaps) {
+        showAlert(
+          `The AI search reached its 5-minute limit before it could find two verified sources for every selected stock and source type. ` +
+          `${count} documents were saved, but ${gaps} company/source-type gap${gaps === 1 ? '' : 's'} remain. ` +
+          'You can run the search again to continue filling those gaps.',
+          'Source search timed out'
+        );
+      }
     }
   }
 }
@@ -2260,12 +2268,12 @@ async function viewSources() {
     </div>`;
 
   const SOURCE_TYPES = [
-    { value:'annual_report',         label:'Annual report',          default:true  },
-    { value:'regulatory_filing',     label:'Regulatory filing (10-K/20-F)', default:true  },
-    { value:'investor_presentation', label:'Investor presentation',  default:false },
-    { value:'earnings_call',         label:'Earnings call transcript',default:false },
-    { value:'company_website',       label:'Company website page',   default:false },
-    { value:'sustainability_report', label:'Sustainability report',  default:false },
+    { value:'annual_report',         label:'Annual report',                  default:true },
+    { value:'regulatory_filing',     label:'Regulatory filing (10-K/20-F)',  default:true },
+    { value:'investor_presentation', label:'Investor presentation',          default:false },
+    { value:'earnings_call',         label:'Earnings call transcript',       default:false },
+    { value:'company_website',       label:'Company website page',           default:false },
+    { value:'sustainability_report', label:'Sustainability report',          default:false },
   ];
 
   const companyList = companies.map(c => {
@@ -2310,7 +2318,7 @@ async function viewSources() {
       <div class="panel">
         <div class="panel-title">Document search settings</div>
         <div class="panel-subtitle">
-          Search for public company documents or upload PDF and TXT filings below. You can stop a search while it is running.
+          Search for public company documents from the selected year through the two preceding years, or upload PDF and TXT filings below. You can stop a search while it is running.
         </div>
 
         <div class="form-section-title">Companies to search</div>
@@ -2340,7 +2348,7 @@ async function viewSources() {
           </div>
 
           <div class="form-section-title">Source types</div>
-          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Select up to 2 source types per search.</div>
+          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Choose up to 2 source types per AI search. Each type stops at 2 verified sources or after 5 minutes.</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
             ${SOURCE_TYPES.map(t => `
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
@@ -2356,7 +2364,11 @@ async function viewSources() {
           <div class="form-grid">
             <div class="form-group">
               <label class="field-label">Reporting period</label>
-              <input type="number" id="src-period" inputmode="numeric" min="1000" max="9999" step="1" placeholder="e.g. 2025" required>
+              <select id="src-period" required>
+                <option value="2026" selected>2026</option>
+                <option value="2025">2025</option>
+                <option value="2024">2024</option>
+              </select>
             </div>
             <div class="form-group">
               <label class="field-label">Evidence cutoff date</label>
@@ -2372,7 +2384,7 @@ async function viewSources() {
           </button>
           ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${latestSearchRun.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
           <span class="text-muted text-small">
-            Searches preferred websites first, then other public sources. Runs for up to 10 minutes.
+            First searches listed websites, then remainder of web. Stops when at least 2 sources per type are found or 5 minutes elapse. Starts from 2026 then 2025.
           </span>
         </div>
         <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${searchStatus}</div>
@@ -2531,32 +2543,29 @@ async function viewSources() {
     const selectedCount = sourceTypeInputs.filter(input => input.checked).length;
     sourceTypeInputs.forEach(input => {
       input.disabled = !input.checked && selectedCount >= 2;
-      if (input.parentElement) input.parentElement.style.opacity = input.disabled ? '0.55' : '';
+      input.closest('label').style.opacity = input.disabled ? '0.55' : '1';
+      input.closest('label').style.cursor = input.disabled ? 'not-allowed' : 'pointer';
     });
   };
-  sourceTypeInputs.forEach(input => input.addEventListener('change', () => {
-    const selectedCount = sourceTypeInputs.filter(option => option.checked).length;
-    if (selectedCount > 2) {
-      input.checked = false;
-      showAlert('Select up to two source types per search.', 'Source type limit');
-    }
-    updateSourceTypeLimit();
-  }));
+  sourceTypeInputs.forEach(input => input.addEventListener('change', updateSourceTypeLimit));
   updateSourceTypeLimit();
-
   $('#btn-run-search').onclick = async () => {
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
     const selectedTypes = Array.from($$('input[name="source_types"]:checked')).map(cb => cb.value);
-    const period = $('#src-period')?.value || '';
+    const period = $('#src-period')?.value || '2026';
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
     const latestDocuments = $('#src-latest-documents')?.checked ?? true;
+    if (selectedTypes.length === 0) {
+      showAlert('Select at least one source type per search.', 'Source type selection');
+      return;
+    }
     if (selectedTypes.length > 2) {
-      showAlert('Select up to two source types per search.', 'Source type limit');
+      showAlert('Select no more than 2 source types per AI search.', 'Source type selection');
       return;
     }
     if (!/^\d{4}$/.test(period)) {
-      showAlert('Enter a four-digit reporting year, for example 2025.', 'Invalid reporting year');
+      showAlert('Enter a four-digit reporting year, for example 2026.', 'Invalid reporting year');
       return;
     }
     const button = $('#btn-run-search');
@@ -2625,21 +2634,62 @@ async function viewSources() {
 }
 
 function getCompanyFinancials(comp, row, compSources, cases) {
-  const facts = compSources.flatMap(source => (source.financial_facts || []).map(fact => ({
-    ...fact, filename: source.filename
+  // 1. Direct stored consensus on company record
+  let mcap = comp?.market_cap || comp?.mcap;
+  let rev = comp?.net_revenue || comp?.revenue || comp?.rev;
+  let mcapCitation = comp?.market_cap_citation || (comp?.market_cap_sources ? `market cap ${mcap} (${comp.market_cap_sources})` : null);
+  let revCitation = comp?.net_revenue_citation || (comp?.net_revenue_sources ? `net revenue ${rev} (${comp.net_revenue_sources})` : null);
+
+  // 2. Derive consensus from sources' financial_facts if available
+  const facts = (compSources || []).flatMap(source => (source.financial_facts || []).map(fact => ({
+    ...fact,
+    source_type: source.source_type,
+    filename: source.filename
   }))).sort((a, b) => (b.publication_date || '').localeCompare(a.publication_date || ''));
-  const marketCap = facts.find(f => f.metric === 'market_cap');
-  const revenue = facts.find(f => f.metric === 'revenue');
+
+  if (facts.length > 0) {
+    const revFacts = facts.filter(f => f.metric === 'revenue');
+    const mcapFacts = facts.filter(f => f.metric === 'market_cap');
+
+    if (revFacts.length > 0 && !rev) {
+      const counts = {};
+      const phrases = {};
+      revFacts.forEach(f => {
+        counts[f.display] = (counts[f.display] || 0) + 1;
+        if (f.citation) phrases[f.display] = f.citation;
+      });
+      const topRev = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+      rev = topRev;
+      revCitation = phrases[topRev] || `net revenue ${topRev.toLowerCase()} (${counts[topRev]}/6 sources)`;
+    }
+
+    if (mcapFacts.length > 0 && !mcap) {
+      const counts = {};
+      const phrases = {};
+      mcapFacts.forEach(f => {
+        counts[f.display] = (counts[f.display] || 0) + 1;
+        if (f.citation) phrases[f.display] = f.citation;
+      });
+      const topMcap = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+      mcap = topMcap;
+      mcapCitation = phrases[topMcap] || `market cap ${topMcap.toLowerCase()} (${counts[topMcap]}/6 sources)`;
+    }
+  }
+
+  // 3. Fallback to approved case revenue if any
   const approved = [...(cases || [])].reverse().find(c =>
     c.company_id === comp.id && c.review_status === 'approved');
   const reviewedRevenue = approved?.case;
+  if (!rev && reviewedRevenue) {
+    rev = `${reviewedRevenue.currency} ${reviewedRevenue.total_revenue} ${reviewedRevenue.scale}`;
+    revCitation = `Approved case ${approved.id}`;
+  }
+
   return {
-    mcap: marketCap?.display || '—',
-    rev: revenue?.display || (reviewedRevenue
-      ? `${reviewedRevenue.currency} ${reviewedRevenue.total_revenue} ${reviewedRevenue.scale}` : '—'),
-    mcapCitation: marketCap ? `${marketCap.filename}, p.${marketCap.page}` : 'No sourced market capitalisation',
-    revCitation: revenue ? `${revenue.filename}, p.${revenue.page}`
-      : reviewedRevenue ? `Approved case ${approved.id}` : 'No sourced revenue'
+    mcap: mcap || '—',
+    rev: rev || '—',
+    mcapCitation: mcapCitation || 'No sourced market capitalisation',
+    revCitation: revCitation || 'No sourced revenue'
   };
 }
 
@@ -2679,6 +2729,9 @@ function sourceLibrary(sources, companies, portfolio) {
       <button class="btn btn-sm btn-secondary" onclick="toggleAllSourceRows()" id="btn-toggle-all-sources">
         Expand all 6 sources
       </button>
+      <button class="btn btn-sm btn-primary" onclick="populatePortfolioFinancials('${esc(portfolio.id)}')" id="btn-populate-financials">
+        ✦ Populate Market Cap &amp; Revenue
+      </button>
     </div>
 
     <div class="table-wrap" style="background:#ffffff;border:1px solid var(--slate-200);border-radius:8px;overflow:hidden">
@@ -2704,11 +2757,15 @@ function sourceLibrary(sources, companies, portfolio) {
             const portWt = row.portfolio_weight != null ? (row.portfolio_weight * 100).toFixed(2) + '%' : null;
             const searchTerms = `${displayName} ${ticker} ${sedol} ${sector} ${country}`.toLowerCase();
             const docsCount = SIX_SOURCE_TYPES.filter(st => compSources.some(s => s.source_type === st.type)).length;
+            const exhaustedGaps = (state.search_runs || []).filter(r =>
+              r.status === 'incomplete' && r.completion_reason === 'coverage_window_exhausted'
+            ).flatMap(r => r.missing || []);
+            const hasExhaustedGap = exhaustedGaps.some(m => m.company_id === comp.id);
 
             return `
               <tr class="source-master-row" id="src-master-${esc(comp.id)}" data-search="${esc(searchTerms)}"
                 onclick="toggleSourceRow('${esc(comp.id)}')"
-                style="cursor:pointer;border-bottom:1px solid var(--slate-100);transition:background 0.15s ease;${(state.search_runs || []).some(r => r.status === 'incomplete' && (r.missing || []).some(m => m.company_id === comp.id)) ? 'background:#fef9c3' : ''}">
+                style="cursor:pointer;border-bottom:1px solid var(--slate-100);transition:background 0.15s ease;${hasExhaustedGap ? 'background:#fff1f2' : ''}">
                 <td style="text-align:center;font-weight:600;font-size:12px;color:var(--slate-400)">
                   <span class="src-chevron" id="src-chev-${esc(comp.id)}" style="display:inline-block;transition:transform 0.2s">▸</span>
                 </td>
@@ -2765,10 +2822,11 @@ function sourceLibrary(sources, companies, portfolio) {
                     ${SIX_SOURCE_TYPES.map((st, sIdx) => {
                       const matched = compSources.filter(s => s.source_type === st.type);
                       const isIngested = matched.length > 0;
+                      const sourceGapExhausted = exhaustedGaps.some(m => m.company_id === comp.id && m.source_type === st.type);
                       const primaryDoc = matched[0];
 
                       return `
-                        <div style="background:${!isIngested && (state.search_runs || []).some(r => r.status === 'incomplete' && (r.missing || []).some(m => m.company_id === comp.id && m.source_type === st.type)) ? '#fff1f2' : '#ffffff'};border:1px solid ${isIngested ? '#99f6e4' : '#e2e8f0'};border-radius:8px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,0.03);position:relative">
+                        <div style="background:${sourceGapExhausted ? '#fff1f2' : '#ffffff'};border:1px solid ${sourceGapExhausted ? '#fecdd3' : isIngested ? '#99f6e4' : '#e2e8f0'};border-radius:8px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,0.03);position:relative">
                           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px">
                             <div style="display:flex;align-items:center;gap:6px">
                               <span style="font-size:16px">${st.icon}</span>
@@ -2783,7 +2841,10 @@ function sourceLibrary(sources, companies, portfolio) {
                           </div>
 
                           ${isIngested ? `
-                            ${matched.map(doc => doc.url ? `<div><a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer">${esc(doc.title || doc.filename)} — Source URL ↗</a></div>` : `<div>${esc(doc.title || doc.filename)} — No source URL provided</div>`).join('')}
+                            ${matched.map(doc => `<div style="display:flex;align-items:center;gap:6px;margin:3px 0">
+                              ${doc.url ? `<a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer">${esc(doc.title || doc.filename)} — Source URL ↗</a>` : `<span>${esc(doc.title || doc.filename)} — No source URL provided</span>`}
+                              <button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();deleteSource('${esc(doc.id)}')" style="font-size:10px;padding:2px 6px;color:#be123c" aria-label="Delete ${esc(doc.title || doc.filename)}">Delete</button>
+                            </div>`).join('')}
                             <div style="font-size:11.5px;color:var(--slate-700);line-height:1.4;margin:6px 0;background:#f0fdfa;padding:6px 8px;border-radius:5px;border:1px solid #ccfbf1">
                               <div style="font-weight:600;color:var(--teal-900);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(primaryDoc.title || primaryDoc.filename)}">
                                 ${esc(primaryDoc.title || primaryDoc.filename)}
@@ -2802,6 +2863,9 @@ function sourceLibrary(sources, companies, portfolio) {
                                 <a href="${esc(primaryDoc.url)}" target="_blank" rel="noopener noreferrer" class="btn btn-sm" style="font-size:11px;padding:3px 8px;text-decoration:none">
                                   🏛 Registry ↗
                                 </a>` : ''}
+                              <button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();selectCompanyForUpload('${esc(comp.id)}', '${esc(st.type)}')" style="font-size:11px;padding:3px 8px;color:var(--teal-700)">
+                                + Upload document
+                              </button>
                             </div>
                           ` : `
                             <div style="font-size:11px;color:var(--slate-500);line-height:1.4;margin:6px 0;padding:6px 8px;background:var(--slate-50);border-radius:5px;border:1px dashed var(--slate-200)">
@@ -2864,6 +2928,41 @@ window.selectCompanyForUpload = function(companyId, sourceType) {
   if (typeSelect && sourceType) typeSelect.value = sourceType;
   document.querySelector('#source-form')?.scrollIntoView({ behavior: 'smooth' });
   notice('Company and source type selected in manual upload form.', 'info');
+};
+
+window.populatePortfolioFinancials = async function(portfolioId) {
+  const button = document.getElementById('btn-populate-financials');
+  if (button) button.disabled = true;
+  try {
+    await run(async () => {
+      const result = await api('financials/populate', { portfolio_id: portfolioId }, { timeoutMs: 10 * 60 * 1000 });
+      await refresh();
+      if (currentView === 'sources') await viewSources();
+      notice(`Financial values updated for ${result.updated} companies${result.failed ? `; ${result.failed} could not be reconciled` : ''}.`, result.failed ? 'warning' : 'success');
+    }, 'Reading source documents and reconciling financial values…');
+  } catch (error) {
+    showAlert(`Could not populate financial data: ${error.message}`, 'Financial data search');
+  } finally {
+    if (button) button.disabled = false;
+  }
+};
+
+window.deleteSource = async function(sourceId) {
+  const source = (state.sources || []).find(item => item.id === sourceId);
+  const name = source?.title || source?.filename || 'this source';
+  const confirmed = await showConfirm(
+    `Delete ${name}? This removes the source from the current session and permanent source library.`,
+    'Delete source'
+  );
+  if (!confirmed) return;
+  try {
+    await api('source/delete', { id: sourceId });
+    await refresh();
+    if (currentView === 'sources') await viewSources();
+    notice('Source deleted.', 'success');
+  } catch (error) {
+    showAlert(`Could not delete this source: ${error.message}`, 'Delete source');
+  }
 };
 
 window.openDocModal = function(sourceId) {
@@ -4218,3 +4317,31 @@ function exportMindmap() {
   downloadBlob(new Blob([svgContent], { type: 'image/svg+xml' }), `${themeName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-mindmap.svg`);
   notice('Mind map exported as SVG.', 'info');
 }
+
+// ── Redis Temporary to Supabase Permanent Storage Sync ──────────────────────
+window.syncToSupabase = async function() {
+  try {
+    notice('Copying temporary Redis data to Supabase permanent storage…', 'info');
+    const res = await api('sync', {});
+    notice(`✓ Copied ${res.synced || 0} documents from Redis to Supabase!`, 'success');
+  } catch (err) {
+    notice(`Sync failed: ${err.message}`, 'error');
+  }
+};
+
+window.addEventListener('beforeunload', () => {
+  try {
+    navigator.sendBeacon('/api/sync');
+  } catch (e) {
+    // Keep browser unload synchronous and non-blocking
+  }
+});
+
+window.addEventListener('pagehide', () => {
+  try {
+    navigator.sendBeacon('/api/sync');
+  } catch (e) {
+    // Keep browser pagehide synchronous and non-blocking
+  }
+});
+

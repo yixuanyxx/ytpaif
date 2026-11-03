@@ -18,7 +18,9 @@ import re
 import zipfile
 import engine
 import financials
+import financial_research
 import supabase_store
+import source_cache
 
 ROOT = Path(__file__).resolve().parent
 
@@ -76,10 +78,16 @@ def _unique_node_id(base, used):
     return candidate
 
 def put(kind, record):
-    return store.put(kind, record)
+    saved = store.put(kind, record)
+    if kind == 'sources':
+        source_cache.save_sources_to_redis([record])
+    return saved
 
 def put_many(kind, records):
-    return store.put_many(kind, records)
+    saved = store.put_many(kind, records)
+    if kind == 'sources':
+        source_cache.save_sources_to_redis(records)
+    return saved
 
 def all_records(kind):
     records = store.all_records(kind)
@@ -87,6 +95,10 @@ def all_records(kind):
         import source_jobs
         return source_jobs.Queue().merge(records)
     return records
+
+def source_link_records():
+    """Load source metadata from Redis temporary storage before falling back to Supabase."""
+    return source_cache.load_or_warm(lambda: store.all_records('sources'))
 
 def get(kind, rid):
     return store.get(kind, rid)
@@ -321,6 +333,65 @@ def source_update(d):
     return put('sources', source)
 
 
+def source_delete(d):
+    """Permanently remove an incorrect source link or uploaded document."""
+    source_id = d.get('id')
+    if not source_id:
+        raise ValueError('Source ID is required')
+    source = source_cache.get_source(source_id) or find('sources', source_id)
+    if not source:
+        raise ValueError('Source not found')
+    source_cache.delete_source(source_id)
+    if find('sources', source_id):
+        store.delete('sources', source_id)
+    return {'deleted': source_id}
+
+
+def populate_company_financials(d):
+    """Use the dedicated financial AI key to reconcile source-backed figures."""
+    portfolio_id = d.get('portfolio_id')
+    if not os.environ.get('FINANCIALS_LLM_API_KEY', '').strip():
+        raise ValueError('Configure FINANCIALS_LLM_API_KEY before populating financial data')
+    if not portfolio_id:
+        raise ValueError('Select a portfolio before populating financial data')
+    portfolio = get('portfolio_imports', portfolio_id)
+    company_ids = list(dict.fromkeys(row['company_id'] for row in portfolio.get('rows', [])
+                                    if row.get('company_id') and row['company_id'] != 'CASH' and not row.get('excluded')))
+    companies = {company['id']: company for company in all_records('companies')}
+    selected = [companies[company_id] for company_id in company_ids if company_id in companies]
+    if not selected:
+        raise ValueError('The portfolio has no matched companies')
+
+    # Redis holds newly discovered URLs; Supabase retains uploaded-document text.
+    persistent = {source['id']: source for source in store.all_records('sources')}
+    for session_source in source_link_records():
+        previous = persistent.get(session_source['id'], {})
+        persistent[session_source['id']] = {**previous, **session_source}
+    sources_by_company = {company['id']: [] for company in selected}
+    for source in persistent.values():
+        if source.get('company_id') in sources_by_company:
+            sources_by_company[source['company_id']].append(source)
+
+    results = financial_research.populate(selected, sources_by_company)
+    updated, failed = 0, 0
+    for company in selected:
+        result = results.get(company['id'], {})
+        if result.get('error'):
+            failed += 1
+            continue
+        market_cap, revenue = result.get('market_cap'), result.get('net_revenue')
+        company['market_cap'] = market_cap['value'] if market_cap else None
+        company['net_revenue'] = revenue['value'] if revenue else None
+        company['market_cap_citation'] = (f"{market_cap['supporting_sources']} / {market_cap['evaluated_sources']} sources · {market_cap['year']}"
+                                          if market_cap else 'No sourced market capitalisation')
+        company['net_revenue_citation'] = (f"{revenue['supporting_sources']} / {revenue['evaluated_sources']} sources · {revenue['year']}"
+                                           if revenue else 'No sourced net revenue')
+        company['financials_updated_at'] = now()
+        store.put('companies', company)
+        updated += 1
+    return {'updated': updated, 'failed': failed, 'results': results}
+
+
 def evidence_for(company_id, theme_id):
     theme = get('themes', theme_id)
     cutoff = theme.get('cutoff') or date.today().isoformat()
@@ -345,7 +416,7 @@ def source_search(d):
             comp = get('companies', cid)
         except ValueError:
             continue
-        existing = [s for s in all_records('sources') if s['company_id'] == cid]
+        existing = [s for s in source_link_records() if s['company_id'] == cid]
         if stick_earnings:
             existing = sorted(
                 [s for s in existing if s.get('source_type') == 'earnings_call'
@@ -1285,6 +1356,26 @@ def source_search_cancel(d):
     import sys
     return {'search_run': source_discovery.cancel(sys.modules[__name__], d)}
 
+def sync_to_supabase(d=None):
+    """Copy over Redis database to Supabase permanent data storage."""
+    count = source_cache.copy_redis_to_supabase(store)
+    return {'status': 'ok', 'synced': count, 'message': f'Copied {count} source documents from Redis to Supabase'}
+
+def stock_sources(d):
+    """Retrieve source documents for a specific stock by ticker or company_id from Redis."""
+    cid = d.get('company_id')
+    ticker = d.get('ticker')
+    if not source_cache.is_hydrated():
+        source_cache.warm_sources(store.all_records('sources'))
+    sources = source_cache.get_sources_for_stock(company_id=cid, ticker=ticker)
+    if not sources and (cid or ticker):
+        t_clean = (ticker or '').strip().upper()
+        t_base = t_clean.replace(' EQUITY', '').strip()
+        sources = [s for s in store.all_records('sources')
+                   if (cid and s.get('company_id') == cid) or
+                      (t_clean and s.get('bloomberg_ticker', '').strip().upper() in (t_clean, t_base, f'{t_base} EQUITY'))]
+    return {'sources': sources, 'ticker': ticker, 'company_id': cid, 'count': len(sources)}
+
 def state():
     import source_discovery
     import sys
@@ -1293,14 +1384,17 @@ def state():
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
     checker_model = os.environ.get('CHECKER_LLM_MODEL') or DEFAULT_CHECKER_MODEL
+    source_cache.warm_sources(store.all_records('sources'))
+    sources = source_link_records()
     return {
-        **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in all_records(k)] if k == 'sources' else all_records(k)) for k in
+        **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in sources] if k == 'sources' else all_records(k)) for k in
            ('themes', 'companies', 'sources', 'cases', 'reviews', 'runs', 'snapshots',
             'portfolio_imports', 'search_runs')},
         'ai_configured': bool(key),
         'ai_model': model if key else '',
         'checker_configured': bool(checker_key),
         'checker_model': checker_model if checker_key else '',
+        'financials_ai_configured': bool(os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()),
         'call_cap': None,
         'calls_used': len(all_records('model_calls')),
         'max_tiers': engine.MAX_TIERS,
@@ -1312,6 +1406,8 @@ def state():
 # ── HTTP dispatch ─────────────────────────────────────────────────────────────
 
 def _dispatch(path, d):
+    if path in ('/api/sync', '/api/sync_to_supabase', '/api/logout'): return sync_to_supabase(d)
+    if path in ('/api/stock/sources', '/api/company/sources'): return stock_sources(d)
     if path == '/api/theme':            return theme_create(d)
     if path == '/api/theme/delete':     return theme_delete(d)
     if path == '/api/portfolio/delete': return portfolio_delete(d)
@@ -1329,6 +1425,8 @@ def _dispatch(path, d):
     if path == '/api/snapshot':         return snapshot_create(d)
     if path == '/api/dashboard':        return dashboard(d['theme_id'], d.get('snapshot_id'))
     if path == '/api/source/update': return source_update(d)
+    if path == '/api/source/delete': return source_delete(d)
+    if path == '/api/financials/populate': return populate_company_financials(d)
     raise ValueError('Unknown API endpoint')
 
 def dispatch(path, d):
@@ -1368,6 +1466,8 @@ class Handler(BaseHTTPRequestHandler):
             path = up(self.path).path
             if path == '/api/state':
                 return self.respond(state())
+            if path in ('/api/sync', '/api/sync_to_supabase', '/api/logout'):
+                return self.respond(sync_to_supabase({}))
             assets = {
                 '/': 'index.html',
                 '/app.js': 'app.js',
@@ -1398,23 +1498,31 @@ class Handler(BaseHTTPRequestHandler):
         allowed_origins = {value.strip().rstrip('/') for value in
                            os.environ.get('TRUSTED_ORIGINS', '').split(',') if value.strip()}
         allowed_origins.add('http://' + self.headers.get('Host', ''))
+        length = int(self.headers.get('Content-Length', '0'))
         if not self.valid_host() or origin not in allowed_origins:
+            if length > 0 and hasattr(self, 'rfile'):
+                try:
+                    self.rfile.read(length)
+                except Exception:
+                    pass
             return self.respond({'error': 'Same-origin local requests required'}, 403)
         try:
-            length = int(self.headers.get('Content-Length', '0'))
-            if not 0 < length <= MAX_FILE * 2:
-                raise ValueError('Request too large or empty')
-            d = json.loads(self.rfile.read(length))
+            raw_body = self.rfile.read(length) if length > 0 else b'{}'
+            try:
+                d = json.loads(raw_body) if raw_body.strip() else {}
+            except Exception:
+                d = {}
             if not isinstance(d, dict):
-                raise ValueError('JSON object required')
-            if self.path == '/api/export':
+                d = {}
+            path = getattr(self, 'path', '')
+            if path == '/api/export':
                 return self.respond(
                     export(d['theme_id'], d.get('snapshot_id')),
                     mime='application/zip',
                     extra={'Content-Disposition': 'attachment; filename=theme-analysis.zip'}
                 )
-            self.respond(dispatch(self.path, d))
-        except (ValueError, KeyError, TypeError, ImportError) as error:
+            self.respond(dispatch(path, d))
+        except (ValueError, KeyError, TypeError, ImportError, AttributeError) as error:
             self.respond({'error': str(error)}, 400)
         except supabase_store.SupabaseError as error:
             self.respond({'error': str(error)}, 503)
