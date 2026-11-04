@@ -45,10 +45,44 @@ class AppFlowTest(unittest.TestCase):
 
     def test_opening_the_app_warms_redis_with_supabase_source_records(self):
         with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app.source_cache, 'is_hydrated', return_value=False), \
                 patch.object(self.app.source_cache, 'warm_sources') as warm:
             self.app.state()
         warm.assert_called_once()
         self.assertTrue(all('evidence' in source for source in warm.call_args.args[0]))
+
+    def test_worker_saves_refresh_this_process_cache(self):
+        import source_jobs
+        from types import SimpleNamespace
+        record = {'id': 'new-source', 'company_id': 'company'}
+        self.app._source_update_cursor = 0
+        queue = SimpleNamespace(source_updates_after=lambda cursor: [(1, 'new-source')] if cursor == 0 else [])
+        with patch.object(source_jobs, 'Queue', return_value=queue), \
+                patch.object(self.app.store, 'find', return_value=record), \
+                patch.object(self.app.source_cache, 'save_sources_to_redis', return_value=True) as save:
+            self.app.refresh_worker_sources()
+            self.app.refresh_worker_sources()
+        save.assert_called_once_with([record], mark_pending=False)
+
+    def test_state_includes_sources_saved_as_a_search_finishes(self):
+        run = {'id': 'search', 'status': 'completed'}
+        summaries = []
+        summary = {'company_id': 'company', 'count': 1, 'types': {'annual_report': 1}}
+
+        def read_records(kind):
+            if kind == 'search_runs':
+                summaries.append(summary)
+                return [run]
+            return []
+
+        with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app, 'all_records', side_effect=read_records), \
+                patch.object(self.app, 'refresh_worker_sources'), \
+                patch.object(self.app.source_cache, 'is_hydrated', return_value=True), \
+                patch.object(self.app.source_cache, 'get_source_summaries', side_effect=lambda: list(summaries)):
+            state = self.app.state()
+        self.assertEqual(state['search_runs'], [run])
+        self.assertEqual(state['source_summaries'], [summary])
 
     def test_verification_uses_claude_sonnet_5_and_its_own_key(self):
         case = self.app.all_records('cases')[0]

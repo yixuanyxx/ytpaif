@@ -32,6 +32,7 @@ class Queue:
             db.execute('''CREATE TABLE IF NOT EXISTS pending_sources
                 (job_id TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
                  PRIMARY KEY (job_id, id))''')
+            db.execute('CREATE TABLE IF NOT EXISTS source_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL)')
 
     @contextmanager
     def connect(self):
@@ -99,8 +100,21 @@ class Queue:
 
     def acknowledge_sources(self, job_id, records):
         with self.connect() as db:
+            db.executemany('INSERT INTO source_updates (id) VALUES (?)', [(record['id'],) for record in records])
             db.executemany('DELETE FROM pending_sources WHERE job_id=? AND id=?',
                            [(job_id, record['id']) for record in records])
+
+    def source_updates_after(self, cursor):
+        with self.connect() as db:
+            return list(db.execute('SELECT seq, id FROM source_updates WHERE seq > ? ORDER BY seq', (cursor,)))
+
+    def latest_source_update(self):
+        with self.connect() as db:
+            return (db.execute('SELECT COALESCE(MAX(seq), 0) FROM source_updates').fetchone() or [0])[0]
+
+    def record_source_updates(self, records):
+        with self.connect() as db:
+            db.executemany('INSERT INTO source_updates (id) VALUES (?)', [(record['id'],) for record in records])
 
 
 @contextmanager
@@ -168,6 +182,17 @@ def supervise(queue, command=None, idle_seconds=None):
             time.sleep(.2)
 
 
+def persist_discovered_sources(app, records):
+    """Persist each staged batch before acknowledging it, without a browser."""
+    # Supabase is authoritative. Stable source IDs make retries safe if the
+    # process exits after the upsert but before the queue is acknowledged.
+    saved = app.store.put_many('sources', records)
+    # A shared Redis instance makes the new links visible immediately. A local
+    # in-process fallback is only an optional cache, never the durable copy.
+    app.source_cache.save_sources_to_redis(records)
+    return saved
+
+
 def execute(job_id):
     queue = Queue()
     # If a supervisor crashed, its surviving child still owns this job.
@@ -197,14 +222,9 @@ def execute(job_id):
                 return app.put(kind, record)
 
             def put_many(self, kind, records):
-                # Discovery results stay in the session's Redis cache.  The
-                # browser logout/tab-close sync promotes its pending links to
-                # Supabase; other source workflows keep their existing
-                # immediate-persistence behaviour.
+                import app
                 if kind == 'sources':
-                    if not app.source_cache.save_sources_to_redis(records):
-                        raise RuntimeError('Redis source cache is unavailable; source links were not persisted')
-                    return records
+                    return persist_discovered_sources(app, records)
                 return app.put_many(kind, records)
 
             def stage_source(self, record):

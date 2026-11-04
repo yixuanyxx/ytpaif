@@ -15,6 +15,7 @@ let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
 let sourceSearchPollTimer = null;
 const trackedSourceSearches = new Set();
+const loadedSourceCompanyIds = new Set();
 function sourceSearchFailureSummary(search) {
   const saved = search.results_count || 0;
   const completed = search.companies_completed?.length || 0;
@@ -22,7 +23,7 @@ function sourceSearchFailureSummary(search) {
   const providerError = (search.errors || []).find(error => /429|rate limit|quota|credentials|configuration/i.test(error.reason || ''));
   const reason = (providerError?.reason || search.errors?.[0]?.reason || 'Review the search run and try again.').replace(/[.!?]+$/, '');
   const quotaGuidance = /429|rate limit|quota/i.test(reason)
-    ? ' Gemini rejected the request before completing a company search. Check quota, billing, and Google Search grounding access for the configured API project; retry only after the provider limit is available.'
+    ? ' Gemini rejected the request. Check the configured key, model availability, and free-tier quota before retrying.'
     : '';
   return `AI source search failed. ${saved} documents saved; ${completed} of ${total} companies searched. ${reason}.${quotaGuidance}`;
 }
@@ -33,7 +34,10 @@ function sourceSearchCompletionSummary(search) {
   const gaps = search.missing?.length || 0;
   const ending = gaps ? ` ${gaps} company/source-type gaps remain; review Source Documents.` : ' All required source categories are covered.';
   if (search.completion_reason === 'provider_quota') {
-    return `AI source search stopped after ${completed} of ${total} companies because Google Search quota was reached. ${count} documents saved.${ending}`;
+    return `AI source search stopped after ${completed} of ${total} companies because the Gemini quota was reached. ${count} documents saved.${ending}`;
+  }
+  if (search.completion_reason === 'collection_incomplete') {
+    return `AI source search finished with incomplete website coverage. ${count} documents saved.${ending} Some approved sites could not be fully checked; missing sources are not confirmed unavailable.`;
   }
   return search.completion_reason === 'time_limit_reached'
     ? `AI source search reached its 5-minute limit. ${count} documents saved.${ending}`
@@ -66,13 +70,14 @@ function monitorSourceSearches() {
   for (const search of state.search_runs || []) {
     if (['running', 'cancelling'].includes(search.status)) trackedSourceSearches.add(search.id);
   }
-  if (sourceSearchPollTimer) return;
+  if (sourceSearchPollTimer || !trackedSourceSearches.size) return;
   sourceSearchPollTimer = setTimeout(async () => {
-    sourceSearchPollTimer = null;
     try {
       const running = [...trackedSourceSearches];
       if (!running.length) return;
+      const previousSummaries = state.source_summaries || [];
       await refresh();
+      if (currentView === 'sources') await updateSourceLibraryProgress(previousSummaries);
       notifyFinishedSourceSearches();
       const pending = (state.search_runs || []).some(r => running.includes(r.id) && ['running', 'cancelling'].includes(r.status));
       const cancelling = (state.search_runs || []).some(r => running.includes(r.id) && r.status === 'cancelling');
@@ -80,17 +85,21 @@ function monitorSourceSearches() {
         const status = $('#source-search-status');
         if (status) status.innerHTML = pending
           ? `<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> ${cancelling ? 'Stopping source search…' : 'Searching for source documents in the background… You can continue browsing.'}`
-          : 'AI source search finished. Reopen Source Documents to view the latest results.';
+          : 'AI source search finished. The source library is up to date.';
         const button = $('#btn-run-search');
         if (button) button.disabled = pending;
         const cancelButton = $('#btn-cancel-source-search');
-        if (cancelButton) cancelButton.disabled = cancelling;
+        if (cancelButton) {
+          if (pending) cancelButton.disabled = cancelling;
+          else cancelButton.remove();
+        }
       }
-      if (pending) monitorSourceSearches();
     } catch (error) {
       const status = $('#source-search-status');
       if (currentView === 'sources' && status) status.textContent = `Could not check source-search status: ${error.message}`;
-      if (trackedSourceSearches.size) monitorSourceSearches();
+    } finally {
+      sourceSearchPollTimer = null;
+      monitorSourceSearches();
     }
   }, 5000);
 }
@@ -271,6 +280,8 @@ async function run(fn, loadingMsg) {
 // ── State refresh ──────────────────────────────────
 async function refresh() {
   state = await apiGet('state');
+  // Source documents are deliberately loaded only when a company row is opened.
+  loadedSourceCompanyIds.clear();
   updateSidebarBadges();
 }
 
@@ -278,7 +289,7 @@ function updateSidebarBadges() {
   if (!state) return;
   const pending = (state.cases || []).filter(c => c.review_status === 'needs_review').length;
   const missingDocs = (state.companies || []).filter(c =>
-    !(state.sources || []).some(s => s.company_id === c.id)
+    !(state.source_summaries || []).some(s => s.company_id === c.id && s.count > 0)
   ).length;
   const rb = $('#badge-review');
   const sb = $('#badge-sources');
@@ -1547,11 +1558,6 @@ function renderUploadZone() {
             <label class="field-label">Portfolio name <span class="required">*</span></label>
             <input type="text" id="import-name" placeholder="e.g. MSCI Asia ex Japan — Oct 2026" required>
           </div>
-          <div class="form-group">
-            <label class="field-label">Holdings date <span class="optional">(optional)</span></label>
-            <input type="date" id="import-date" max="${new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())}">
-            <div class="text-muted text-small">Must be today or earlier (Singapore time). Leave blank to use the upload date.</div>
-          </div>
           <div class="form-group span-2">
             <label class="field-label">Benchmark</label>
             <div><strong>MSCI Asia ex Japan</strong></div>
@@ -1637,16 +1643,6 @@ function renderUploadZone() {
   }
 
   fileInput.onchange   = () => onFileSelected(fileInput.files[0]);
-  $('#import-date').addEventListener('change', event => {
-    const input = event.target;
-    const parts = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
-    const part = type => parts.find(p => p.type === type).value;
-    input.max = `${part('year')}-${part('month')}-${part('day')}`;
-    if (input.value && input.value > input.max) {
-      input.value = '';
-      showAlert('Holdings date cannot be later than today (Singapore time). Choose today or an earlier date.', 'Invalid holdings date');
-    }
-  });
   dropZone.onclick = e => { if (e.target !== fileInput) fileInput.click(); };
   $('#btn-browse-excel').onclick = e => { e.stopPropagation(); fileInput.click(); };
   dropZone.ondragover  = e => { e.preventDefault(); dropZone.classList.add('drag-over'); };
@@ -1668,10 +1664,6 @@ function renderUploadZone() {
     }
     showLoading('Parsing Excel file…');
     try {
-      const dateInput = $('#import-date');
-      if (dateInput.value && dateInput.value > dateInput.max) {
-        throw new Error('Holdings date cannot be later than today (Singapore time).');
-      }
       const rows = await parseExcelFile(currentFile);
       const invalidRows = rows.filter(row => row.error);
       if (!rows.length || invalidRows.length) {
@@ -1681,7 +1673,6 @@ function renderUploadZone() {
       }
       // Attach metadata
       rows._importName      = importName;
-      rows._importDate      = $('#import-date').value;
       rows._benchmarkName   = 'MSCI Asia ex Japan';
       rows._fileName        = currentFile.name;
       _stagingRows = rows;
@@ -2089,7 +2080,6 @@ function bindEditTable(rows) {
       const res = await api('portfolio/import', {
         theme_id: selectedDashboardThemeId,
         name: name,
-        holdings_date: rows._importDate || new Date().toISOString().slice(0, 10),
         benchmark_name: 'MSCI Asia ex Japan',
         rows: clean,
         file_name: rows._fileName,
@@ -2256,6 +2246,7 @@ async function viewSources() {
   const companyIds = new Set(portfolioRows.map(row => row.company_id).filter(id => id && id !== 'CASH'));
   const companies = (state.companies || []).filter(company => companyIds.has(company.id));
   const sources = (state.sources || []).filter(source => companyIds.has(source.company_id));
+  const sourceSummaries = (state.source_summaries || []).filter(summary => companyIds.has(summary.company_id));
   const theme     = (state.themes || []).find(t => t.id === selectedDashboardThemeId);
   const uploadCompanyId = companies.some(company => company.id === pendingManualUploadCompanyId)
     ? pendingManualUploadCompanyId : '';
@@ -2273,14 +2264,14 @@ async function viewSources() {
   const SOURCE_TYPES = [
     { value:'annual_report',         label:'Annual report',                  default:true },
     { value:'regulatory_filing',     label:'Regulatory filing (10-K/20-F)',  default:true },
-    { value:'investor_presentation', label:'Investor presentation',          default:false },
-    { value:'earnings_call',         label:'Earnings call transcript',       default:false },
-    { value:'company_website',       label:'Company website page',           default:false },
-    { value:'sustainability_report', label:'Sustainability report',          default:false },
+    { value:'investor_presentation', label:'Investor presentation',          default:true },
+    { value:'earnings_call',         label:'Earnings call transcript',       default:true },
+    { value:'company_website',       label:'Company website page',           default:true },
+    { value:'sustainability_report', label:'Sustainability report',          default:true },
   ];
 
   const companyList = companies.map(c => {
-    const co = sources.filter(s=>s.company_id===c.id);
+    const docsCount = sourceSummaries.find(s => s.company_id === c.id)?.count || 0;
     const sedolText = c.sedol ? ` · SEDOL: ${c.sedol}` : '';
     return `<label class="company-search-item" data-cid="${esc(c.id)}" data-name="${esc(c.name.toLowerCase())}" data-ticker="${esc((c.bloomberg_ticker||'').toLowerCase())}" data-sedol="${esc((c.sedol||'').toLowerCase())}" style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--slate-100);margin-bottom:6px">
       <input type="checkbox" name="company_ids" value="${esc(c.id)}" checked style="width:auto">
@@ -2288,7 +2279,7 @@ async function viewSources() {
         <div style="font-weight:600;font-size:13px">${esc(c.name)}</div>
         <div class="text-muted text-small">${esc(c.bloomberg_ticker||c.id)}${esc(sedolText)}</div>
       </div>
-      ${co.length > 0 ? badge(co.length+' docs','green') : badge('No docs','amber')}
+      <span id="src-checklist-count-${esc(c.id)}">${sourceDocumentCountBadge(docsCount)}</span>
     </label>`;
   }).join('');
 
@@ -2306,12 +2297,10 @@ async function viewSources() {
             ? esc(sourceSearchCompletionSummary(latestSearchRun))
           : latestSearchRun?.completion_reason === 'time_limit_reached'
             ? esc(sourceSearchCompletionSummary(latestSearchRun))
+          : latestSearchRun?.completion_reason === 'collection_incomplete'
+            ? esc(sourceSearchCompletionSummary(latestSearchRun))
           : '';
   monitorSourceSearches();
-  const portfolioCompanyIds = new Set(companies.map(company => company.id));
-  const candidateResults = (latestSearchRun?.results || [])
-    .filter(result => portfolioCompanyIds.has(result.company_id));
-  const candidateCompanyCount = new Set(candidateResults.map(result => result.company_id)).size;
 
   $('#page-content').innerHTML = `
     ${portfolioSelectorHtml}
@@ -2335,6 +2324,7 @@ async function viewSources() {
             </select>
           </div>
         </div>
+        <div style="display:flex;gap:8px;margin-bottom:8px"><button type="button" class="btn btn-sm btn-secondary" id="select-all-companies">Select all</button><button type="button" class="btn btn-sm btn-secondary" id="deselect-all-companies">Deselect all</button></div>
         <div id="company-checklist" style="max-height:260px;overflow-y:auto;margin-bottom:16px">
           ${companies.length > 0 ? companyList : `<div class="text-muted text-small">No companies registered. <a href="#" data-goto="portfolio">Import a portfolio first.</a></div>`}
         </div>
@@ -2351,7 +2341,7 @@ async function viewSources() {
           </div>
 
           <div class="form-section-title">Source types</div>
-          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Select up to 2 source types per search. Each type stops at 2 verified sources or after 5 minutes.</div>
+          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Search all six source types or choose the ones you need. The search stops when each selected type has 2 verified sources, or after 5 minutes.</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
             ${SOURCE_TYPES.map(t => `
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
@@ -2387,7 +2377,7 @@ async function viewSources() {
           </button>
           ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${latestSearchRun.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
           <span class="text-muted text-small">
-            First searches listed websites, then remainder of web. Stops when at least 2 sources per type are found or 5 minutes elapse. Starts from 2026 then 2025.
+            Searches approved websites only, across the selected year and two preceding years. Stops when at least 2 sources per type are found or 5 minutes elapse.
           </span>
         </div>
         <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${searchStatus}</div>
@@ -2396,31 +2386,7 @@ async function viewSources() {
       <!-- Source library + manual upload -->
       <div>
         <!-- Candidate Search Results -->
-        ${candidateResults.length > 0 ? `
-          <div class="panel" style="margin-bottom:20px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap">
-              <div>
-                <div class="panel-title">Document search results</div>
-                <div class="panel-subtitle">${candidateResults.length} candidate filings identified across regional exchanges (${candidateCompanyCount} companies)</div>
-              </div>
-            </div>
-            <div class="table-wrap" style="max-height:240px;overflow-y:auto">
-              <table>
-                <thead><tr><th>Company</th><th>Filing Title</th><th>Type</th><th>Period</th><th>Cutoff</th><th>Registry Source</th></tr></thead>
-                <tbody>
-                  ${candidateResults.map(r => `
-                    <tr>
-                      <td class="td-company">${esc(r.company_name)}</td>
-                      <td>${esc(r.title)}</td>
-                      <td>${badge(r.source_type, 'neutral')}</td>
-                      <td>${esc(r.period)}</td>
-                      <td>${r.eligible ? badge('Eligible', 'green') : badge(r.ineligible_reason||'Cutoff', 'amber')}</td>
-                      <td><a href="${esc(r.url)}" target="_blank" rel="noopener" class="text-small" style="font-weight:600">${esc(r.short_registry || 'Official Registry')} ↗</a></td>
-                    </tr>`).join('')}
-                </tbody>
-              </table>
-            </div>
-          </div>` : ''}
+        <div id="source-search-results">${sourceSearchResults(latestSearchRun, companyIds)}</div>
 
         <div class="panel">
           <div class="panel-title">Manual upload</div>
@@ -2470,8 +2436,8 @@ async function viewSources() {
         <!-- Source library -->
         <div class="panel">
           <div class="panel-title">Source library</div>
-          <div class="panel-subtitle">${sources.length} documents · passages split at 5,000 chars per page</div>
-          ${companies.length > 0 ? sourceLibrary(sources, companies, portfolio) : `
+          <div class="panel-subtitle" id="source-library-count">${sourceSummaries.reduce((total, summary) => total + summary.count, 0)} documents · documents load when a company source row is opened</div>
+          ${companies.length > 0 ? sourceLibrary(sources, sourceSummaries, companies, portfolio) : `
             <div class="empty-state" style="padding:32px 16px">
               <div class="empty-icon">📄</div>
               <h3>No portfolio companies</h3>
@@ -2492,7 +2458,7 @@ async function viewSources() {
     query = (query || '').toLowerCase().trim();
     $$('.company-search-item').forEach(item => {
       const match = !query || item.dataset.name.includes(query) || item.dataset.ticker.includes(query) || item.dataset.sedol.includes(query);
-      item.style.display = match ? 'flex' : 'none';
+      item.style.display = match && item.dataset.complete !== 'true' ? 'flex' : 'none';
     });
   };
   $('#src-global-search')?.addEventListener('input', e => filterChecklist(e.target.value));
@@ -2535,23 +2501,16 @@ async function viewSources() {
       cutoffInput.value = theme?.cutoff || today;
     }
   };
+  $('#select-all-companies').onclick = () => document.querySelectorAll('.company-search-item').forEach(item => { const input = item.querySelector?.('input'); if (input && !input.disabled) input.checked = true; });
+  $('#deselect-all-companies').onclick = () => document.querySelectorAll('.company-search-item').forEach(item => { const input = item.querySelector?.('input'); if (input) input.checked = false; });
   $('#src-latest-documents').addEventListener('change', updateLatestDocumentFields);
   $('#src-period').addEventListener('input', () => {
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
   });
   updateLatestDocumentFields();
+  updateSourceCompanyCoverage(new Map(sourceSummaries.map(summary => [summary.company_id, summary])));
 
-  const sourceTypeInputs = Array.from($$('input[name="source_types"]'));
-  const updateSourceTypeLimit = () => {
-    const selectedCount = sourceTypeInputs.filter(input => input.checked).length;
-    sourceTypeInputs.forEach(input => {
-      input.disabled = !input.checked && selectedCount >= 2;
-      input.closest('label').style.opacity = input.disabled ? '0.55' : '1';
-      input.closest('label').style.cursor = input.disabled ? 'not-allowed' : 'pointer';
-    });
-  };
-  sourceTypeInputs.forEach(input => input.addEventListener('change', updateSourceTypeLimit));
-  updateSourceTypeLimit();
+
   $('#btn-run-search').onclick = async () => {
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
@@ -2559,12 +2518,12 @@ async function viewSources() {
     const period = $('#src-period')?.value || '2026';
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
     const latestDocuments = $('#src-latest-documents')?.checked ?? true;
-    if (selectedTypes.length === 0) {
-      showAlert('Select at least one source type per search.', 'Source type selection');
+    if (selectedCompanyIds.length === 0) {
+      showAlert('Select at least one company to search.', 'Company selection');
       return;
     }
-    if (selectedTypes.length > 2) {
-      showAlert('Select no more than 2 source types per AI search.', 'Source type selection');
+    if (selectedTypes.length === 0) {
+      showAlert('Select at least one source type per search.', 'Source type selection');
       return;
     }
     if (!/^\d{4}$/.test(period)) {
@@ -2586,6 +2545,10 @@ async function viewSources() {
       cutoff: cutoff,
       latest_documents: latestDocuments
     });
+    if (res.search_run?.id) {
+      trackedSourceSearches.add(res.search_run.id);
+      monitorSourceSearches();
+    }
     await refresh();
     if (currentView === 'sources') viewSources();
     monitorSourceSearches();
@@ -2705,12 +2668,130 @@ const SIX_SOURCE_TYPES = [
   { type: 'company_website',       label: 'Company Website / IR Page',      icon: '🌐', sub: 'Official Online Disclosures' },
 ];
 
-function sourceLibrary(sources, companies, portfolio) {
+function sourceDocumentCountBadge(count) {
+  return count > 0 ? badge(count + ' docs', 'green') : badge('No docs', 'amber');
+}
+
+function sourceSearchResults(searchRun, companyIds) {
+  const candidateResults = (searchRun?.results || []).filter(result => companyIds.has(result.company_id));
+  if (!candidateResults.length) return '';
+  const candidateCompanyCount = new Set(candidateResults.map(result => result.company_id)).size;
+  return `
+  <div class="panel" style="margin-bottom:20px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap">
+      <div>
+        <div class="panel-title">Document search results</div>
+        <div class="panel-subtitle">${candidateResults.length} candidate filings identified across regional exchanges (${candidateCompanyCount} companies)</div>
+      </div>
+    </div>
+    <div id="source-search-results-scroll" class="table-wrap" style="max-height:240px;overflow-y:auto">
+      <table>
+        <thead><tr><th>Company</th><th>Filing Title</th><th>Type</th><th>Period</th><th>Cutoff</th><th>Registry Source</th></tr></thead>
+        <tbody>
+          ${candidateResults.map(r => `
+            <tr>
+              <td class="td-company">${esc(r.company_name)}</td>
+              <td>${esc(r.title)}</td>
+              <td>${badge(r.source_type, 'neutral')}</td>
+              <td>${esc(r.period)}</td>
+              <td>${r.eligible ? badge('Eligible', 'green') : badge(r.ineligible_reason||'Cutoff', 'amber')}</td>
+              <td><a href="${esc(r.url)}" target="_blank" rel="noopener" class="text-small" style="font-weight:600">${esc(r.short_registry || 'Official Registry')} ↗</a></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function updateSourceCompanyCoverage(summaryById) {
+  const isComplete = summary => SIX_SOURCE_TYPES.every(type => (summary?.types?.[type.type] || 0) >= 2);
+  const query = ($('#src-global-search')?.value || '').toLowerCase().trim();
+  $$('.company-search-item').forEach(item => {
+    const summary = summaryById.get(item.dataset.cid);
+    const count = document.getElementById(`src-checklist-count-${item.dataset.cid}`);
+    if (count) count.innerHTML = sourceDocumentCountBadge(summary?.count || 0);
+    const complete = isComplete(summary);
+    item.dataset.complete = String(complete);
+    const checkbox = item.querySelector?.('input');
+    if (checkbox) {
+      checkbox.disabled = complete;
+      if (complete) checkbox.checked = false;
+    }
+    const matches = [item.dataset.name, item.dataset.ticker, item.dataset.sedol].some(value => (value || '').includes(query));
+    item.style.display = !complete && matches ? 'flex' : 'none';
+  });
+  const select = $('#src-sedol-select');
+  for (const option of select?.options || []) {
+    if (option.value) option.hidden = isComplete(summaryById.get(option.value));
+  }
+}
+
+function sourceCoverageBadge(summary) {
+  const types = summary?.types || {};
+  const count = SIX_SOURCE_TYPES.filter(st => (types[st.type] || 0) > 0).length;
+  return `<div style="display:inline-flex;align-items:center;gap:6px;background:${count>0?'#f0fdf4':'#fffbeb'};border:1px solid ${count>0?'#bbf7d0':'#fef3c7'};padding:3px 8px;border-radius:12px">
+    <span style="font-size:11.5px;font-weight:700;color:${count>0?'#15803d':'#b45309'}">${count} / 6</span>
+    <div style="display:flex;gap:3px">${SIX_SOURCE_TYPES.map(st => {
+      const hasIt = (types[st.type] || 0) > 0;
+      return `<span title="${st.label}: ${hasIt?'Ingested':'Missing'}" style="width:6px;height:6px;border-radius:50%;background:${hasIt?'#22c55e':'#cbd5e1'};display:inline-block"></span>`;
+    }).join('')}</div></div>`;
+}
+
+async function updateSourceLibraryProgress(previousSummaries) {
+  const portfolio = (state.portfolio_imports || []).find(p => p.id === selectedSourcePortfolioId);
+  if (!portfolio) return;
+  const companyIds = new Set((portfolio.rows || []).map(row => row.company_id));
+  const summaries = (state.source_summaries || []).filter(s => companyIds.has(s.company_id));
+  const summaryById = new Map(summaries.map(s => [s.company_id, s]));
+  const previousById = new Map((previousSummaries || []).map(s => [s.company_id, s]));
+  updateSourceCompanyCoverage(summaryById);
+  const results = $('#source-search-results');
+  if (results) {
+    const scrollTop = $('#source-search-results-scroll')?.scrollTop || 0;
+    results.innerHTML = sourceSearchResults((state.search_runs || []).at(-1), companyIds);
+    const scroll = $('#source-search-results-scroll');
+    if (scroll) scroll.scrollTop = scrollTop;
+  }
+  const count = document.getElementById('source-library-count');
+  if (count) count.textContent = `${summaries.reduce((total, summary) => total + summary.count, 0)} documents · documents load when a company source row is opened`;
+  for (const company of (state.companies || []).filter(c => companyIds.has(c.id))) {
+    const summary = summaryById.get(company.id);
+    const badge = document.getElementById(`src-coverage-${company.id}`);
+    if (badge) badge.innerHTML = sourceCoverageBadge(summary);
+    const detail = document.getElementById(`src-detail-${company.id}`);
+    if (!detail || detail.style.display === 'none' ||
+        JSON.stringify(previousById.get(company.id)?.types || {}) === JSON.stringify(summary?.types || {})) continue;
+    await loadCompanySources(company.id);
+    if (currentView !== 'sources' || detail.style.display === 'none') continue;
+    const template = document.createElement('template');
+    template.innerHTML = sourceLibrary(state.sources || [], summaries, [company], portfolio);
+    const updated = template.content.querySelector('.source-detail-row');
+    if (updated) detail.innerHTML = updated.innerHTML;
+  }
+}
+
+function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
+  // Keep the renderer callable by older integrations while using compact
+  // summaries in the live workspace.
+  if (portfolio === undefined) {
+    portfolio = companies;
+    companies = sourceSummaries;
+    const counts = new Map();
+    (sources || []).forEach(source => {
+      const types = counts.get(source.company_id) || {};
+      types[source.source_type] = (types[source.source_type] || 0) + 1;
+      counts.set(source.company_id, types);
+    });
+    sourceSummaries = [...counts.entries()].map(([company_id, types]) => ({
+      company_id, types, count: Object.values(types).reduce((total, count) => total + count, 0)
+    }));
+  }
   const rowMap = new Map((portfolio?.rows || []).map(r => [r.company_id, r]));
   const cases = (state.cases || []);
 
   const companyGroups = companies.map((c, idx) => {
     const compSources = sources.filter(s => s.company_id === c.id);
+    const compSourceSummary = sourceSummaries.find(s => s.company_id === c.id) || { types: {}, count: 0 };
     const row = rowMap.get(c.id) || {};
     const financials = getCompanyFinancials(c, row, compSources, cases);
     return {
@@ -2718,6 +2799,7 @@ function sourceLibrary(sources, companies, portfolio) {
       comp: c,
       row: row,
       sources: compSources,
+      sourceSummary: compSourceSummary,
       financials: financials
     };
   });
@@ -2751,7 +2833,7 @@ function sourceLibrary(sources, companies, portfolio) {
           </tr>
         </thead>
         <tbody id="src-table-body">
-          ${companyGroups.map(({ index, comp, row, sources: compSources, financials }) => {
+          ${companyGroups.map(({ index, comp, row, sources: compSources, sourceSummary: compSourceSummary, financials }) => {
             const displayName = comp.name;
             const ticker = comp.bloomberg_ticker || row.bloomberg_ticker || '';
             const sedol = comp.sedol || row.sedol || '—';
@@ -2759,7 +2841,6 @@ function sourceLibrary(sources, companies, portfolio) {
             const country = row.country || comp.jurisdiction || '';
             const portWt = row.portfolio_weight != null ? (row.portfolio_weight * 100).toFixed(2) + '%' : null;
             const searchTerms = `${displayName} ${ticker} ${sedol} ${sector} ${country}`.toLowerCase();
-            const docsCount = SIX_SOURCE_TYPES.filter(st => compSources.some(s => s.source_type === st.type)).length;
             const exhaustedGaps = (state.search_runs || []).filter(r =>
               r.status === 'incomplete' && r.completion_reason === 'coverage_window_exhausted'
             ).flatMap(r => r.missing || []);
@@ -2789,17 +2870,7 @@ function sourceLibrary(sources, companies, portfolio) {
                 <td class="td-num" style="font-weight:700;font-size:13px;color:var(--teal-700)">
                   ${esc(financials.rev)}<div class="text-muted text-small">${esc(financials.revCitation)}</div>
                 </td>
-                <td style="text-align:center">
-                  <div style="display:inline-flex;align-items:center;gap:6px;background:${docsCount>0?'#f0fdf4':'#fffbeb'};border:1px solid ${docsCount>0?'#bbf7d0':'#fef3c7'};padding:3px 8px;border-radius:12px">
-                    <span style="font-size:11.5px;font-weight:700;color:${docsCount>0?'#15803d':'#b45309'}">${docsCount} / 6</span>
-                    <div style="display:flex;gap:3px">
-                      ${SIX_SOURCE_TYPES.map(st => {
-                        const hasIt = compSources.some(s => s.source_type === st.type);
-                        return `<span title="${st.label}: ${hasIt?'Ingested':'Missing'}" style="width:6px;height:6px;border-radius:50%;background:${hasIt?'#22c55e':'#cbd5e1'};display:inline-block"></span>`;
-                      }).join('')}
-                    </div>
-                  </div>
-                </td>
+                <td id="src-coverage-${esc(comp.id)}" style="text-align:center">${sourceCoverageBadge(compSourceSummary)}</td>
                 <td style="text-align:right" onclick="event.stopPropagation()">
                   <button class="btn btn-sm btn-secondary" onclick="toggleSourceRow('${esc(comp.id)}')" style="font-size:11.5px;padding:4px 9px">
                     View 6 sources
@@ -2821,7 +2892,7 @@ function sourceLibrary(sources, companies, portfolio) {
                   </div>
 
                   <!-- 6 Source Types Grid -->
-                  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(290px, 1fr));gap:12px">
+                  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(0, 1fr));gap:12px">
                     ${SIX_SOURCE_TYPES.map((st, sIdx) => {
                       const matched = compSources.filter(s => s.source_type === st.type);
                       const isIngested = matched.length > 0;
@@ -2829,7 +2900,7 @@ function sourceLibrary(sources, companies, portfolio) {
                       const primaryDoc = matched[0];
 
                       return `
-                        <div style="background:${sourceGapExhausted ? '#fff1f2' : '#ffffff'};border:1px solid ${sourceGapExhausted ? '#fecdd3' : isIngested ? '#99f6e4' : '#e2e8f0'};border-radius:8px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,0.03);position:relative">
+                        <div style="min-width:0;overflow:hidden;background:${sourceGapExhausted ? '#fff1f2' : '#ffffff'};border:1px solid ${sourceGapExhausted ? '#fecdd3' : isIngested ? '#99f6e4' : '#e2e8f0'};border-radius:8px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,0.03);position:relative">
                           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px">
                             <div style="display:flex;align-items:center;gap:6px">
                               <span style="font-size:16px">${st.icon}</span>
@@ -2838,15 +2909,16 @@ function sourceLibrary(sources, companies, portfolio) {
                                 <div class="text-muted" style="font-size:10.5px">${st.sub}</div>
                               </div>
                             </div>
-                            <span class="badge ${isIngested ? 'green' : 'neutral'}" style="font-size:10px;font-weight:700">
-                              ${isIngested ? '✓ Ingested' : 'Not Ingested'}
+                            <span class="badge ${sourceGapExhausted ? 'neutral' : isIngested ? 'green' : 'neutral'}" style="font-size:10px;font-weight:700">
+                              ${sourceGapExhausted ? 'Not available (fewer than 2 sources)' : isIngested ? '✓ Ingested' : 'Not Ingested'}
                             </span>
                           </div>
 
                           ${isIngested ? `
-                            ${matched.map(doc => `<div style="display:flex;align-items:center;gap:6px;margin:3px 0">
-                              ${doc.url ? `<a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer">${esc(doc.title || doc.filename)} — Source URL ↗</a>` : `<span>${esc(doc.title || doc.filename)} — No source URL provided</span>`}
-                              <button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();deleteSource('${esc(doc.id)}')" style="font-size:10px;padding:2px 6px;color:#be123c" aria-label="Delete ${esc(doc.title || doc.filename)}">Delete</button>
+                            ${matched.map(doc => `<div style="display:flex;align-items:flex-start;min-width:0;gap:6px;margin:3px 0">
+                              ${doc.url ? `<a href="${esc(doc.url)}" target="_blank" rel="noopener noreferrer" style="min-width:0;overflow-wrap:anywhere;word-break:break-word">${esc(doc.title || doc.filename)} — Source URL ↗</a>` : `<span style="min-width:0;overflow-wrap:anywhere;word-break:break-word">${esc(doc.title || doc.filename)} — No source URL provided</span>`}
+                              ${typeof doc.ai_confidence === 'number' ? `<span class="text-muted text-small" title="${esc(doc.ai_confidence_reason || 'AI confidence estimate')}">${esc(doc.ai_confidence)}% AI confidence${doc.ai_confidence_basis ? ` (${esc(doc.ai_confidence_basis)})` : ''}${doc.ai_confidence_fallback ? ' (below target)' : ''}</span>` : ''}
+                              <button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();deleteSource('${esc(doc.id)}')" style="flex:none;font-size:10px;padding:2px 6px;color:#be123c" aria-label="Delete ${esc(doc.title || doc.filename)}">Delete</button>
                             </div>`).join('')}
                             <div style="font-size:11.5px;color:var(--slate-700);line-height:1.4;margin:6px 0;background:#f0fdfa;padding:6px 8px;border-radius:5px;border:1px solid #ccfbf1">
                               <div style="font-weight:600;color:var(--teal-900);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(primaryDoc.title || primaryDoc.filename)}">
@@ -2892,25 +2964,70 @@ function sourceLibrary(sources, companies, portfolio) {
 }
 
 // Global table helpers for Source Library
-window.toggleSourceRow = function(companyId) {
+async function loadCompanySources(companyId) {
+  if (loadedSourceCompanyIds.has(companyId)) return;
+  const result = await api('stock/sources', { company_id: companyId });
+  const remaining = (state.sources || []).filter(source => source.company_id !== companyId);
+  state.sources = [...remaining, ...(result.sources || [])];
+  loadedSourceCompanyIds.add(companyId);
+}
+
+window.toggleSourceRow = async function(companyId) {
   const detail = document.getElementById(`src-detail-${companyId}`);
   const chev = document.getElementById(`src-chev-${companyId}`);
   if (!detail) return;
   const isCurrentlyOpen = detail.style.display !== 'none';
-  detail.style.display = isCurrentlyOpen ? 'none' : 'table-row';
-  if (chev) chev.style.transform = isCurrentlyOpen ? 'rotate(0deg)' : 'rotate(90deg)';
+  if (isCurrentlyOpen) {
+    detail.style.display = 'none';
+    if (chev) chev.style.transform = 'rotate(0deg)';
+    return;
+  }
+  // The lightweight browser-test DOM does not expose nested queries.
+  if (typeof detail.querySelector !== 'function') {
+    detail.style.display = 'table-row';
+    if (chev) chev.style.transform = 'rotate(90deg)';
+    return;
+  }
+  try {
+    detail.style.display = 'table-row';
+    detail.querySelector('td').innerHTML = '<div class="text-muted text-small" style="padding:8px 0">Loading source documents…</div>';
+    await loadCompanySources(companyId);
+    await viewSources();
+    const refreshedDetail = document.getElementById(`src-detail-${companyId}`);
+    const refreshedChevron = document.getElementById(`src-chev-${companyId}`);
+    if (refreshedDetail) refreshedDetail.style.display = 'table-row';
+    if (refreshedChevron) refreshedChevron.style.transform = 'rotate(90deg)';
+  } catch (error) {
+    detail.style.display = 'table-row';
+    detail.querySelector('td').innerHTML = `<div class="text-muted text-small" style="padding:8px 0">Could not load source documents: ${esc(error.message)}</div>`;
+  }
 };
 
-window.toggleAllSourceRows = function() {
+window.toggleAllSourceRows = async function() {
   const masters = Array.from(document.querySelectorAll('.source-master-row')).filter(row => row.style.display !== 'none');
   const details = masters.map(row => document.getElementById(row.id.replace('src-master-', 'src-detail-')));
   const chevs = masters.map(row => document.getElementById(row.id.replace('src-master-', 'src-chev-')));
   const btn = document.getElementById('btn-toggle-all-sources');
   const anyClosed = Array.from(details).some(d => d.style.display === 'none');
 
-  details.forEach(d => d.style.display = anyClosed ? 'table-row' : 'none');
-  chevs.forEach(c => c.style.transform = anyClosed ? 'rotate(90deg)' : 'rotate(0deg)');
-  if (btn) btn.textContent = anyClosed ? 'Collapse all 6 sources' : 'Expand all 6 sources';
+  if (!anyClosed) {
+    details.forEach(d => d.style.display = 'none');
+    chevs.forEach(c => c.style.transform = 'rotate(0deg)');
+    if (btn) btn.textContent = 'Expand all 6 sources';
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading sources…'; }
+  try {
+    await Promise.all(masters.map(row => loadCompanySources(row.id.replace('src-master-', ''))));
+    await viewSources();
+    document.querySelectorAll('.source-detail-row').forEach(d => d.style.display = 'table-row');
+    document.querySelectorAll('.src-chevron').forEach(c => c.style.transform = 'rotate(90deg)');
+    const refreshedButton = document.getElementById('btn-toggle-all-sources');
+    if (refreshedButton) refreshedButton.textContent = 'Collapse all 6 sources';
+  } catch (error) {
+    notice(`Could not load all source documents: ${error.message}`, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Expand all 6 sources'; }
+  }
 };
 
 window.filterSourceLibraryTable = function(query) {

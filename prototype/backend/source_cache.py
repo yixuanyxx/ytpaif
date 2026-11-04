@@ -9,8 +9,11 @@ Flow:
 3. When PM logs out or closes browser tab -> copy Redis database to Supabase.
 """
 import json
+import hashlib
 import os
 import time
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urldefrag
 
 FRESH_FOR_SECONDS = 3600  # Stays active for session
 _client = None
@@ -21,7 +24,7 @@ _SOURCE_FIELDS = (
     'cutoff', 'title', 'filename', 'extension', 'registry', 'short_registry',
     'retrieved_at', 'link_status', 'storage_mode', 'link_verified_at',
     'content_type', 'sha256', 'storage_path', 'extraction_status',
-    'financial_facts',
+    'financial_facts', 'ai_confidence', 'ai_confidence_reason', 'ai_confidence_fallback', 'ai_confidence_basis',
 )
 
 
@@ -142,7 +145,7 @@ def copy_supabase_to_redis(sources, force=False):
         return False
 
 
-def save_sources_to_redis(sources):
+def save_sources_to_redis(sources, mark_pending=True):
     """Save/update sources in Redis temporary database and mark for sync."""
     client = _connection()
     if not client:
@@ -156,7 +159,8 @@ def save_sources_to_redis(sources):
                 continue
             pipe.set(_key(f'source:{source_id}'), json.dumps(record, separators=(',', ':')))
             pipe.sadd(_key('ids'), source_id)
-            pipe.sadd(_key('pending_sync_ids'), source_id)
+            if mark_pending:
+                pipe.sadd(_key('pending_sync_ids'), source_id)
             company_id = record.get('company_id')
             source_type = record.get('source_type')
             ticker = record.get('bloomberg_ticker', '').strip().upper()
@@ -259,6 +263,33 @@ def get_sources_for_stock(company_id=None, ticker=None):
         return [json.loads(val) for val in values if val]
     except Exception:
         return []
+
+
+def get_source_summaries():
+    """Return compact per-company/per-type counts for the workspace landing view."""
+    sources = get_all_sources_from_redis()
+    if sources is None:
+        return []
+    counts = {}
+    coverage = {}
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    for source in sources:
+        company_id = source.get('company_id')
+        source_type = source.get('source_type')
+        if not company_id or not source_type:
+            continue
+        by_type = counts.setdefault(company_id, {})
+        by_type[source_type] = by_type.get(source_type, 0) + 1
+        if source.get('link_status') == 'verified' and source.get('url') and source.get('publication_date', '9999') <= today:
+            year = str(source.get('period', ''))
+            identity = hashlib.sha256(urldefrag(source['url'])[0].rstrip('/').encode()).hexdigest()
+            coverage.setdefault(company_id, {}).setdefault(source_type, {}).setdefault(year, set()).add((identity, source.get('publication_date', '9999')))
+    return [
+        {'company_id': company_id, 'types': types, 'count': sum(types.values()),
+         'verified': {kind: {year: sorted(urls) for year, urls in years.items()}
+                      for kind, years in coverage.get(company_id, {}).items()}}
+        for company_id, types in counts.items()
+    ]
 
 
 def copy_redis_to_supabase(store, force_all=False):

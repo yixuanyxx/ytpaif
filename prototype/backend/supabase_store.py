@@ -164,6 +164,21 @@ class SupabaseStore:
         rows = request('/rest/v1/' + table, query=query)
         return rows[0]['payload'] if rows else None
 
+    def find_many(self, kind, record_ids):
+        """Fetch a small set of current records in one request."""
+        ids = [str(record_id) for record_id in dict.fromkeys(record_ids or []) if record_id]
+        if not ids:
+            return []
+        table = self._table(kind)
+        # Application record IDs are server-generated tokens; reject other
+        # values instead of interpolating them into PostgREST's `in` syntax.
+        if any(not __import__('re').fullmatch(r'[A-Za-z0-9_-]+', record_id) for record_id in ids):
+            raise ValueError('Invalid record ID')
+        rows = request('/rest/v1/' + table, query={
+            'select': 'payload', 'id': 'in.(' + ','.join(ids) + ')'
+        })
+        return [row['payload'] for row in rows or []]
+
     def get(self, kind, record_id):
         value = self.find(kind, record_id)
         if value is None:

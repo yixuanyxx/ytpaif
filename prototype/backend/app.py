@@ -1361,13 +1361,46 @@ def sync_to_supabase(d=None):
     count = source_cache.copy_redis_to_supabase(store)
     return {'status': 'ok', 'synced': count, 'message': f'Copied {count} source documents from Redis to Supabase'}
 
+_source_update_cursor = 0
+
+def mark_source_updates_seen():
+    """A freshly hydrated cache already has durable records; skip old events."""
+    global _source_update_cursor
+    import source_jobs
+    _source_update_cursor = source_jobs.Queue().latest_source_update()
+
+def refresh_worker_sources():
+    """Bring background-worker saves into this process's cache."""
+    global _source_update_cursor
+    import source_jobs
+    updates = source_jobs.Queue().source_updates_after(_source_update_cursor)
+    if not updates:
+        return
+    for source_id in dict.fromkeys(row[1] for row in updates):
+        record = store.find('sources', source_id)
+        if record:
+            if not source_cache.save_sources_to_redis([record], mark_pending=False):
+                return
+        else:
+            source_cache.delete_source(source_id)
+    _source_update_cursor = updates[-1][0]
+
 def stock_sources(d):
     """Retrieve source documents for a specific stock by ticker or company_id from Redis."""
     cid = d.get('company_id')
     ticker = d.get('ticker')
     if not source_cache.is_hydrated():
         source_cache.warm_sources(store.all_records('sources'))
+        mark_source_updates_seen()
     sources = source_cache.get_sources_for_stock(company_id=cid, ticker=ticker)
+    # Scores are written directly to permanent storage by the background
+    # scorer. Read only this company's current records, rather than trying to
+    # replay thousands of unrelated scoring updates before opening a row.
+    if sources:
+        current = store.find_many('sources', [source.get('id') for source in sources])
+        if current:
+            source_cache.save_sources_to_redis(current, mark_pending=False)
+            sources = current
     if not sources and (cid or ticker):
         t_clean = (ticker or '').strip().upper()
         t_base = t_clean.replace(' EQUITY', '').strip()
@@ -1384,12 +1417,23 @@ def state():
     model = os.environ.get('LLM_MODEL') or DEFAULT_LLM_MODEL
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
     checker_model = os.environ.get('CHECKER_LLM_MODEL') or DEFAULT_CHECKER_MODEL
-    source_cache.warm_sources(store.all_records('sources'))
-    sources = source_link_records()
+    # Read run status before source counts so a terminal run includes its final saves.
+    search_runs = all_records('search_runs')
+    # Keep the session cache warm, but do not send the complete source library
+    # to the browser during workspace startup. Individual company documents are
+    # fetched from Redis only when the PM opens that company's source row.
+    if not source_cache.is_hydrated():
+        source_cache.warm_sources(store.all_records('sources'))
+        mark_source_updates_seen()
+    refresh_worker_sources()
+    source_summaries = source_cache.get_source_summaries()
     return {
-        **{k: ([{**source, 'financial_facts': financials.extract(source)} for source in sources] if k == 'sources' else all_records(k)) for k in
-           ('themes', 'companies', 'sources', 'cases', 'reviews', 'runs', 'snapshots',
-            'portfolio_imports', 'search_runs')},
+        **{k: all_records(k) for k in
+           ('themes', 'companies', 'cases', 'reviews', 'runs', 'snapshots',
+            'portfolio_imports')},
+        'search_runs': search_runs,
+        'sources': [],
+        'source_summaries': source_summaries,
         'ai_configured': bool(key),
         'ai_model': model if key else '',
         'checker_configured': bool(checker_key),

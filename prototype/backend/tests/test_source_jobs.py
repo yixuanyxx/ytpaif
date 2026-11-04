@@ -7,6 +7,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import source_jobs
 
@@ -45,6 +47,27 @@ class SourceJobsTest(unittest.TestCase):
         self.assertEqual(len(reopened.pending_sources('test-job')), 1)
         reopened.acknowledge_sources('test-job', [record])
         self.assertEqual(reopened.pending_sources('test-job'), [])
+        self.assertEqual([row[1] for row in reopened.source_updates_after(0)], ['source-a'])
+
+    def test_discovered_sources_are_saved_to_supabase_without_browser_sync(self):
+        record = {'id': 'source-a', 'company_id': 'company'}
+        store = SimpleNamespace(put_many=Mock(return_value=[record]))
+        cache = SimpleNamespace(save_sources_to_redis=Mock(return_value=False))
+        app = SimpleNamespace(store=store, source_cache=cache)
+        self.assertEqual(source_jobs.persist_discovered_sources(app, [record]), [record])
+        store.put_many.assert_called_once_with('sources', [record])
+        cache.save_sources_to_redis.assert_called_once_with([record])
+
+    def test_failed_supabase_save_leaves_staged_sources_unacknowledged(self):
+        record = {'id': 'source-a'}
+        self.queue.enqueue(self.run, [])
+        self.queue.stage_source('test-job', record)
+        store = SimpleNamespace(put_many=Mock(side_effect=RuntimeError('storage unavailable')))
+        cache = SimpleNamespace(save_sources_to_redis=Mock())
+        with self.assertRaisesRegex(RuntimeError, 'storage unavailable'):
+            source_jobs.persist_discovered_sources(SimpleNamespace(store=store, source_cache=cache), [record])
+        self.assertEqual(self.queue.pending_sources('test-job'), [record])
+        cache.save_sources_to_redis.assert_not_called()
 
     def test_real_crashed_worker_resumes_from_checkpoint(self):
         self.queue.enqueue(self.run, [])

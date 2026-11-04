@@ -30,13 +30,165 @@ def saved_document(app, run, company, row, timeout=20):
 
 
 class DiscoveryTest(unittest.TestCase):
+    def test_transient_gemini_error_retries_without_grounding(self):
+        import approved_collector
+        candidates = [{'url': 'https://reuters.com/2025', 'title': 'Example annual report 2025',
+                       'context': 'Example annual report 2025 published 2026-04-01'}]
+        output = {'steps': [{'type': 'model_output', 'content': [{'text': '{"sources":[]}'}]}]}
+        error = HTTPError('https://provider', 503, 'Unavailable', {}, None)
+        with patch.dict(discovery.os.environ, {'FINANCIALS_LLM_API_KEY': 'test'}), \
+             patch.object(approved_collector, 'collect', return_value=(candidates, True)), \
+             patch.object(discovery.time, 'sleep'), \
+             patch.object(discovery, 'urlopen', side_effect=[error, io.BytesIO(json.dumps(output).encode())]) as send:
+            discovery.grounded_search({'name': 'Example'}, ['annual_report'], '2025', '2026-11-03', False, 20)
+        self.assertEqual(send.call_count, 2)
+
+    def test_coforge_official_site_is_approved(self):
+        self.assertTrue(discovery.approved_source_url('https://investors.coforge.com/annual-report', {'name': 'COFORGE LTD'}))
+        self.assertFalse(discovery.approved_source_url('https://investors.coforge.com.evil.test/x', {'name': 'COFORGE LTD'}))
+    def test_company_matching_ignores_generic_company_suffixes(self):
+        import approved_collector
+        company = {'name': 'VENTURE CORP LTD'}
+        self.assertFalse(approved_collector.company_matches('Marathon Petroleum Corporation earnings', company))
+        self.assertTrue(approved_collector.company_matches('Venture Corporation annual report', company))
+
+    def test_link_parser_keeps_text_near_each_link(self):
+        import approved_collector
+        parser = approved_collector.Links()
+        parser.feed('<p>Other item 2019</p><p>Annual Report 2025 published 02 Apr 2026 '
+                    '<a title="Annual Report 2025" href="/annual.pdf">Download</a></p>')
+        _, title, start, end = parser.links[0]
+        context = ''.join(parser.page_text)[max(0, start-100):end+100]
+        self.assertEqual(title, 'Annual Report 2025')
+        self.assertIn('2026-04-02', approved_collector.explicit_dates(context))
+
+    def test_link_parser_separates_adjacent_table_rows(self):
+        import approved_collector
+        parser = approved_collector.Links()
+        parser.feed('<table><tr><td>Annual Report 2024</td><td>02 Apr 2025</td>'
+                    '<td><a href="/annual.pdf">Annual Report</a></td></tr>'
+                    '<tr><td>Sustainability Report 2025</td><td>02 Apr 2026</td>'
+                    '<td><a href="/sustain.pdf">Sustainability Report</a></td></tr></table>')
+        text = ''.join(parser.page_text)
+        _, _, start, _ = parser.links[0]
+        row = next((a, b) for a, b in parser.rows if a <= start <= b)
+        context = text[row[0]:row[1]]
+        self.assertIn('Annual Report 2024', context)
+        self.assertNotIn('Sustainability Report', context)
+
+    def test_collected_links_use_free_key_and_no_search_grounding(self):
+        import approved_collector
+        candidates = [{'url': 'https://reuters.com/doc/123', 'title': 'Example annual report 2025',
+                       'context': 'Example annual report FY2025 published 2026-04-01'}]
+        output = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({'sources': [
+            {'index': 0, 'source_type': 'annual_report', 'publication_date': '2026-04-01', 'period': '2025', 'confidence_score': 85, 'reason': 'matching report'},
+            {'index': 1, 'source_type': 'annual_report', 'publication_date': '2026-04-01', 'period': '2025', 'confidence_score': 85}]})}]}]}
+        with patch.dict(discovery.os.environ, {'FINANCIALS_LLM_API_KEY': 'free-test-key', 'LLM_API_KEY': 'billed-key'}), \
+                patch.object(approved_collector, 'collect', return_value=(candidates, True)), \
+                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as send:
+            rows = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '2025', '2026-11-03', False, 20)
+        request = send.call_args.args[0]
+        body = json.loads(request.data)
+        self.assertNotIn('tools', body)
+        self.assertEqual(body['model'], 'gemini-3.5-flash-lite')
+        self.assertEqual(request.get_header('X-goog-api-key'), 'free-test-key')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['url'], candidates[0]['url'])
+        self.assertEqual(rows[0]['ai_confidence'], 85)
+        self.assertTrue(rows.diagnostics['collection_incomplete'])
+
+    def test_low_confidence_candidate_is_available_as_fallback(self):
+        import approved_collector
+        candidates = [{'url': 'https://reuters.com/doc/123', 'title': 'Example annual report 2025',
+                       'context': 'Example annual report FY2025 published 2026-04-01'}]
+        output = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({'sources': [
+            {'index': 0, 'source_type': 'annual_report', 'publication_date': '2026-04-01',
+             'period': '2025', 'confidence_score': 70}]})}]}]}
+        with patch.dict(discovery.os.environ, {'FINANCIALS_LLM_API_KEY': 'free-test-key'}), \
+                patch.object(approved_collector, 'collect', return_value=(candidates, True)), \
+                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())):
+            rows = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '2025', '2026-11-03', False, 20)
+            self.assertEqual(rows[0]['ai_confidence'], 70)
+
+    def test_gemini_cannot_relabel_annual_report_as_sustainability_report(self):
+        import approved_collector
+        candidates = [{'url': 'https://reuters.com/report/2024.pdf', 'title': 'Annual Report 2024 - PDF Version',
+                       'context': 'Venture Annual Report 2024, published 2025-04-02'}]
+        response = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({'sources': [
+            {'index': 0, 'source_type': 'sustainability_report', 'publication_date': '2025-04-02',
+             'period': '2024', 'confidence_score': 95}]})}]}]}
+        with patch.dict(discovery.os.environ, {'FINANCIALS_LLM_API_KEY': 'test'}), \
+                patch.object(approved_collector, 'collect', return_value=(candidates, True)), \
+                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(response).encode())):
+            rows = discovery.grounded_search({'name': 'Venture'}, ['sustainability_report'], '2024', '2026-11-03', False, 20)
+        self.assertEqual(rows, [])
+
+    def test_fallback_fills_only_gaps_with_closest_scores_per_stock_and_type(self):
+        run = {'source_types': ['annual_report', 'earnings_call'], 'search_periods': ['2026', '2025', '2024'],
+               'cutoff': '2026-11-03', 'storage_mode': 'url_only'}
+        companies = [{'id': 'a'}, {'id': 'b'}]
+        def source(cid, kind, score, url):
+            return {'company_id': cid, 'source_type': kind, 'url': url, 'period': '2025',
+                    'publication_date': '2026-04-01', 'link_status': 'verified', 'ai_confidence': score}
+        existing = [source('a', 'annual_report', 90, 'https://reuters.com/a')]
+        candidates = [source('a', 'annual_report', 60, 'https://reuters.com/60'),
+                      source('a', 'annual_report', 70, 'https://reuters.com/70'),
+                      source('a', 'annual_report', 69, 'https://reuters.com/69'),
+                      source('b', 'earnings_call', 68, 'https://reuters.com/b1'),
+                      source('b', 'earnings_call', 50, 'https://reuters.com/b2'),
+                      source('b', 'earnings_call', 10, 'https://reuters.com/b3')]
+        selected = discovery.select_fallback_sources(run, companies, existing, candidates)
+        self.assertEqual([s['ai_confidence'] for s in selected], [70, 68, 50])
+        self.assertTrue(all(s['ai_confidence_fallback'] for s in selected))
+
+    def test_worker_saves_best_fallback_after_higher_confidence_sources(self):
+        run = {'id': 'job', 'source_types': ['annual_report'], 'period': '2026',
+               'search_periods': ['2026'], 'cutoff': '2026-11-03',
+               'results': [], 'errors': [], 'status': 'running'}
+        sources = []
+        rows = [{'url': f'https://reuters.com/report/{score}', 'source_type': 'annual_report',
+                 'publication_date': '2026-04-01', 'period': '2026', 'ai_confidence': score}
+                for score in (90, 70, 50)]
+        with patch.object(discovery, 'grounded_search', return_value=rows), \
+                patch.object(discovery, 'save_document', side_effect=saved_document):
+            discovery.worker(worker_app(sources, []), run, [{'id': 'a', 'name': 'Example'}])
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(sorted(s['ai_confidence'] for s in sources), [70, 90])
+        fallback = next(s for s in sources if s['ai_confidence'] == 70)
+        self.assertTrue(fallback['ai_confidence_fallback'])
+
+    def test_collector_blocks_unapproved_redirects(self):
+        import approved_collector
+        redirect = approved_collector.ApprovedRedirect(['reuters.com'], lambda url: url)
+        with self.assertRaisesRegex(ValueError, 'unapproved'):
+            redirect.redirect_request(None, None, 302, '', {}, 'https://reuters.com.attacker.test/page')
+
+    def test_approved_source_domains_and_company_sites(self):
+        company = {'website': 'https://example.com'}
+        for url in ('https://www.reuters.com/article/1', 'https://seekingalpha.com/article/1',
+                    'https://investors.example.com/report.pdf'):
+            self.assertTrue(discovery.approved_source_url(url, company))
+        for url in ('https://reuters.com.attacker.test/report', 'https://unapproved.test/report'):
+            self.assertFalse(discovery.approved_source_url(url, company))
+
+    def test_gemini_prompt_requires_approved_domain_only_queries(self):
+        output = {'steps': []}
+        with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
+                patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as send:
+            discovery.legacy_grounded_search({'name': 'Example', 'website': 'example.com'},
+                                      ['annual_report'], '2026', '2026-11-03', False, 5)
+        prompt = json.loads(send.call_args.args[0].data)['input']
+        for phrase in ('HARD SOURCE RESTRICTION', 'site:', 'seekingalpha.com', 'example.com',
+                       'Never search, cite, use, or return information from any other domain'):
+            self.assertIn(phrase, prompt)
+
     def test_both_grounded_search_models_share_one_api_key(self):
         output = {'steps': [{'type': 'google_search_call'}, {'type': 'model_output', 'content': [{
             'text': '{"sources":[]}', 'annotations': [{'type': 'url_citation', 'url': 'https://example.com'}]}]}]}
         for broad, expected in ((False, 'gemini-3.5-flash-lite'), (True, 'gemini-3.8-flash')):
             with self.subTest(broad=broad), patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'shared-test-key'}), \
                     patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as send:
-                discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', broad, 5)
+                discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', broad, 5)
             request = send.call_args.args[0]
             body = json.loads(request.data)
             self.assertEqual(body['model'], expected)
@@ -44,7 +196,7 @@ class DiscoveryTest(unittest.TestCase):
             self.assertNotIn('generation_config', body)
             self.assertEqual(request.get_header('X-goog-api-key'), 'shared-test-key')
 
-    def test_submission_uses_selected_types_and_all_portfolio_stocks(self):
+    def test_submission_uses_selected_types_and_selected_portfolio_stocks(self):
         portfolio = {'id': 'portfolio', 'rows': [{'company_id': 'a'}, {'company_id': 'b'},
                                                  {'company_id': 'a'}, {'company_id': 'CASH'}]}
         app = SimpleNamespace(get=lambda kind, key: portfolio if kind == 'portfolio_imports' else {'id': key, 'name': key},
@@ -55,17 +207,17 @@ class DiscoveryTest(unittest.TestCase):
             result = discovery.start(app, {'portfolio_id': 'portfolio', 'company_ids': ['a'],
                 'source_types': ['annual_report', 'annual_report'], 'period': '2025',
                 'cutoff': '2026-11-02'})['search_run']
-        self.assertEqual(result['company_ids'], ['a', 'b'])
+        self.assertEqual(result['company_ids'], ['a'])
         self.assertEqual(result['source_types'], ['annual_report'])
         self.assertEqual(result['documents_per_type'], 2)
         self.assertEqual(result['search_models'], {'first_pass': 'gemini-3.5-flash-lite',
-                                                 'missing_results': 'gemini-3.8-flash'})
+                                                 'missing_results': 'gemini-3.5-flash-lite'})
         self.assertEqual(result['storage_mode'], 'url_only')
         self.assertEqual(result['period'], '2025')
         self.assertEqual(result['search_periods'], ['2025', '2024', '2023'])
         self.assertEqual(result['time_limit_seconds'], 300)
         self.assertGreater(result['deadline_unix'], discovery.time.time())
-        self.assertEqual(len(result['missing']), 2)
+        self.assertEqual(len(result['missing']), 1)
         queue.return_value.enqueue.assert_called_once()
 
     def test_empty_and_unknown_type_selection_rejected_before_queueing(self):
@@ -79,8 +231,8 @@ class DiscoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'four-digit year'):
             discovery.start(None, {'latest_documents': True, 'period': '', 'source_types': ['annual_report']})
 
-    def test_all_six_source_types_are_supported_with_two_per_search_limit(self):
-        self.assertEqual(discovery.MAX_SOURCE_TYPES_PER_SEARCH, 2)
+    def test_all_six_source_types_are_supported_in_one_search(self):
+        self.assertEqual(discovery.MAX_SOURCE_TYPES_PER_SEARCH, 6)
         self.assertEqual(len(discovery.TYPES), 6)
 
     def test_coverage_counts_two_unique_eligible_urls_only_for_selected_types(self):
@@ -132,7 +284,7 @@ class DiscoveryTest(unittest.TestCase):
         ]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
                 patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as request:
-            result = discovery.grounded_search({'name': 'TSMC'}, ['annual_report'], '', '2026-11-02', False, 5,
+            result = discovery.legacy_grounded_search({'name': 'TSMC'}, ['annual_report'], '', '2026-11-02', False, 5,
                                                 excluded_sites_by_type={'annual_report': ['capitaliq.com']})
         self.assertEqual([row['url'] for row in result], urls[1:])
         self.assertIn('capitaliq.com', request.call_args.args[0].data.decode())
@@ -170,13 +322,13 @@ class DiscoveryTest(unittest.TestCase):
     def test_worker_keeps_searching_until_two_per_type_for_every_stock(self):
         companies = [{'id': cid, 'name': cid} for cid in ('a', 'b')]
         selected = ['annual_report', 'regulatory_filing']
-        run = {'id': 'job', 'source_types': selected, 'period': None, 'cutoff': '2026-11-02',
+        run = {'id': 'job', 'source_types': selected, 'period': '2026', 'search_periods': ['2026', '2025', '2024'], 'cutoff': '2026-11-02',
                'latest_documents': True, 'results': [], 'errors': [], 'status': 'running'}
         sources, snapshots, calls = [], [], []
 
         def search(company, types, period, cutoff, broad, timeout, known, excluded_sites):
             calls.append((company['id'], list(types), broad, timeout, known, excluded_sites))
-            number = 2 if broad else 1
+            number = 1 if period == '2026' else 2
             # Even a provider that returns an unticked category cannot save it.
             return [{'url': f'https://example.com/{company["id"]}/{t}/{number}',
                      'source_type': t, 'publication_date': '2026-01-01', 'period': '2025'}
@@ -198,7 +350,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertTrue(any(len(s['missing']) > 0 for s in snapshots[:-1]))
         sleep.assert_not_called()
 
-    def test_unavailable_documents_finish_incomplete_after_both_search_phases(self):
+    def test_unavailable_documents_finish_incomplete_after_approved_search(self):
         run = {'source_types': ['annual_report'], 'period': None, 'cutoff': '2026-11-02',
                'latest_documents': True, 'results': [], 'errors': [], 'status': 'running'}
         app = worker_app([], [])
@@ -207,7 +359,7 @@ class DiscoveryTest(unittest.TestCase):
             discovery.worker(app, run, [{'id': 'a', 'name': 'a'}])
         self.assertEqual(run['status'], 'incomplete')
         self.assertEqual(run['missing'][0]['found'], 0)
-        self.assertEqual(search.call_count, 2)
+        self.assertEqual(search.call_count, 1)
         sleep.assert_not_called()
 
     def test_exhausted_three_year_window_marks_remaining_gaps(self):
@@ -225,7 +377,7 @@ class DiscoveryTest(unittest.TestCase):
             discovery.worker(app, run, [{'id': 'a', 'name': 'A'}])
         self.assertEqual(run['status'], 'incomplete')
         self.assertEqual(run['completion_reason'], 'coverage_window_exhausted')
-        self.assertEqual(searched_periods, ['2026', '2026', '2025', '2025', '2024', '2024'])
+        self.assertEqual(searched_periods, ['2026', '2025', '2024'])
 
     def test_first_pass_searches_and_downloads_are_concurrent_within_the_time_limit(self):
         companies = [{'id': str(i), 'name': str(i)} for i in range(4)]
@@ -298,20 +450,20 @@ class DiscoveryTest(unittest.TestCase):
                 patch.object(discovery, 'save_document', side_effect=saved_document), \
                 patch.object(discovery.time, 'sleep'):
             discovery.worker(app, run, companies)
-        self.assertEqual(run['status'], 'completed')
-        self.assertEqual(len(called), 3)
-        self.assertEqual(len(sources), 8)
+        self.assertEqual(run['status'], 'incomplete')
+        self.assertEqual(len(called), 2)
+        self.assertEqual(len(sources), 6)
 
     def test_only_verified_url_and_metadata_saved_without_file_storage(self):
         app = SimpleNamespace(now=lambda: 'now', source_ingest=lambda *_: self.fail('Text ingestion must not run'))
         row = {'url': 'https://example.com/report', 'source_type': 'annual_report',
                'publication_date': '2026-01-01', 'period': '2025'}
-        with patch.object(discovery, 'verify_document_link', return_value=('https://example.com/report.pdf', 'application/pdf')), \
+        with patch.object(discovery, 'verify_document_link', return_value=('https://reuters.com/report.pdf', 'application/pdf')), \
                 patch('supabase_store.upload_source') as upload, \
                 patch('pypdf.PdfReader', side_effect=AssertionError('No PDF extraction')):
             record = discovery.save_document(app, {'cutoff': '2026-11-02'}, {'id': 'a', 'name': 'A'}, row)
         upload.assert_not_called()
-        self.assertEqual(record['url'], 'https://example.com/report.pdf')
+        self.assertEqual(record['url'], 'https://reuters.com/report.pdf')
         self.assertEqual(record['discovery_url'], row['url'])
         self.assertEqual(record['evidence'], [])
         self.assertEqual(record['extraction_status'], 'not_requested')
@@ -416,7 +568,7 @@ class DiscoveryTest(unittest.TestCase):
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), patch.object(
                 discovery, 'urlopen', side_effect=HTTPError('https://provider', 429, 'Quota', {}, None)) as request:
             with self.assertRaisesRegex(discovery.ProviderError, 'quota.*billing'):
-                discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 1)
+                discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 1)
         self.assertEqual(request.call_count, 1)
 
     def test_quota_ends_a_worker_run_as_incomplete_with_real_progress(self):
@@ -436,7 +588,7 @@ class DiscoveryTest(unittest.TestCase):
             with self.subTest(broad=broad), patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
                     patch.object(discovery, 'urlopen', side_effect=HTTPError('https://provider', 404, 'Unavailable', {}, io.BytesIO(body))):
                 with self.assertRaisesRegex(discovery.ProviderError, model + ' is no longer available'):
-                    discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', broad, 5)
+                    discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', broad, 5)
 
     def test_only_cited_urls_are_accepted(self):
         cited = 'https://example.com/report'
@@ -445,7 +597,7 @@ class DiscoveryTest(unittest.TestCase):
                   'annotations': [{'type': 'url_citation', 'url': cited, 'start_index': 0, 'end_index': 20}]}]}]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
                 patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as request:
-            result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], 'FY2025', '2026-11-01', False, 5)
+            result = discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], 'FY2025', '2026-11-01', False, 5)
         self.assertEqual([row['url'] for row in result], [cited])
         self.assertEqual(result[0]['source_type'], 'annual_report')
         body = json.loads(request.call_args.args[0].data)
@@ -456,7 +608,7 @@ class DiscoveryTest(unittest.TestCase):
         output = {'steps': [{'type': 'model_output', 'content': [{'text': 'annual_report | 2026-01-01 | 2025 | Example annual report'}]}]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
                 patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as request:
-            result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
+            result = discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
         self.assertEqual(result, [])
         self.assertEqual(result.diagnostics['candidate_count'], 0)
         self.assertEqual(result.diagnostics['google_search_calls'], 0)
@@ -470,7 +622,7 @@ class DiscoveryTest(unittest.TestCase):
             {'text': 'annual_report | 2026-01-01 | 2025 | Example annual report'}]}]}
         with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
                 patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(interaction).encode())) as request:
-            result = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
+            result = discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 5)
         self.assertEqual(result, [])
         self.assertFalse(result.diagnostics['fallback_used'])
         self.assertEqual(result.diagnostics['google_search_calls'], 1)

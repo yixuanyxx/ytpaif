@@ -93,6 +93,46 @@ test('AI source completion explains when the five-minute limit is reached',()=>{
   assert.match(node('#notice-area').innerHTML,/reached its 5-minute limit.*3 documents saved.*1 company/);
 });
 
+test('Source counts and search results update during polling without rerendering the form', async()=>{
+  const {context,run,node,rows}=setup();
+  rows[0].dataset.cid = 'a';
+  const checkbox = {checked:false};
+  rows[0].querySelector = () => checkbox;
+  let poll;
+  context.setTimeout = callback => { poll = callback; return 1; };
+  run(`selectedSourcePortfolioId='p'; state.portfolio_imports=[{id:'p',rows:[{company_id:'a'}]}];
+    currentView='sources'; state.search_runs=[{id:'job',status:'running',results:[]}];
+    refresh=async()=>{
+      state.source_summaries=[{company_id:'a',count:2,types:{annual_report:1,regulatory_filing:1}}];
+      state.search_runs[0].results=[{company_id:'a',title:'Annual Report'},{company_id:'b',title:'Other Portfolio'}];
+    };`);
+  node('#src-detail-a').style.display='none';
+  node('#src-lib-filter').value='TSMC';
+  run('monitorSourceSearches()');
+  await poll();
+  assert.match(node('#src-checklist-count-a').innerHTML,/2 docs/);
+  assert.match(node('#src-coverage-a').innerHTML,/2 \/ 6/);
+  assert.match(node('#source-library-count').textContent,/2 documents/);
+  assert.match(node('#source-search-results').innerHTML,/1 candidate filings.*[\s\S]*Annual Report/);
+  assert.doesNotMatch(node('#source-search-results').innerHTML,/Other Portfolio/);
+  assert.equal(node('#src-lib-filter').value,'TSMC');
+  assert.equal(checkbox.checked,false);
+  assert.equal(node('#btn-run-search').disabled,true);
+});
+
+test('An open company row reloads its documents when coverage changes', async()=>{
+  const {context,run,node}=setup();
+  run(`currentView='sources'; selectedSourcePortfolioId='p';
+    state.portfolio_imports=[{id:'p',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:2,types:{annual_report:2}}];
+    api=async()=>({sources:[{id:'new',company_id:'a',source_type:'annual_report'}]})`);
+  node('#src-detail-a').style.display='table-row';
+  context.document.createElement=()=>({content:{querySelector:()=>({innerHTML:'updated documents'})},innerHTML:''});
+  await run("updateSourceLibraryProgress([{company_id:'a',count:1,types:{annual_report:1}}])");
+  assert.equal(node('#src-detail-a').innerHTML,'updated documents');
+  assert.equal(run("state.sources[0].id"),'new');
+});
+
 test('The selected page is restored after reloading the app',()=>{
   const first = setup();
   first.run(`setView('sources')`);
@@ -399,7 +439,7 @@ test('Source Documents has an independent portfolio selector and scopes the AI s
   render=async()=>{};`);
   await run('viewSources()');
   assert.match(node('#page-content').innerHTML,/id="source-portfolio-select"/);
-  assert.match(node('#page-content').innerHTML,/Select up to 2 source types per search/);
+  assert.match(node('#page-content').innerHTML,/Search all six source types/);
   assert.match(node('#page-content').innerHTML,/Korea Growth/);
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
@@ -443,7 +483,7 @@ test('Source search failure explains provider quota limits and search coverage',
   await run('viewSources()');
   const html = node('#page-content').innerHTML;
   assert.match(html,/0 documents saved; 0 of 75 companies searched/);
-  assert.match(html,/Check quota, billing, and Google Search grounding access/);
+  assert.match(html,/Check the configured key, model availability, and free-tier quota/);
 });
 test('Source search quota completion shows actual completed companies',async()=>{
   const {run,node} = setup();
@@ -458,7 +498,7 @@ test('Source search quota completion shows actual completed companies',async()=>
   }; selectedDashboardThemeId='theme-1';`);
   await run('viewSources()');
   const html = node('#page-content').innerHTML;
-  assert.match(html,/stopped after 2 of 3 companies because Google Search quota was reached/);
+  assert.match(html,/stopped after 2 of 3 companies because the Gemini quota was reached/);
   assert.match(html,/3 documents saved/);
 });
 test('Source Documents can cancel an active AI search',async()=>{
