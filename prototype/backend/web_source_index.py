@@ -1,12 +1,12 @@
-"""Find candidate crawl entry points using a non-LLM web index."""
+"""Find candidate crawl entry points using Tavily's web index."""
 import json
 import os
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urldefrag, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from approved_collector import allowed
 
-ENDPOINT = 'https://api.search.brave.com/res/v1/web/search'
+ENDPOINT = 'https://api.tavily.com/search'
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -15,26 +15,36 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def discover(company, types, period, domains, timeout):
-    key = os.environ.get('BRAVE_SEARCH_API_KEY', '').strip()
-    if not key or not domains or timeout <= 0:
+    key = os.environ.get('TAVILY_API_KEY', '').strip()
+    if not key or not domains or not types or timeout <= 0:
         return []
-    name = str(company.get('name') or '').replace('"', ' ')[:120]
+    name = str(company.get('name') or '').replace('"', ' ').strip()[:120]
     if not name:
         return []
     categories = ' OR '.join('"' + kind.replace('_', ' ') + '"' for kind in types)
-    sites = ' OR '.join('site:' + domain for domain in domains)
-    query = f'"{name}" {period} ({categories}) ({sites})'
-    request = Request(ENDPOINT + '?' + urlencode({'q': query, 'count': 10, 'result_filter': 'web'}),
-                      headers={'Accept': 'application/json', 'X-Subscription-Token': key})
+    payload = {
+        'query': f'"{name}" {period} ({categories})',
+        'include_domains': list(domains),
+        'search_depth': 'basic',
+        'auto_parameters': False,
+        'include_answer': False,
+        'include_raw_content': False,
+        'max_results': 10,
+    }
+    request = Request(ENDPOINT, data=json.dumps(payload).encode('utf-8'),
+                      headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {key}'})
     try:
         with build_opener(NoRedirect()).open(request, timeout=min(5, timeout)) as response:
-            results = json.loads(response.read(262144)).get('web', {}).get('results', [])
+            payload = json.loads(response.read(262144))
     except (OSError, ValueError):
         return []
+    results = payload.get('results') if isinstance(payload, dict) else None
     urls = []
-    for result in results:
-        url = result.get('url')
-        if isinstance(url, str) and allowed(url, domains) and url not in urls:
-            if not urlsplit(url).path.lower().endswith(('.pdf', '.zip')):
-                urls.append(url)
+    for result in results if isinstance(results, list) else []:
+        url = result.get('url') if isinstance(result, dict) else None
+        if not isinstance(url, str) or not allowed(url, domains):
+            continue
+        url = urldefrag(url)[0]
+        if url not in urls and not urlsplit(url).path.lower().endswith(('.pdf', '.zip')):
+            urls.append(url)
     return urls[:6]
