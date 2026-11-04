@@ -76,15 +76,15 @@ class Queue:
     @staticmethod
     def queue_notifications(db, run):
         if run.get('search_mode') in ('short', 'long'):
-            db.executemany("INSERT OR IGNORE INTO completion_notifications VALUES (?, ?, 'pending')",
-                           ((run['id'], channel) for channel in ('email', 'sms')))
+            db.execute("INSERT OR IGNORE INTO completion_notifications VALUES (?, 'telegram', 'pending')",
+                       (run['id'],))
 
     def deliver_next_notification(self):
         from source_notifications import send
 
         with self.connect() as db:
             row = db.execute("""SELECT n.job_id, n.channel, j.payload FROM completion_notifications n
-                                JOIN jobs j ON j.id=n.job_id WHERE n.state='pending'
+                                JOIN jobs j ON j.id=n.job_id WHERE n.state='pending' AND n.channel='telegram'
                                 ORDER BY n.rowid LIMIT 1""").fetchone()
             if not row:
                 return False
