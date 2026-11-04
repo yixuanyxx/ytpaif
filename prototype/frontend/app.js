@@ -2285,8 +2285,8 @@ async function viewSources() {
     </div>`;
 
   const SOURCE_TYPES = [
-    { value:'annual_report',         label:'Annual report',                  default:true },
-    { value:'regulatory_filing',     label:'Regulatory filing (10-K/20-F)',  default:true },
+    { value:'annual_report',         label:'Annual report' },
+    { value:'regulatory_filing',     label:'Regulatory filing (10-K/20-F)' },
     { value:'investor_presentation', label:'Investor presentation' },
     { value:'earnings_call',         label:'Earnings call transcript' },
     { value:'company_website',       label:'Company website page' },
@@ -2365,12 +2365,13 @@ async function viewSources() {
           </div>
 
           <div class="form-section-title">Source types</div>
-          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Choose up to ${maxSourceTypes} source types per search. Uncheck one to choose a different type.</div>
+          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Choose up to ${maxSourceTypes} source types from the six standard categories. Other is always included as a fallback.</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
             ${SOURCE_TYPES.map(t => `
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
                 <input type="checkbox" name="source_types" value="${esc(t.value)}"
-                  ${(activeSearch ? activeSearch.source_types?.includes(t.value) : t.default) ? 'checked' : ''} style="width:auto">
+                  ${t.value === 'other' || activeSearch?.source_types?.includes(t.value) ? 'checked' : ''}
+                  ${t.value === 'other' ? 'disabled' : ''} style="width:auto">
                 ${esc(t.label)}
               </label>`).join('')}
           </div>
@@ -2516,7 +2517,7 @@ async function viewSources() {
   if (activeSearch?.cutoff) $('#src-cutoff').value = activeSearch.cutoff;
   updateSourceCompanyCoverage(new Map(sourceSummaries.map(summary => [summary.company_id, summary])));
 
-  const sourceTypeInputs = [...$$('input[name="source_types"]')];
+  const sourceTypeInputs = [...$$('input[name="source_types"]')].filter(input => input.value !== 'other');
   const updateSourceTypeLimit = () => {
     const atLimit = sourceTypeInputs.filter(input => input.checked).length >= maxSourceTypes;
     sourceTypeInputs.forEach(input => { input.disabled = atLimit && !input.checked; });
@@ -2540,7 +2541,7 @@ async function viewSources() {
       showAlert('Select at least one source type per search.', 'Source type selection');
       return;
     }
-    if (selectedTypes.length > maxSourceTypes) {
+    if (selectedTypes.filter(type => type !== 'other').length > maxSourceTypes) {
       showAlert(`Choose up to ${maxSourceTypes} source types per search.`, 'Source type selection');
       return;
     }
@@ -2743,8 +2744,8 @@ function sourceRejectionDetails(searchRun, companyIds) {
 }
 
 function updateSourceCompanyCoverage(summaryById) {
-  const otherSelected = [...$$('input[name="source_types"]:checked')].some(input => input.value === 'other');
-  const isComplete = summary => !otherSelected && SIX_SOURCE_TYPES.every(type => (summary?.types?.[type.type] || 0) >= 2);
+  const standardSelected = [...$$('input[name="source_types"]:checked')].some(input => input.value !== 'other');
+  const isComplete = summary => standardSelected && SIX_SOURCE_TYPES.every(type => (summary?.types?.[type.type] || 0) >= 2);
   const query = ($('#src-global-search')?.value || '').toLowerCase().trim();
   $$('.company-search-item').forEach(item => {
     const summary = summaryById.get(item.dataset.cid);

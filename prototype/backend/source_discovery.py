@@ -792,7 +792,7 @@ def start(app, data):
     if any(t not in TYPES for t in types):
         raise ValueError('Unknown source type selected')
     types = list(dict.fromkeys(types))
-    if len(types) > MAX_SOURCE_TYPES_PER_SEARCH:
+    if sum(kind != 'other' for kind in types) > MAX_SOURCE_TYPES_PER_SEARCH:
         raise ValueError(f'Select at most {MAX_SOURCE_TYPES_PER_SEARCH} source types per search')
     today = datetime.now(timezone(timedelta(hours=8))).date()
     period = str(today.year)
