@@ -17,6 +17,9 @@ class MemoryStore:
             raise ValueError(f'Unknown {kind} ID')
         return record
 
+    def find_many(self, kind, record_ids):
+        return [record for record_id in record_ids if (record := self.find(kind, record_id))]
+
     def put(self, kind, record):
         self.records.setdefault(kind, {})[record['id']] = record
         return record

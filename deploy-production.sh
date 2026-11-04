@@ -21,7 +21,7 @@ git checkout --detach "$sha"
 prototype/backend/.venv/bin/pip install -r prototype/backend/requirements.txt
 systemctl restart ytpaif.service
 for attempt in $(seq 1 20); do
-  if curl -fsS http://127.0.0.1:8766/api/state -o /dev/null; then
+  if curl -fsS http://127.0.0.1:8766/api/health -o /dev/null; then
     echo "Deployed $sha successfully"
     exit 0
   fi

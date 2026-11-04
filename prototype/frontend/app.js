@@ -4442,8 +4442,8 @@ function exportMindmap() {
 window.syncToSupabase = async function() {
   try {
     notice('Copying temporary Redis data to Supabase permanent storage…', 'info');
-    const res = await api('sync', {});
-    notice(`✓ Copied ${res.synced || 0} documents from Redis to Supabase!`, 'success');
+    await api('logout', {});
+    window.location.assign('/login');
   } catch (err) {
     notice(`Sync failed: ${err.message}`, 'error');
   }

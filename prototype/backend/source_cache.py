@@ -292,7 +292,7 @@ def get_source_summaries():
     ]
 
 
-def copy_redis_to_supabase(store, force_all=False):
+def copy_redis_to_supabase(store, force_all=False, raise_errors=False):
     """Copy all sources from Redis temporary storage to Supabase permanent storage.
     
     Triggered when PM logs out or closes browser tab.
@@ -328,6 +328,8 @@ def copy_redis_to_supabase(store, force_all=False):
         return saved_count
     except Exception as e:
         print(f"Error copying Redis to Supabase: {e}", flush=True)
+        if raise_errors:
+            raise
         return 0
 
 

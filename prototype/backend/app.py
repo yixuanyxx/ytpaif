@@ -21,6 +21,7 @@ import financials
 import financial_research
 import supabase_store
 import source_cache
+import app_auth
 
 ROOT = Path(__file__).resolve().parent
 
@@ -1376,12 +1377,14 @@ def refresh_worker_sources():
     updates = source_jobs.Queue().source_updates_after(_source_update_cursor)
     if not updates:
         return
-    for source_id in dict.fromkeys(row[1] for row in updates):
-        record = store.find('sources', source_id)
-        if record:
-            if not source_cache.save_sources_to_redis([record], mark_pending=False):
-                return
-        else:
+    ids = list(dict.fromkeys(row[1] for row in updates))
+    for start in range(0, len(ids), 100):
+        batch = ids[start:start + 100]
+        records = store.find_many('sources', batch)
+        if records and not source_cache.save_sources_to_redis(records, mark_pending=False):
+            return
+        found = {record['id'] for record in records}
+        for source_id in set(batch) - found:
             source_cache.delete_source(source_id)
     _source_update_cursor = updates[-1][0]
 
@@ -1508,6 +1511,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             from urllib.parse import urlparse as up
             path = up(self.path).path
+            if path == '/api/health':
+                return self.respond({'status': 'ok'})
+            if path in ('/login', '/login.js', '/login.css'):
+                files = {'/login': ('login.html', 'text/html; charset=utf-8'), '/login.js': ('login.js', 'text/javascript; charset=utf-8'), '/login.css': ('login.css', 'text/css; charset=utf-8')}
+                filename, mime = files[path]
+                return self.respond((FRONTEND / filename).read_bytes(), mime=mime)
+            if not app_auth.valid(self.headers.get('Cookie', '')):
+                if path.startswith('/api/'):
+                    return self.respond({'error': 'Login required'}, 401)
+                self.send_response(302)
+                self.send_header('Location', '/login')
+                self.end_headers()
+                return
             if path == '/api/state':
                 return self.respond(state())
             if path in ('/api/sync', '/api/sync_to_supabase', '/api/logout'):
@@ -1559,6 +1575,30 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(d, dict):
                 d = {}
             path = getattr(self, 'path', '')
+            if path == '/api/login':
+                redis = app_auth.client()
+                attempts_key = source_cache._key('login-attempt:' + self.client_address[0])
+                if int(redis.get(attempts_key) or 0) >= 10:
+                    return self.respond({'error': 'Too many login attempts. Try again later.'}, 429)
+                if not app_auth.check_credentials(d.get('username', ''), d.get('password', '')):
+                    count = redis.incr(attempts_key)
+                    if count == 1: redis.expire(attempts_key, 900)
+                    return self.respond({'error': 'Invalid username or password'}, 401)
+                redis.delete(attempts_key)
+                if not source_cache.is_hydrated():
+                    sources = store.all_records('sources')
+                    if not source_cache.warm_sources(sources):
+                        raise RuntimeError('Could not load sources into Redis')
+                token = app_auth.create()
+                secure = '; Secure' if origin.startswith('https://') else ''
+                return self.respond({'ok': True}, extra={'Set-Cookie': f'{app_auth.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800{secure}'})
+            if not app_auth.valid(self.headers.get('Cookie', '')):
+                return self.respond({'error': 'Login required'}, 401)
+            if path == '/api/logout':
+                count = source_cache.copy_redis_to_supabase(store, raise_errors=True)
+                result = {'status': 'ok', 'synced': count}
+                app_auth.revoke(self.headers.get('Cookie', ''))
+                return self.respond(result, extra={'Set-Cookie': f'{app_auth.COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'})
             if path == '/api/export':
                 return self.respond(
                     export(d['theme_id'], d.get('snapshot_id')),

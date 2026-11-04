@@ -46,10 +46,15 @@ class ProductionHttpTest(unittest.TestCase):
             connection.close()
 
     def test_dashboard_works_through_production_proxy(self):
-        status, body = self.request_dashboard('https://is4002.com')
+        with patch.object(app.app_auth, 'valid', return_value=True):
+            status, body = self.request_dashboard('https://is4002.com')
         self.assertEqual(status, 200, body)
         self.assertIn('summary', body)
         self.assertIn('companies', body)
+
+    def test_dashboard_requires_login(self):
+        status, body = self.request_dashboard('https://is4002.com')
+        self.assertEqual(status, 401)
 
     def test_proxy_headers_do_not_allow_an_untrusted_origin(self):
         status, _ = self.request_dashboard('https://attacker.example')

@@ -15,7 +15,7 @@ class OriginTest(unittest.TestCase):
         return replies[0][1]
 
     def test_production_origin_passes_origin_validation(self):
-        self.assertEqual(self.check_request('https://is4002.com', 'https://is4002.com'), 400)
+        self.assertEqual(self.check_request('https://is4002.com', 'https://is4002.com'), 401)
 
     def test_unknown_origin_is_rejected(self):
         self.assertEqual(self.check_request('https://attacker.example', 'https://is4002.com'), 403)
@@ -24,4 +24,4 @@ class OriginTest(unittest.TestCase):
         self.assertEqual(self.check_request('', 'https://is4002.com'), 403)
 
     def test_local_origin_still_works(self):
-        self.assertEqual(self.check_request('http://127.0.0.1'), 400)
+        self.assertEqual(self.check_request('http://127.0.0.1'), 401)

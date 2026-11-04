@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Theme Lab</title>
+  <link rel="stylesheet" href="/login.css">
+  <script src="/login.js" defer></script>
+</head>
+<body>
+  <main class="login-card">
+    <div class="brand"><span class="logo">◈</span><span>Theme Lab</span></div>
+    <p class="eyebrow">THEMATIC EXPOSURE ENGINE</p>
+    <h1>Welcome back</h1>
+    <p class="intro">Sign in to access your portfolio workspace.</p>
+    <form id="login-form">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <p id="login-error" role="alert" aria-live="polite"></p>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

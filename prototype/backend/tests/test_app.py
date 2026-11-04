@@ -58,7 +58,7 @@ class AppFlowTest(unittest.TestCase):
         self.app._source_update_cursor = 0
         queue = SimpleNamespace(source_updates_after=lambda cursor: [(1, 'new-source')] if cursor == 0 else [])
         with patch.object(source_jobs, 'Queue', return_value=queue), \
-                patch.object(self.app.store, 'find', return_value=record), \
+                patch.object(self.app.store, 'find_many', return_value=[record]), \
                 patch.object(self.app.source_cache, 'save_sources_to_redis', return_value=True) as save:
             self.app.refresh_worker_sources()
             self.app.refresh_worker_sources()

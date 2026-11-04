@@ -59,10 +59,26 @@ def assess(records):
                           'ai_confidence_basis': 'document excerpts and metadata' if items[index]['passages'] else 'metadata only'}
     return results
 
+def assess_resilient(records):
+    """Retry malformed model output, then isolate failures to smaller groups."""
+    for attempt in range(2):
+        try:
+            return assess(records)
+        except (json.JSONDecodeError, ValueError) as error:
+            if attempt == 0:
+                continue
+            if len(records) == 1:
+                print(f'Could not assess source {records[0].get("id")}: {type(error).__name__}', flush=True)
+                return {}
+    middle = len(records) // 2
+    left = assess_resilient(records[:middle])
+    right = assess_resilient(records[middle:])
+    return {**left, **{index + middle: fields for index, fields in right.items()}}
+
 
 def main():
-    if sys.argv[1:] != ['--exclude-demo-portfolios']:
-        raise ValueError('Run with --exclude-demo-portfolios to score the live source library')
+    if sys.argv[1:] not in (['--exclude-demo-portfolios'], ['--all-existing']):
+        raise ValueError('Specify --exclude-demo-portfolios or --all-existing')
     demo_company_ids = {
         row.get('company_id')
         for portfolio in app.store.all_records('portfolio_imports')
@@ -70,6 +86,8 @@ def main():
         for row in portfolio.get('rows', [])
         if row.get('company_id')
     }
+    if sys.argv[1:] == ['--all-existing']:
+        demo_company_ids = set()
     records = [s for s in app.store.all_records('sources')
                if s.get('company_id') not in demo_company_ids
                and not isinstance(s.get('ai_confidence'), (int, float))]
@@ -78,7 +96,7 @@ def main():
     for offset in range(0, len(records), BATCH_SIZE):
         batch = records[offset:offset + BATCH_SIZE]
         try:
-            scores = assess(batch)
+            scores = assess_resilient(batch)
             saved = []
             for index, fields in scores.items():
                 current = app.store.find('sources', batch[index]['id'])
