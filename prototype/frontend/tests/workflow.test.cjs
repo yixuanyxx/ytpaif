@@ -93,6 +93,36 @@ test('AI source completion explains when the five-minute limit is reached',()=>{
   assert.match(node('#notice-area').innerHTML,/reached its 5-minute limit.*3 documents saved.*1 company/);
 });
 
+test('Source search settings lock during submission, running and cancelling and unlock after completion', async()=>{
+  const {context,run,node}=setup();
+  context.setTimeout = () => 1;
+  context.document.querySelectorAll = selector =>
+    selector === 'input[name="company_ids"]:checked' ? [{value:'a'}] :
+      selector === 'input[name="source_types"]:checked' ? [{value:'earnings_call'}] : [];
+  await run(`currentView='sources'; selectedDashboardThemeId='t';
+    state.portfolio_imports=[{id:'p',theme_id:'t',name:'Portfolio',rows:[{company_id:'a'}]}];
+    let finishSubmission;
+    api=()=>new Promise(resolve=>{finishSubmission=resolve;});
+    refresh=async()=>{};
+    viewSources();`);
+  const request = node('#btn-run-search').onclick();
+  assert.equal(node('#source-search-settings').disabled,true);
+  assert.equal(node('#source-portfolio-select').disabled,true);
+  run(`finishSubmission({search_run:{id:'job',status:'running',portfolio_id:'p',
+    company_ids:['a'],source_types:['earnings_call'],latest_documents:false,cutoff:'2025-03-01'}})`);
+  await request;
+  assert.match(node('#page-content').innerHTML,/<fieldset id="source-search-settings"[^>]* disabled/);
+  assert.match(node('#page-content').innerHTML,/value="earnings_call"\s+checked/);
+  assert.equal(node('#src-cutoff').value,'2025-03-01');
+  assert.match(node('#page-content').innerHTML,/id="btn-cancel-source-search"\s*>/);
+  await run("state.search_runs[0].status='cancelling'; viewSources()");
+  assert.match(node('#page-content').innerHTML,/id="btn-cancel-source-search" disabled/);
+  run("state.search_runs[0].status='cancelled'; updateSourceSearchLock()");
+  assert.equal(node('#source-search-settings').disabled,false);
+  assert.equal(node('#source-portfolio-select').disabled,false);
+  assert.equal(node('#btn-run-search').disabled,false);
+});
+
 test('Source counts and search results update during polling without rerendering the form', async()=>{
   const {context,run,node,rows}=setup();
   rows[0].dataset.cid = 'a';

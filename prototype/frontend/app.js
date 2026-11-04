@@ -14,8 +14,21 @@ let selectedSourcePortfolioId = '';
 let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
 let sourceSearchPollTimer = null;
+let sourceSearchStarting = false;
 const trackedSourceSearches = new Set();
 const loadedSourceCompanyIds = new Set();
+function activeSourceSearch() {
+  return (state.search_runs || []).findLast(search => ['running', 'cancelling'].includes(search.status));
+}
+function updateSourceSearchLock() {
+  const locked = sourceSearchStarting || Boolean(activeSourceSearch());
+  const settings = $('#source-search-settings');
+  const portfolio = $('#source-portfolio-select');
+  const button = $('#btn-run-search');
+  if (settings) settings.disabled = locked;
+  if (portfolio) portfolio.disabled = locked;
+  if (button) button.disabled = locked || button.dataset.empty === 'true';
+}
 function sourceSearchFailureSummary(search) {
   const saved = search.results_count || 0;
   const completed = search.companies_completed?.length || 0;
@@ -77,7 +90,10 @@ function monitorSourceSearches() {
       if (!running.length) return;
       const previousSummaries = state.source_summaries || [];
       await refresh();
-      if (currentView === 'sources') await updateSourceLibraryProgress(previousSummaries);
+      if (currentView === 'sources') {
+        updateSourceSearchLock();
+        await updateSourceLibraryProgress(previousSummaries);
+      }
       notifyFinishedSourceSearches();
       const pending = (state.search_runs || []).some(r => running.includes(r.id) && ['running', 'cancelling'].includes(r.status));
       const cancelling = (state.search_runs || []).some(r => running.includes(r.id) && r.status === 'cancelling');
@@ -86,8 +102,6 @@ function monitorSourceSearches() {
         if (status) status.innerHTML = pending
           ? `<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> ${cancelling ? 'Stopping source search…' : 'Searching for source documents in the background… You can continue browsing.'}`
           : 'AI source search finished. The source library is up to date.';
-        const button = $('#btn-run-search');
-        if (button) button.disabled = pending;
         const cancelButton = $('#btn-cancel-source-search');
         if (cancelButton) {
           if (pending) cancelButton.disabled = cancelling;
@@ -2225,6 +2239,7 @@ async function viewSources() {
     'Find and upload company filings');
   const portfolios = state.portfolio_imports || [];
   const eligiblePortfolios = portfolios.filter(p => p.theme_id === selectedDashboardThemeId);
+  const activeSearch = activeSourceSearch();
   let savedSourcePortfolioId = '';
   try {
     savedSourcePortfolioId = localStorage.getItem(SOURCE_PORTFOLIO_STORAGE_KEY) || '';
@@ -2232,7 +2247,8 @@ async function viewSources() {
     // Keep using the current in-memory selection when browser storage is unavailable.
   }
   const preferredSourcePortfolioId = selectedSourcePortfolioId || savedSourcePortfolioId;
-  const sourcePortfolio = eligiblePortfolios.find(p => p.id === preferredSourcePortfolioId)
+  const sourcePortfolio = eligiblePortfolios.find(p => p.id === activeSearch?.portfolio_id)
+    || eligiblePortfolios.find(p => p.id === preferredSourcePortfolioId)
     || eligiblePortfolios.at(-1);
   selectedSourcePortfolioId = sourcePortfolio?.id || '';
   saveSourcePortfolioSelection();
@@ -2252,6 +2268,9 @@ async function viewSources() {
   const part = type => parts.find(p => p.type === type).value;
   const today = `${part('year')}-${part('month')}-${part('day')}`;
   const currentYear = Number(part('year'));
+  const latestSearchRun = activeSearch || (state.search_runs || []).at(-1) || null;
+  const searchIsActive = Boolean(activeSearch);
+  const searchSettingsLocked = searchIsActive || sourceSearchStarting;
   const uploadCompanyId = companies.some(company => company.id === pendingManualUploadCompanyId)
     ? pendingManualUploadCompanyId : '';
   pendingManualUploadCompanyId = '';
@@ -2260,7 +2279,7 @@ async function viewSources() {
   const portfolioSelectorHtml = `
     <div class="panel">
       <label class="field-label" for="source-portfolio-select">Portfolio</label>
-      <select id="source-portfolio-select">
+      <select id="source-portfolio-select" ${searchSettingsLocked ? 'disabled' : ''}>
         ${eligiblePortfolios.map(item => `<option value="${esc(item.id)}" ${item.id === portfolio.id ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}
       </select>
     </div>`;
@@ -2279,7 +2298,7 @@ async function viewSources() {
     const docsCount = sourceSummaries.find(s => s.company_id === c.id)?.count || 0;
     const sedolText = c.sedol ? ` · SEDOL: ${c.sedol}` : '';
     return `<label class="company-search-item" data-cid="${esc(c.id)}" data-name="${esc(c.name.toLowerCase())}" data-ticker="${esc((c.bloomberg_ticker||'').toLowerCase())}" data-sedol="${esc((c.sedol||'').toLowerCase())}" style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--slate-100);margin-bottom:6px">
-      <input type="checkbox" name="company_ids" value="${esc(c.id)}" checked style="width:auto">
+      <input type="checkbox" name="company_ids" value="${esc(c.id)}" ${!activeSearch || activeSearch.company_ids?.includes(c.id) ? 'checked' : ''} style="width:auto">
       <div class="flex-1">
         <div style="font-weight:600;font-size:13px">${esc(c.name)}</div>
         <div class="text-muted text-small">${esc(c.bloomberg_ticker||c.id)}${esc(sedolText)}</div>
@@ -2288,8 +2307,6 @@ async function viewSources() {
     </label>`;
   }).join('');
 
-  const latestSearchRun = (state.search_runs || []).at(-1) || null;
-  const searchIsActive = ['running', 'cancelling'].includes(latestSearchRun?.status);
   const searchStatus = latestSearchRun?.status === 'running'
     ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Searching for source documents in the background… You can continue browsing.'
     : latestSearchRun?.status === 'cancelling'
@@ -2304,7 +2321,7 @@ async function viewSources() {
             ? esc(sourceSearchCompletionSummary(latestSearchRun))
           : latestSearchRun?.completion_reason === 'collection_incomplete'
             ? esc(sourceSearchCompletionSummary(latestSearchRun))
-          : '';
+          : sourceSearchStarting ? 'Starting source search…' : '';
   monitorSourceSearches();
 
   $('#page-content').innerHTML = `
@@ -2318,6 +2335,7 @@ async function viewSources() {
           Search for public company documents from the selected year through the two preceding years, or upload PDF and TXT filings below. You can stop a search while it is running.
         </div>
 
+        <fieldset id="source-search-settings" aria-label="Document search settings" ${searchSettingsLocked ? 'disabled' : ''} style="border:0;padding:0;margin:0;min-width:0">
         <div class="form-section-title">Companies to search</div>
         <div class="form-group mb-8">
           <label class="field-label">Search universe by SEDOL (London Stock Exchange), Ticker or Name</label>
@@ -2337,7 +2355,7 @@ async function viewSources() {
         <div class="form-section">
           <div style="margin-bottom:12px;padding:10px 12px;background:var(--teal-50);border-radius:6px;border:1px solid var(--teal-200)">
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--teal-900);cursor:pointer">
-              <input type="checkbox" id="src-latest-documents" style="width:auto" checked>
+              <input type="checkbox" id="src-latest-documents" style="width:auto" ${activeSearch?.latest_documents === false ? '' : 'checked'}>
               <span id="latest-documents-label">Use today as the evidence cutoff</span>
             </label>
             <div class="text-muted text-small" style="margin-left:22px;margin-top:2px">
@@ -2351,7 +2369,7 @@ async function viewSources() {
             ${SOURCE_TYPES.map(t => `
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
                 <input type="checkbox" name="source_types" value="${esc(t.value)}"
-                  ${t.default?'checked':''} style="width:auto">
+                  ${(activeSearch ? activeSearch.source_types?.includes(t.value) : t.default) ? 'checked' : ''} style="width:auto">
                 ${esc(t.label)}
               </label>`).join('')}
           </div>
@@ -2371,9 +2389,10 @@ async function viewSources() {
             </div>
           </div>
         </div>
+        </fieldset>
 
         <div class="btn-group">
-          <button class="btn btn-primary" id="btn-run-search" ${companies.length===0 || searchIsActive ? 'disabled' : ''}>
+          <button class="btn btn-primary" id="btn-run-search" data-empty="${companies.length === 0}" ${companies.length===0 || searchSettingsLocked ? 'disabled' : ''}>
             ✦ Ask AI for source documents
           </button>
           ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${latestSearchRun.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
@@ -2485,7 +2504,6 @@ async function viewSources() {
       input.style.backgroundColor = latest ? '#f1f5f9' : '';
       input.style.color = latest ? '#64748b' : '';
       input.style.cursor = latest ? 'not-allowed' : '';
-      input.setAttribute?.('aria-disabled', String(latest));
     }
     if (latest) {
       cutoffInput.value = today;
@@ -2497,8 +2515,8 @@ async function viewSources() {
   $('#deselect-all-companies').onclick = () => document.querySelectorAll('.company-search-item').forEach(item => { const input = item.querySelector?.('input'); if (input) input.checked = false; });
   $('#src-latest-documents').addEventListener('change', updateLatestDocumentFields);
   updateLatestDocumentFields();
+  if (activeSearch?.cutoff) $('#src-cutoff').value = activeSearch.cutoff;
   updateSourceCompanyCoverage(new Map(sourceSummaries.map(summary => [summary.company_id, summary])));
-
 
   const sourceTypeInputs = [...$$('input[name="source_types"]')];
   const updateSourceTypeLimit = () => {
@@ -2509,6 +2527,7 @@ async function viewSources() {
   updateSourceTypeLimit();
 
   $('#btn-run-search').onclick = async () => {
+    if (sourceSearchStarting || activeSourceSearch()) return;
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
     const selectedTypes = Array.from($$('input[name="source_types"]:checked')).map(cb => cb.value);
@@ -2526,8 +2545,8 @@ async function viewSources() {
       showAlert(`Choose up to ${maxSourceTypes} source types per search.`, 'Source type selection');
       return;
     }
-    const button = $('#btn-run-search');
-    button.disabled = true;
+    sourceSearchStarting = true;
+    updateSourceSearchLock();
     $('#source-search-status').innerHTML = '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Starting source search…';
     try {
     const res = await api('source/search', {
@@ -2542,14 +2561,17 @@ async function viewSources() {
     });
     if (res.search_run?.id) {
       trackedSourceSearches.add(res.search_run.id);
+      state.search_runs = [...(state.search_runs || []).filter(run => run.id !== res.search_run.id), res.search_run];
       monitorSourceSearches();
     }
     await refresh();
     if (currentView === 'sources') viewSources();
     monitorSourceSearches();
     } catch (error) {
-      button.disabled = false;
       if (currentView === 'sources') $('#source-search-status').textContent = `Could not start search: ${error.message}`;
+    } finally {
+      sourceSearchStarting = false;
+      if (currentView === 'sources') updateSourceSearchLock();
     }
   };
 
