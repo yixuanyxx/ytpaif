@@ -133,16 +133,16 @@ test('Source counts and search results update during polling without rerendering
   run(`selectedSourcePortfolioId='p'; state.portfolio_imports=[{id:'p',rows:[{company_id:'a'}]}];
     currentView='sources'; state.search_runs=[{id:'job',status:'running',results:[]}];
     refresh=async()=>{
-      state.source_summaries=[{company_id:'a',count:2,types:{annual_report:1,regulatory_filing:1}}];
+      state.source_summaries=[{company_id:'a',count:3,types:{annual_report:2,regulatory_filing:1}}];
       state.search_runs[0].results=[{company_id:'a',title:'Annual Report'},{company_id:'b',title:'Other Portfolio'}];
     };`);
   node('#src-detail-a').style.display='none';
   node('#src-lib-filter').value='TSMC';
   run('monitorSourceSearches()');
   await poll();
-  assert.match(node('#src-checklist-count-a').innerHTML,/2 docs/);
+  assert.match(node('#src-checklist-count-a').innerHTML,/2\/6 source types/);
   assert.match(node('#src-coverage-a').innerHTML,/2 \/ 6/);
-  assert.match(node('#source-library-count').textContent,/2 documents/);
+  assert.match(node('#source-library-count').textContent,/3 documents/);
   assert.match(node('#source-search-results').innerHTML,/1 candidate filings.*[\s\S]*Annual Report/);
   assert.doesNotMatch(node('#source-search-results').innerHTML,/Other Portfolio/);
   assert.equal(node('#src-lib-filter').value,'TSMC');

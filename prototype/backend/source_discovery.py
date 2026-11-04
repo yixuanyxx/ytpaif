@@ -716,6 +716,16 @@ def selected_filing_types(run):
     return [kind for kind in run['source_types'] if kind != 'other']
 
 
+def companies_missing_standard_sources(companies, sources):
+    standard_types = set(TYPES) - {'other'}
+    coverage = {}
+    for source in sources:
+        kind = source.get('source_type')
+        if kind in standard_types:
+            coverage.setdefault(source['company_id'], set()).add(kind)
+    return [company for company in companies if coverage.get(company['id'], set()) != standard_types]
+
+
 def search_other_sources(company, terms, period, cutoff, excluded_urls, timeout):
     """Find dated articles with scraped evidence of issuer and taxonomy relevance."""
     from scrapy import Selector
@@ -763,6 +773,10 @@ def search_other_sources(company, terms, period, cutoff, excluded_urls, timeout)
                 continue
             title = (article.css('meta[property="og:title"]::attr(content)').get()
                      or article.css('title::text').get(default='')).strip()
+            label = re.sub(r'[_/.-]+', ' ', unquote(title + ' ' + urlparse(url).path)).lower()
+            if any(re.search(pattern, label) for pattern in SOURCE_TYPE_EVIDENCE.values()):
+                reject(url, 'theme evidence', 'Link fits a standard source type')
+                continue
             paragraphs = [' '.join(p.xpath('.//text()').getall()) for p in article.css('article p, main p')]
             evidence = [paragraph for paragraph in paragraphs if company_matches(title + ' ' + paragraph, company)]
             matched = next((term for term in terms if any(re.search(r'(?<!\w)' + re.escape(term) + r'(?!\w)', title + ' ' + paragraph, re.I)
@@ -985,7 +999,9 @@ def worker(app, run, companies):
             finish_for_time_limit()
             return
 
-        if not coverage_gaps(run, companies, sources):
+        if not coverage_gaps(run, companies, sources) and not (
+            run.get('theme_terms') and companies_missing_standard_sources(companies, sources)
+        ):
             run['status'] = 'completed'
             return
 
@@ -1016,20 +1032,11 @@ def worker(app, run, companies):
                     break
                 # Check stopping condition: do any stocks still need sources?
                 phase_run = other_run if thematic else run
-                phase_companies = companies
-                if thematic and filing_types:
-                    filing_gaps = coverage_gaps(run, companies, [*sources, *fallback_candidates])
-                    with_filings = {gap['company_id'] for gap in filing_gaps if gap['found']}
-                    gaps_by_issuer = {}
-                    for gap in filing_gaps:
-                        gaps_by_issuer[gap['company_id']] = gaps_by_issuer.get(gap['company_id'], 0) + 1
-                    phase_companies = [company for company in companies if company['id'] not in with_filings
-                                       and gaps_by_issuer.get(company['id']) == len(filing_types)]
+                phase_companies = (companies_missing_standard_sources(companies, [*sources, *fallback_candidates])
+                                   if thematic else companies)
                 current_gaps = coverage_gaps(phase_run, phase_companies, sources)
                 if not current_gaps:
-                    if not coverage_gaps(run, companies, sources):
-                        run['status'] = 'completed'
-                    break
+                    continue
 
                 # A completed year is not searched again after worker recovery.
                 passes = () if not thematic and current_year in preferred_periods else (False,)
@@ -1168,9 +1175,6 @@ def worker(app, run, companies):
                     if fatal:
                         raise fatal
                     checkpoint()
-                    if not coverage_gaps(run, companies, sources):
-                        run['status'] = 'completed'
-                        break
                 if run.get('status') == 'completed' or timed_out or quota_blocked or fatal:
                     break
 
@@ -1224,8 +1228,10 @@ def coverage_gaps(run, companies, sources, target_period=None):
         # ``None`` is the legacy "latest" mode and deliberately accepts a
         # document from any reporting period.
         eligible_periods = periods or None
-    for company in companies:
-        for source_type in selected_filing_types(run) or run['source_types']:
+    filing_types = selected_filing_types(run)
+    eligible_companies = companies if filing_types else companies_missing_standard_sources(companies, sources)
+    for company in eligible_companies:
+        for source_type in filing_types or run['source_types']:
             identities = set()
             for source in sources:
                 if run.get('storage_mode') == 'url_only' and (not source.get('url') or source.get('link_status') != 'verified'):

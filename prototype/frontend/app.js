@@ -2296,7 +2296,7 @@ async function viewSources() {
   const maxSourceTypes = 2;
 
   const companyList = companies.map(c => {
-    const docsCount = sourceSummaries.find(s => s.company_id === c.id)?.count || 0;
+    const summary = sourceSummaries.find(s => s.company_id === c.id);
     const sedolText = c.sedol ? ` · SEDOL: ${c.sedol}` : '';
     return `<label class="company-search-item" data-cid="${esc(c.id)}" data-name="${esc(c.name.toLowerCase())}" data-ticker="${esc((c.bloomberg_ticker||'').toLowerCase())}" data-sedol="${esc((c.sedol||'').toLowerCase())}" style="display:flex;align-items:center;gap:10px;padding:10px;border-radius:var(--radius-sm);cursor:pointer;border:1px solid var(--slate-100);margin-bottom:6px">
       <input type="checkbox" name="company_ids" value="${esc(c.id)}" ${!activeSearch || activeSearch.company_ids?.includes(c.id) ? 'checked' : ''} style="width:auto">
@@ -2304,7 +2304,7 @@ async function viewSources() {
         <div style="font-weight:600;font-size:13px">${esc(c.name)}</div>
         <div class="text-muted text-small">${esc(c.bloomberg_ticker||c.id)}${esc(sedolText)}</div>
       </div>
-      <span id="src-checklist-count-${esc(c.id)}">${sourceDocumentCountBadge(docsCount)}</span>
+      <span id="src-checklist-count-${esc(c.id)}">${sourceTypeCountBadge(summary)}</span>
     </label>`;
   }).join('');
 
@@ -2375,7 +2375,7 @@ async function viewSources() {
                 ${esc(t.label)}
               </label>`).join('')}
           </div>
-          <div class="field-hint">If a company has no verified results for the selected types, search for evidence about the portfolio’s theme and subthemes. Select Other by itself to search directly for that evidence.</div>
+          <div class="field-hint">Only companies below 6/6 standard source types are shown. Other holds theme-related evidence that does not fit a standard category.</div>
         </div>
 
         <div class="form-section">
@@ -2686,8 +2686,13 @@ const SIX_SOURCE_TYPES = [
 ];
 const OTHER_SOURCE_TYPE = {type:'other', label:'Other', icon:'📄', sub:'Theme and Subtheme Evidence'};
 
-function sourceDocumentCountBadge(count) {
-  return count > 0 ? badge(count + ' docs', 'green') : badge('No docs', 'amber');
+function sourceTypeCount(summary) {
+  return SIX_SOURCE_TYPES.filter(({type}) => (summary?.types?.[type] || 0) > 0).length;
+}
+
+function sourceTypeCountBadge(summary) {
+  const count = sourceTypeCount(summary);
+  return badge(`${count}/${SIX_SOURCE_TYPES.length} source types`, count > 0 ? 'green' : 'amber');
 }
 
 function sourceSearchResults(searchRun, companyIds) {
@@ -2744,13 +2749,12 @@ function sourceRejectionDetails(searchRun, companyIds) {
 }
 
 function updateSourceCompanyCoverage(summaryById) {
-  const standardSelected = [...$$('input[name="source_types"]:checked')].some(input => input.value !== 'other');
-  const isComplete = summary => standardSelected && SIX_SOURCE_TYPES.every(type => (summary?.types?.[type.type] || 0) >= 2);
+  const isComplete = summary => sourceTypeCount(summary) === SIX_SOURCE_TYPES.length;
   const query = ($('#src-global-search')?.value || '').toLowerCase().trim();
   $$('.company-search-item').forEach(item => {
     const summary = summaryById.get(item.dataset.cid);
     const count = document.getElementById(`src-checklist-count-${item.dataset.cid}`);
-    if (count) count.innerHTML = sourceDocumentCountBadge(summary?.count || 0);
+    if (count) count.innerHTML = sourceTypeCountBadge(summary);
     const complete = isComplete(summary);
     item.dataset.complete = String(complete);
     const checkbox = item.querySelector?.('input');
@@ -2769,7 +2773,7 @@ function updateSourceCompanyCoverage(summaryById) {
 
 function sourceCoverageBadge(summary) {
   const types = summary?.types || {};
-  const count = SIX_SOURCE_TYPES.filter(st => (types[st.type] || 0) > 0).length;
+  const count = sourceTypeCount(summary);
   return `<div style="display:inline-flex;align-items:center;gap:6px;background:${count>0?'#f0fdf4':'#fffbeb'};border:1px solid ${count>0?'#bbf7d0':'#fef3c7'};padding:3px 8px;border-radius:12px">
     <span style="font-size:11.5px;font-weight:700;color:${count>0?'#15803d':'#b45309'}">${count} / 6</span>
     <div style="display:flex;gap:3px">${SIX_SOURCE_TYPES.map(st => {
