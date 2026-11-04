@@ -57,26 +57,20 @@ function sourceSearchCompletionSummary(search) {
     : `AI source search is over. ${count} documents saved.${ending}`;
 }
 function notifyFinishedSourceSearches() {
+  if ($('#alert-modal')?.open) return;
   for (const search of state.search_runs || []) {
     if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed', 'cancelled'].includes(search.status)) continue;
     trackedSourceSearches.delete(search.id);
     const count = search.results_count || 0;
-    const gaps = search.missing?.length || 0;
     if (search.status === 'failed') {
-      notice(sourceSearchFailureSummary(search), 'error');
+      showAlert(sourceSearchFailureSummary(search), 'Source search failed', { searchCompletion: true });
     } else if (search.status === 'cancelled') {
-      notice(`AI source search stopped. ${count} documents were saved before it stopped.`, 'warning');
+      showAlert(`AI source search stopped. ${count} documents were saved before it stopped.`, 'Source search stopped', { searchCompletion: true });
     } else {
-      notice(sourceSearchCompletionSummary(search), gaps ? 'warning' : 'success');
-      if (search.completion_reason === 'time_limit_reached' && gaps) {
-        showAlert(
-          `The AI search reached its 5-minute limit before it could find two verified sources for every selected stock and source type. ` +
-          `${count} documents were saved, but ${gaps} company/source-type gap${gaps === 1 ? '' : 's'} remain. ` +
-          'You can run the search again to continue filling those gaps.',
-          'Source search timed out'
-        );
-      }
+      const title = search.completion_reason === 'time_limit_reached' ? 'Source search timed out' : 'Source search finished';
+      showAlert(sourceSearchCompletionSummary(search), title, { searchCompletion: true });
     }
+    return;
   }
 }
 function monitorSourceSearches() {
@@ -237,7 +231,7 @@ function clearNotice() {
 }
 
 // Centred modal alert with a greyed-out backdrop and an OK button.
-function showAlert(message, title = 'Limit reached') {
+function showAlert(message, title = 'Limit reached', { searchCompletion = false } = {}) {
   const dialog = $('#alert-modal');
   if (!dialog || typeof dialog.showModal !== 'function') {
     if (typeof alert === 'function') alert(message);
@@ -245,6 +239,7 @@ function showAlert(message, title = 'Limit reached') {
   }
   $('#alert-modal-title').textContent = title;
   $('#alert-modal-message').textContent = message;
+  dialog.classList.toggle('search-completion-modal', searchCompletion);
   const ok = $('#alert-modal-ok');
   ok.onclick = () => dialog.close();
   dialog.onclick = e => { if (e.target === dialog) dialog.close(); };

@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Theme Lab · Thematic Exposure Engine</title>
-  <link rel="stylesheet" href="/style.css?v=20261029g">
+  <link rel="stylesheet" href="/style.css?v=20261105-search-modal">
   <!-- SheetJS for client-side Excel parsing (no server round-trip) -->
   <script src="/xlsx.full.min.js"></script>
-  <script src="/app.js?v=20261105-standard-source-coverage" defer></script>
+  <script src="/app.js?v=20261105-search-modal" defer></script>
 </head>
 <body>
 
@@ -104,7 +104,7 @@
 </div>
 
 <!-- ===== ALERT MODAL ===== -->
-<dialog id="alert-modal" class="alert-modal">
+<dialog id="alert-modal" class="alert-modal" aria-labelledby="alert-modal-title" aria-describedby="alert-modal-message">
   <div class="alert-modal-icon" id="alert-modal-icon">!</div>
   <h3 class="alert-modal-title" id="alert-modal-title">Notice</h3>
   <p class="alert-modal-message" id="alert-modal-message"></p>

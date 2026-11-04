@@ -81,16 +81,27 @@ test('Dashboard selection survives reload and rejects a mismatched portfolio',()
 
 test('AI source completion notifies on other pages only once',()=>{
   const {run,node}=setup();
+  const dialog = node('#alert-modal');
+  let opened = 0;
+  dialog.showModal = () => { opened++; dialog.open = true; };
+  dialog.close = () => { dialog.open = false; };
+  node('#alert-modal-ok').focus = () => {};
   run("currentView='dashboard'; trackedSourceSearches.add('job1'); state.search_runs=[{id:'job1',status:'incomplete',results_count:3,missing:[{}]}]; notifyFinishedSourceSearches()");
-  assert.match(node('#notice-area').innerHTML,/AI source search is over.*3 documents saved.*1 company/);
-  run('clearNotice(); notifyFinishedSourceSearches()');
-  assert.equal(node('#notice-area').innerHTML,'');
+  assert.match(node('#alert-modal-message').textContent,/AI source search is over.*3 documents saved.*1 company/);
+  assert.equal(dialog.open,true);
+  node('#alert-modal-ok').onclick();
+  run('notifyFinishedSourceSearches()');
+  assert.equal(dialog.open,false);
+  assert.equal(opened,1);
 });
 
 test('AI source completion explains when the five-minute limit is reached',()=>{
   const {run,node}=setup();
+  node('#alert-modal').showModal = () => {};
+  node('#alert-modal-ok').focus = () => {};
   run("trackedSourceSearches.add('job1'); state.search_runs=[{id:'job1',status:'incomplete',completion_reason:'time_limit_reached',results_count:3,missing:[{}]}]; notifyFinishedSourceSearches()");
-  assert.match(node('#notice-area').innerHTML,/reached its 5-minute limit.*3 documents saved.*1 company/);
+  assert.equal(node('#alert-modal-title').textContent,'Source search timed out');
+  assert.match(node('#alert-modal-message').textContent,/reached its 5-minute limit.*3 documents saved.*1 company/);
 });
 
 test('Source search settings lock during submission, running and cancelling and unlock after completion', async()=>{

@@ -1403,6 +1403,10 @@ tr:hover td { background: var(--slate-50); }
   background: rgba(13, 43, 50, 0.45);
   backdrop-filter: blur(2px);
 }
+.alert-modal.search-completion-modal::backdrop {
+  background: rgba(42, 42, 42, 0.45);
+  backdrop-filter: none;
+}
 .alert-modal-icon {
   width: 46px;
   height: 46px;
