@@ -20,14 +20,25 @@ const loadedSourceCompanyIds = new Set();
 function activeSourceSearch() {
   return (state.search_runs || []).findLast(search => ['running', 'cancelling'].includes(search.status));
 }
+function updateLongSearchEstimate() {
+  const button = $('#btn-run-long-search');
+  if (!button) return;
+  const active = activeSourceSearch();
+  const count = $$('input[name="company_ids"]:checked').length;
+  const minutes = active?.search_mode === 'long' ? active.time_limit_seconds / 60 : 8 + 2 * count;
+  button.textContent = count || active?.search_mode === 'long' ? `Long search (est ${minutes} minutes)` : 'Long search';
+}
 function updateSourceSearchLock() {
   const locked = sourceSearchStarting || Boolean(activeSourceSearch());
   const settings = $('#source-search-settings');
   const portfolio = $('#source-portfolio-select');
   const button = $('#btn-run-search');
+  const longButton = $('#btn-run-long-search');
   if (settings) settings.disabled = locked;
   if (portfolio) portfolio.disabled = locked;
   if (button) button.disabled = locked || button.dataset.empty === 'true';
+  if (longButton) longButton.disabled = locked || longButton.dataset.empty === 'true';
+  updateLongSearchEstimate();
 }
 function sourceSearchFailureSummary(search) {
   const saved = search.results_count || 0;
@@ -53,7 +64,7 @@ function sourceSearchCompletionSummary(search) {
     return `AI source search finished with incomplete website coverage. ${count} documents saved.${ending} Some approved sites could not be fully checked; missing sources are not confirmed unavailable.`;
   }
   return search.completion_reason === 'time_limit_reached'
-    ? `AI source search reached its 5-minute limit. ${count} documents saved.${ending}`
+    ? `AI source search reached its ${(search.time_limit_seconds || 300) / 60}-minute limit. ${count} documents saved.${ending}`
     : `AI source search is over. ${count} documents saved.${ending}`;
 }
 function notifyFinishedSourceSearches() {
@@ -2406,11 +2417,14 @@ async function viewSources() {
 
         <div class="btn-group">
           <button class="btn btn-primary" id="btn-run-search" data-empty="${companies.length === 0}" ${companies.length===0 || searchSettingsLocked ? 'disabled' : ''}>
-            ✦ Ask AI for source documents
+            Short search (est 8 mins)
+          </button>
+          <button class="btn btn-secondary" id="btn-run-long-search" data-empty="${companies.length === 0}" ${companies.length===0 || searchSettingsLocked ? 'disabled' : ''}>
+            Long search
           </button>
           ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${latestSearchRun.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
           <span class="text-muted text-small">
-            Searches approved websites only, across the current year and two preceding years. Stops when at least 2 sources per type are found or 5 minutes elapse.
+            Both searches run in the background, even if you close this page. Try Long search if a short search leaves gaps.
           </span>
         </div>
         <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${searchStatus}</div>
@@ -2520,8 +2534,15 @@ async function viewSources() {
       cutoffInput.value = theme?.cutoff || today;
     }
   };
-  $('#select-all-companies').onclick = () => document.querySelectorAll('.company-search-item').forEach(item => { const input = item.querySelector?.('input'); if (input && !input.disabled) input.checked = true; });
-  $('#deselect-all-companies').onclick = () => document.querySelectorAll('.company-search-item').forEach(item => { const input = item.querySelector?.('input'); if (input) input.checked = false; });
+  $('#select-all-companies').onclick = () => {
+    $$('.company-search-item input:not(:disabled)').forEach(input => { input.checked = true; });
+    updateLongSearchEstimate();
+  };
+  $('#deselect-all-companies').onclick = () => {
+    $$('.company-search-item input:not(:disabled)').forEach(input => { input.checked = false; });
+    updateLongSearchEstimate();
+  };
+  $('#company-checklist').addEventListener('change', updateLongSearchEstimate);
   $('#src-latest-documents').addEventListener('change', updateLatestDocumentFields);
   updateLatestDocumentFields();
   if (activeSearch?.cutoff) $('#src-cutoff').value = activeSearch.cutoff;
@@ -2536,7 +2557,7 @@ async function viewSources() {
   sourceTypeInputs.forEach(input => input.addEventListener('change', updateSourceTypeLimit));
   updateSourceTypeLimit();
 
-  $('#btn-run-search').onclick = async () => {
+  const startSourceSearch = async searchMode => {
     if (sourceSearchStarting || activeSourceSearch()) return;
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
@@ -2564,6 +2585,7 @@ async function viewSources() {
       // The backend requires this ID to load its holdings and create the job.
       portfolio_id: portfolio.id,
       discover_web: true,
+      search_mode: searchMode,
       company_ids: selectedCompanyIds,
       source_types: selectedTypes,
       cutoff: cutoff,
@@ -2584,6 +2606,8 @@ async function viewSources() {
       if (currentView === 'sources') updateSourceSearchLock();
     }
   };
+  $('#btn-run-search').onclick = () => startSourceSearch('short');
+  $('#btn-run-long-search').onclick = () => startSourceSearch('long');
 
   $('#btn-cancel-source-search')?.addEventListener('click', async () => {
     const button = $('#btn-cancel-source-search');
@@ -2764,6 +2788,7 @@ function updateSourceCompanyCoverage(summaryById) {
   for (const option of select?.options || []) {
     if (option.value) option.hidden = isComplete(summaryById.get(option.value));
   }
+  updateLongSearchEstimate();
 }
 
 function sourceCoverageBadge(summary) {

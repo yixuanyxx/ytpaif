@@ -29,6 +29,9 @@ MISSING_RESULTS_MODEL = 'gemini-3.8-flash'
 DOCUMENTS_PER_TYPE = 2
 MAX_SOURCE_TYPES_PER_SEARCH = 2
 SEARCH_TIME_LIMIT_SECONDS = 5 * 60
+SHORT_SEARCH_SECONDS = 8 * 60
+LONG_SEARCH_BASE_SECONDS = 8 * 60
+LONG_SEARCH_SECONDS_PER_COMPANY = 2 * 60
 COMPANY_WORKERS = 4
 LINK_WORKERS = 8
 SAVE_BATCH_SIZE = 20
@@ -433,7 +436,7 @@ def matches_reporting_year(label, period):
     return bool(re.search(r'(?<!\d)' + re.escape(str(period)) + r'(?!\d)', label))
 
 
-def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls=(), excluded_sites_by_type=None):
+def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls=(), excluded_sites_by_type=None, *, deep=False):
     """Collect permitted website links, then classify supplied evidence without grounding."""
     import approved_collector
     import exchange_filings
@@ -472,9 +475,9 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     indexed_pdfs = [url for url in indexed_pages if urlparse(url).path.lower().endswith('.pdf')]
     indexed_pages = [url for url in indexed_pages if url not in indexed_pdfs]
     remaining = timeout - (time.monotonic() - started)
-    candidates, incomplete = (approved_collector.collect(company, crawl_domains, public_url, min(remaining, 25),
+    candidates, incomplete = (approved_collector.collect(company, crawl_domains, public_url, min(remaining, 55 if deep else 25),
                                                         indexed_pages=indexed_pages, exchange_domains=market_domains,
-                                                        reject=reject)
+                                                        reject=reject, max_pages=approved_collector.MAX_PAGES * (2 if deep else 1))
                               if remaining > 1 else ([], True))
     pdf_urls = list(dict.fromkeys([*indexed_pdfs, *(item['url'] for item in candidates
                     if approved_collector.allowed(item['url'], market_domains)
@@ -863,6 +866,9 @@ def search_other_sources(company, terms, period, cutoff, excluded_urls, timeout,
 
 
 def start(app, data):
+    mode = data.get('search_mode', 'short')
+    if mode not in ('short', 'long'):
+        raise ValueError('Choose Short or Long AI Search')
     types = data.get('source_types')
     if not isinstance(types, list) or not types:
         raise ValueError('Select at least one source type')
@@ -898,6 +904,8 @@ def start(app, data):
         if any(cid not in company_ids for cid in selected):
             raise ValueError('Selected companies must belong to the portfolio')
         company_ids = list(dict.fromkeys(selected))
+    time_limit = (LONG_SEARCH_BASE_SECONDS + LONG_SEARCH_SECONDS_PER_COMPANY * len(company_ids)
+                  if mode == 'long' else SHORT_SEARCH_SECONDS)
     cutoff = data.get('cutoff') or today.isoformat()
     app.parse_date(cutoff)
     company_index = {company['id']: company for company in app.all_records('companies')}
@@ -908,8 +916,7 @@ def start(app, data):
            'portfolio_id': portfolio['id'], 'company_ids': company_ids, 'source_types': types,
            'theme_id': theme_id, 'theme_terms': theme_terms,
            'documents_per_type': DOCUMENTS_PER_TYPE, 'cutoff': cutoff,
-           'time_limit_seconds': SEARCH_TIME_LIMIT_SECONDS,
-           'deadline_unix': time.time() + SEARCH_TIME_LIMIT_SECONDS,
+           'search_mode': mode, 'time_limit_seconds': time_limit,
            'period': period,
            'search_periods': search_periods,
            'latest_documents': data.get('latest_documents', True),
@@ -1039,8 +1046,10 @@ def worker(app, run, companies):
             if types == ['other']:
                 return search_other_sources(company, run.get('theme_terms', []), search_period,
                                             run['cutoff'], known_urls, timeout, general=general)
-            return grounded_search(company, types, search_period, run['cutoff'], broad, timeout,
-                                   known_urls, sites_by_type)
+            if run.get('search_mode') == 'long':
+                return grounded_search(company, types, search_period, run['cutoff'], broad, timeout,
+                                       known_urls, sites_by_type, deep=True)
+            return grounded_search(company, types, search_period, run['cutoff'], broad, timeout, known_urls, sites_by_type)
         except ProviderError:
             # A quota response must be recorded by the coordinator, after any
             # in-flight verified links have been flushed. Do not cancel them.
@@ -1161,7 +1170,7 @@ def worker(app, run, companies):
                                       and (s.get('source_type') != 'other' or s.get('theme_id') == run.get('theme_id'))]
                         # Distinct documents on the same approved site can both count.
                         sites_by_type = {}
-                        timeout = max(1, min(90, int(seconds_remaining())))
+                        timeout = max(1, min(150 if run.get('search_mode') == 'long' else 90, int(seconds_remaining())))
                         tasks[searches.submit(search, company, types, current_year, broad,
                                               known_urls, sites_by_type, timeout, general)] = (company, types)
 

@@ -157,7 +157,8 @@ def official_annual_reports(company, reports, disclosures):
                                           'publication_date_source_url': disclosure_url}}
 
 
-def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_domains=(), reject=None):
+def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_domains=(), reject=None,
+            max_pages=MAX_PAGES):
     """Return observed links and whether the crawl had restricted/incomplete coverage."""
     from scrapy import Selector
     from scrapy_pages import download
@@ -225,9 +226,9 @@ def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_do
 
     def crawl_pages():
         nonlocal incomplete
-        while queue and len(seen) < MAX_PAGES and time.monotonic() < deadline:
+        while queue and len(seen) < max_pages and time.monotonic() < deadline:
             batch = {}
-            while queue and len(batch) < 4 and len(seen) < MAX_PAGES and time.monotonic() < deadline:
+            while queue and len(batch) < 4 and len(seen) < max_pages and time.monotonic() < deadline:
                 url, depth = queue.pop(0)
                 if url in seen or not allowed(url, domains):
                     continue

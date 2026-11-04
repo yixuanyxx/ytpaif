@@ -288,6 +288,9 @@ class DiscoveryTest(unittest.TestCase):
             result = discovery.start(app, {'portfolio_id': 'portfolio', 'company_ids': ['a'],
                 'source_types': ['annual_report', 'annual_report'], 'period': '2025',
                 'cutoff': '2026-11-02'})['search_run']
+            queue.return_value.enqueue.assert_called_once()
+            long_result = discovery.start(app, {'portfolio_id': 'portfolio', 'company_ids': ['a', 'b', 'a'],
+                'source_types': ['annual_report'], 'search_mode': 'long'})['search_run']
         self.assertEqual(result['company_ids'], ['a'])
         self.assertEqual(result['source_types'], ['annual_report'])
         self.assertEqual(result['documents_per_type'], 2)
@@ -296,10 +299,12 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result['storage_mode'], 'url_only')
         self.assertEqual(result['period'], '2026')
         self.assertEqual(result['search_periods'], ['2026', '2025', '2024'])
-        self.assertEqual(result['time_limit_seconds'], 300)
-        self.assertGreater(result['deadline_unix'], discovery.time.time())
+        self.assertEqual(result['search_mode'], 'short')
+        self.assertEqual(result['time_limit_seconds'], 480)
+        self.assertNotIn('deadline_unix', result)
         self.assertEqual(len(result['missing']), 1)
-        queue.return_value.enqueue.assert_called_once()
+        self.assertEqual(long_result['company_ids'], ['a', 'b'])
+        self.assertEqual(long_result['time_limit_seconds'], 12 * 60)
 
     def test_empty_and_unknown_type_selection_rejected_before_queueing(self):
         with patch('source_jobs.Queue') as queue:
