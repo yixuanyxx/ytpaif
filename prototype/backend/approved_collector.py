@@ -17,10 +17,13 @@ COFORGE_DISCLOSURES = COFORGE_IR + '/disclosure-under-listing-regulations'
 
 
 def allowed(url, domains):
-    parsed = urlparse(url)
-    host = (parsed.hostname or '').lower().rstrip('.')
-    return (parsed.scheme == 'https' and not parsed.username and not parsed.password
-            and parsed.port in (None, 443) and any(host == d or host.endswith('.' + d) for d in domains))
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or '').lower().rstrip('.')
+        return (parsed.scheme == 'https' and not parsed.username and not parsed.password
+                and parsed.port in (None, 443) and any(host == d or host.endswith('.' + d) for d in domains))
+    except ValueError:
+        return False
 
 
 class ApprovedRedirect(HTTPRedirectHandler):
@@ -77,7 +80,7 @@ class Links(HTMLParser):
             self.text = []
             self.anchor_start = self.text_offset
         if tag == 'img' and self.href is not None:
-            self.text.append(dict(attrs).get('alt', ''))
+            self.text.append(dict(attrs).get('alt') or '')
 
     def handle_data(self, data):
         if self.hidden:
@@ -116,6 +119,11 @@ def explicit_dates(text):
     for match in re.findall(r'\b20\d{2}-\d{2}-\d{2}\b', text):
         try:
             dates.add(datetime.fromisoformat(match).date().isoformat())
+        except ValueError:
+            continue
+    for year, month, day in re.findall(r'(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日', text):
+        try:
+            dates.add(datetime(int(year), int(month), int(day)).date().isoformat())
         except ValueError:
             continue
     for match in re.finditer(r'\b\d{1,2}\s+[A-Za-z]{3,9}\s+20\d{2}\b', text):
@@ -206,7 +214,10 @@ def collect(company, domains, public_url, timeout):
     # before the large publishers when an official domain is recorded.
     for domain in [*domains[7:], *domains[:7]]:
         queue.append((f'https://{domain}/', 0))
-    keywords = re.compile(r'investor|financial|annual|report|filing|earnings|results|presentation|sustainab|esg|transcript|disclosure', re.I)
+    keywords = re.compile(
+        r'investor|financial|annual|report|filing|earnings|results|presentation|sustainab|esg|transcript|disclosure'
+        r'|年報|年报|年度報告|年度报告|財務|财务|投資者|投资者|永續|可持續|사업보고서|투자정보|지속가능'
+        r'|laporan|pemodal|keberlanjutan|báo cáo|nhà đầu tư|รายงาน|นักลงทุน', re.I)
 
     def can_fetch(url):
         nonlocal incomplete
@@ -250,7 +261,10 @@ def collect(company, domains, public_url, timeout):
         parser = Links(); parser.feed(page)
         page_text = ''.join(parser.page_text)
         for href, title, start, end in parser.links:
-            link = urldefrag(urljoin(page_url, href))[0]
+            try:
+                link = urldefrag(urljoin(page_url, href))[0]
+            except ValueError:
+                continue
             # Some IR sites embed the actual approved document in a tracking
             # URL. Extract it without requesting the unapproved tracker host.
             if not allowed(link, domains):
@@ -277,7 +291,8 @@ def collect(company, domains, public_url, timeout):
                     if official:
                         context += ' Official investor-relations site for ' + company.get('name', '')
                     dates = explicit_dates(evidence)
-                    candidate = {'url': link, 'title': title, 'context': context, 'publication_dates': dates}
+                    candidate = {'url': link, 'title': title, 'context': context, 'publication_dates': dates,
+                                 'issuer_hosted': official}
                     candidates.append(candidate)
                     if official:
                         if re.search(r'\b(?:intimation|submission|publication|published|release|filed|filing)\b', title, re.I):

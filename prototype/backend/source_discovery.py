@@ -17,11 +17,11 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler, urlopen
 TYPES = ('annual_report', 'regulatory_filing', 'earnings_call',
          'investor_presentation', 'sustainability_report', 'company_website')
 SOURCE_TYPE_EVIDENCE = {
-    'annual_report': r'annual report|\b(?:10 k|20 f)\b|年度报告',
+    'annual_report': r'annual report|\b(?:10 k|20 f)\b|年度报告|年度報告|年報|年报|사업보고서|laporan tahunan|báo cáo thường niên|รายงานประจำปี',
     'regulatory_filing': r'\b(?:10 k|10 q|20 f|6 k|8 k)\b|integrated filing|financial (?:results|statements)|regulatory filing|governance report',
     'earnings_call': r'\btranscript\b',
     'investor_presentation': r'(?:investor|web|results|earnings|financial) presentation|investor deck',
-    'sustainability_report': r'sustainability report|esg report|business responsibility|corporate social responsibility',
+    'sustainability_report': r'sustainability report|esg report|business responsibility|corporate social responsibility|永續報告|可持續發展報告|지속가능경영보고서|laporan keberlanjutan|báo cáo phát triển bền vững|รายงานความยั่งยืน',
     'company_website': r'investor relations|corporate overview|company overview|about us|business overview',
 }
 FIRST_PASS_MODEL = 'gemini-3.5-flash-lite'
@@ -211,14 +211,32 @@ class PageMetadata(HTMLParser):
         if self.in_title: self.title += data
 
 
+def resolve_issuer_website(company):
+    import exchange_filings
+    import issuer_directory
+    website = exchange_filings.issuer_website(company, public_url)
+    if website:
+        return website, 'official exchange issuer directory'
+    ticker = company.get('bloomberg_ticker') or ''
+    if any(company.get(field) for field in ('website', 'website_url', 'investor_relations_url')):
+        return '', ''
+    parts = ticker.upper().split()
+    if ((company.get('jurisdiction') or '').strip().lower() == 'japan'
+            or (len(parts) >= 2 and parts[1] in ('JP', 'JT'))):
+        return '', ''
+    website = issuer_directory.lookup(company.get('name') or '', ticker, exchange_filings.singapore_today(), public_url)
+    return (website, 'issuer name and ticker directory match') if website else ('', '')
+
+
 def verify_document_link(row, timeout=20, company=None):
     """Resolve to a direct document/page, inspecting metadata only, never saving files."""
     issuer_home = False
     if company is not None:
         import approved_collector
         import exchange_filings
-        if not approved_source_url(row['url'], company) or row.get('ai_confidence_basis') == 'official exchange issuer directory':
-            website = exchange_filings.issuer_website(company, public_url)
+        if (not approved_source_url(row['url'], company)
+                or row.get('ai_confidence_basis') in ('official exchange issuer directory', 'issuer name and ticker directory match')):
+            website, basis = resolve_issuer_website(company)
             if website:
                 issuer_home = (row.get('source_type') == 'company_website'
                                and normalized_url(website) == normalized_url(row['url']))
@@ -280,6 +298,13 @@ def verify_document_link(row, timeout=20, company=None):
     if re.search(r'just a moment|access denied|sign in|log in|page not found', title, re.I):
         raise ValueError('Document page is unavailable or requires authentication')
     if issuer_home and title.strip():
+        if basis == 'issuer name and ticker directory match':
+            from issuer_directory import name_words
+            issuer = name_words(company['name'])
+            words = set(name_words(' '.join((title, metadata.title, metadata.tags.get('og:site_name') or ''))))
+            initials = ''.join(word[0] for word in issuer)
+            if not issuer or (not set(issuer) <= words and not (len(initials) >= 3 and initials in words)):
+                raise ValueError('Issuer website title does not identify the company')
         return final_url, mime
     expected = set(re.findall(r'[a-z]{3,}|\d{4}', row.get('title', '').lower()))
     actual = set(re.findall(r'[a-z]{3,}|\d{4}', title.lower()))
@@ -397,15 +422,25 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     import exchange_filings
     key = os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()
     started = time.monotonic()
-    website = exchange_filings.issuer_website(company, public_url)
+    website, website_basis = resolve_issuer_website(company)
     if website and not any(company.get(field) for field in ('website', 'website_url', 'investor_relations_url')):
         company = {**company, 'website': website}
     domains = approved_domains(company)
     excluded = {normalized_url(url) for url in exclude_urls}
     sites = excluded_sites_by_type or {}
-    rows = [row for row in exchange_filings.collect(company, types, period, cutoff, public_url, min(timeout, 12), website)
+    exchange_website = website if website_basis == 'official exchange issuer directory' else ''
+    rows = [row for row in exchange_filings.collect(company, types, period, cutoff, public_url, min(timeout, 12), exchange_website)
             if normalized_url(row['url']) not in excluded
             and not website_is_excluded(row['url'], sites.get(row['source_type'], ()))]
+    observed = exchange_filings.singapore_today()
+    if (website and website_basis == 'issuer name and ticker directory match'
+            and 'company_website' in types and str(period) == observed[:4] and observed <= cutoff
+            and normalized_url(website) not in excluded and not website_is_excluded(website, sites.get('company_website', ()))):
+        rows.append({'url': website, 'title': f'{company["name"]} Official Website', 'source_type': 'company_website',
+                     'period': str(period), 'publication_date': observed, 'source_date_basis': 'observed',
+                     'publication_date_source_url': 'https://www.wikidata.org/',
+                     'ai_confidence': 80, 'ai_confidence_basis': website_basis,
+                     'ai_confidence_reason': 'The directory matches the issuer name and ticker. Date records when the website was checked.'})
     remaining = timeout - (time.monotonic() - started)
     candidates, incomplete = (approved_collector.collect(company, domains, public_url, min(remaining, 25))
                               if remaining > 1 else ([], True))
@@ -438,6 +473,14 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
             dates = approved_collector.explicit_dates(candidate.get('context', ''))
         dates = [value for value in dates if value <= cutoff]
         if supported_types and dates and matches_reporting_year(document, period):
+            if (candidate.get('issuer_hosted') and len(supported_types) == len(dates) == 1
+                    and urlparse(url).path.lower().endswith('.pdf')
+                    and not website_is_excluded(url, sites.get(supported_types[0], ()))):
+                rows.append({'url': url, 'title': candidate['title'], 'source_type': supported_types[0],
+                             'publication_date': dates[0], 'period': str(period), 'ai_confidence': 90,
+                             'ai_confidence_basis': 'issuer-hosted document listing',
+                             'ai_confidence_reason': 'The issuer links this PDF with a matching document type, period and date.'})
+                continue
             eligible.append({**candidate, 'publication_dates': dates, 'supported_types': supported_types})
     candidates = eligible
     diagnostics = {'model': FIRST_PASS_MODEL, 'candidate_count': len(candidates),
