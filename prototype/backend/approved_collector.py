@@ -157,10 +157,12 @@ def official_annual_reports(company, reports, disclosures):
                                           'publication_date_source_url': disclosure_url}}
 
 
-def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_domains=()):
+def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_domains=(), reject=None):
     """Return observed links and whether the crawl had restricted/incomplete coverage."""
     from scrapy import Selector
     from scrapy_pages import download
+    if reject is None:
+        reject = lambda url, stage, reason: None
 
     deadline = time.monotonic() + max(1, timeout)
     opener = build_opener(ApprovedRedirect(domains, public_url))
@@ -236,8 +238,12 @@ def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_do
                         batch[url] = depth
                     else:
                         incomplete = True
-                except (OSError, ValueError):
+                        reason = ('Could not read the site access rules' if robots.get(urlparse(url).netloc) is None
+                                  else 'Blocked by the site access rules')
+                        reject(url, 'crawl', reason)
+                except (OSError, ValueError) as error:
                     incomplete = True
+                    reject(url, 'crawl', str(error) if type(error) is ValueError else type(error).__name__)
             if not batch or time.monotonic() >= deadline:
                 continue
             pages = download(batch, deadline - time.monotonic(), MAX_BYTES, AGENT)
@@ -245,6 +251,7 @@ def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_do
                 result = pages.get(url)
                 if result is None:
                     incomplete = True
+                    reject(url, 'crawl', 'Page fetch timed out or failed')
                     continue
                 status, location, body = result
                 if status in (301, 302, 303, 307, 308) and location:
@@ -252,6 +259,7 @@ def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_do
                         target = urldefrag(urljoin(url, location))[0]
                     except ValueError:
                         incomplete = True
+                        reject(url, 'crawl', 'Invalid redirect URL')
                         continue
                     if allowed(target, domains):
                         queue.insert(0, (target, depth))
@@ -261,10 +269,14 @@ def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_do
                             sitemap_urls.add(target)
                     else:
                         incomplete = True
+                        reject(url, 'crawl', 'Redirect points outside approved domains')
                 elif 200 <= status < 300 and body:
                     yield url, depth, body
                 elif status >= 400:
                     incomplete = True
+                    reject(url, 'crawl', f'Website returned HTTP {status}')
+                else:
+                    reject(url, 'crawl', f'Website returned no usable page (HTTP {status})')
 
     for page_url, depth, page in crawl_pages():
         url = page_url

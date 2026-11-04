@@ -2291,6 +2291,7 @@ async function viewSources() {
     { value:'earnings_call',         label:'Earnings call transcript' },
     { value:'company_website',       label:'Company website page' },
     { value:'sustainability_report', label:'Sustainability report' },
+    { value:'other',                 label:'Other (theme-related sources)' },
   ];
   const maxSourceTypes = 2;
 
@@ -2373,6 +2374,7 @@ async function viewSources() {
                 ${esc(t.label)}
               </label>`).join('')}
           </div>
+          <div class="field-hint">If a company has no verified results for the selected types, search for evidence about the portfolio’s theme and subthemes. Select Other by itself to search directly for that evidence.</div>
         </div>
 
         <div class="form-section">
@@ -2522,6 +2524,7 @@ async function viewSources() {
   const updateSourceTypeLimit = () => {
     const atLimit = sourceTypeInputs.filter(input => input.checked).length >= maxSourceTypes;
     sourceTypeInputs.forEach(input => { input.disabled = atLimit && !input.checked; });
+    updateSourceCompanyCoverage(new Map((state.source_summaries || []).map(summary => [summary.company_id, summary])));
   };
   sourceTypeInputs.forEach(input => input.addEventListener('change', updateSourceTypeLimit));
   updateSourceTypeLimit();
@@ -2684,6 +2687,7 @@ const SIX_SOURCE_TYPES = [
   { type: 'sustainability_report', label: 'Sustainability / ESG Report',    icon: '🌱', sub: 'CSR & ESG Disclosures' },
   { type: 'company_website',       label: 'Company Website / IR Page',      icon: '🌐', sub: 'Official Online Disclosures' },
 ];
+const OTHER_SOURCE_TYPE = {type:'other', label:'Other', icon:'📄', sub:'Theme and Subtheme Evidence'};
 
 function sourceDocumentCountBadge(count) {
   return count > 0 ? badge(count + ' docs', 'green') : badge('No docs', 'amber');
@@ -2691,7 +2695,8 @@ function sourceDocumentCountBadge(count) {
 
 function sourceSearchResults(searchRun, companyIds) {
   const candidateResults = (searchRun?.results || []).filter(result => companyIds.has(result.company_id));
-  if (!candidateResults.length) return '';
+  const diagnostics = sourceRejectionDetails(searchRun, companyIds);
+  if (!candidateResults.length) return diagnostics;
   const candidateCompanyCount = new Set(candidateResults.map(result => result.company_id)).size;
   return `
   <div class="panel" style="margin-bottom:20px">
@@ -2717,11 +2722,33 @@ function sourceSearchResults(searchRun, companyIds) {
         </tbody>
       </table>
     </div>
-  </div>`;
+  </div>${diagnostics}`;
+}
+
+function sourceRejectionDetails(searchRun, companyIds) {
+  if (!searchRun || ['running', 'cancelling'].includes(searchRun.status)) return '';
+  const passes = (searchRun.grounding_diagnostics || [])
+    .filter(pass => companyIds.has(pass.company_id) && Array.isArray(pass.rejections));
+  const verificationErrors = (searchRun.errors || [])
+    .filter(error => companyIds.has(error.company_id) && error.stage === 'link verification');
+  if (!passes.length && !verificationErrors.length) return '';
+  const companyNames = new Map((state.companies || []).map(company => [company.id, company.name]));
+  const renderRejection = item => `<li style="overflow-wrap:anywhere">${esc(item.stage)} · ${esc(item.reason)}<br><small>${esc(item.url)}</small></li>`;
+  return `<details class="panel" style="margin-bottom:20px">
+    <summary>Source search diagnostics</summary>
+    ${passes.map(pass => `<details style="margin-top:8px">
+      <summary>${esc(companyNames.get(pass.company_id) || pass.company_id)} · ${esc(pass.period)} · ${pass.rejections.length} rejected or skipped</summary>
+      <p class="text-muted text-small">${pass.issuer_website_available ? esc(pass.issuer_website_basis) : 'No verified issuer website'}</p>
+      <ul>${pass.rejections.map(renderRejection).join('')}</ul>
+    </details>`).join('')}
+    ${verificationErrors.length ? `<h4>Final link checks</h4><ul>${verificationErrors.map(error =>
+      renderRejection({...error, stage: `${companyNames.get(error.company_id) || error.company_id} · ${error.period || ''} · ${error.stage}`})).join('')}</ul>` : ''}
+  </details>`;
 }
 
 function updateSourceCompanyCoverage(summaryById) {
-  const isComplete = summary => SIX_SOURCE_TYPES.every(type => (summary?.types?.[type.type] || 0) >= 2);
+  const otherSelected = [...$$('input[name="source_types"]:checked')].some(input => input.value === 'other');
+  const isComplete = summary => !otherSelected && SIX_SOURCE_TYPES.every(type => (summary?.types?.[type.type] || 0) >= 2);
   const query = ($('#src-global-search')?.value || '').toLowerCase().trim();
   $$('.company-search-item').forEach(item => {
     const summary = summaryById.get(item.dataset.cid);
@@ -2807,8 +2834,9 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
   const cases = (state.cases || []);
 
   const companyGroups = companies.map((c, idx) => {
-    const compSources = sources.filter(s => s.company_id === c.id);
-    const compSourceSummary = sourceSummaries.find(s => s.company_id === c.id) || { types: {}, count: 0 };
+    const compSources = sources.filter(s => s.company_id === c.id
+      && (s.source_type !== 'other' || !s.theme_id || s.theme_id === portfolio.theme_id));
+    const compSourceSummary = sourceSummaries.find(s => s.company_id === c.id);
     const row = rowMap.get(c.id) || {};
     const financials = getCompanyFinancials(c, row, compSources, cases);
     return {
@@ -2901,16 +2929,16 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
                   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
                     <div style="display:flex;align-items:center;gap:8px">
                       <strong style="font-size:13px;color:var(--slate-800)">Official Filing Library: ${esc(displayName)}</strong>
-                      <span class="text-muted text-small">(Showing 6 standard regulatory disclosure categories)</span>
+                      <span class="text-muted text-small">(6 standard disclosure categories and Other)</span>
                     </div>
                     <div class="text-muted text-small">
                       Market Cap: <strong>${esc(financials.mcap)}</strong> · Consolidated Revenue: <strong>${esc(financials.rev)}</strong>
                     </div>
                   </div>
 
-                  <!-- 6 Source Types Grid -->
-                  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(0, 1fr));gap:12px">
-                    ${SIX_SOURCE_TYPES.map((st, sIdx) => {
+                  <!-- Source type grid -->
+                  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(min(100%, 140px), 1fr));gap:12px">
+                    ${[...SIX_SOURCE_TYPES, OTHER_SOURCE_TYPE].map((st, sIdx) => {
                       const matched = compSources.filter(s => s.source_type === st.type);
                       const isIngested = matched.length > 0;
                       const sourceGapExhausted = exhaustedGaps.some(m => m.company_id === comp.id && m.source_type === st.type);
@@ -2961,7 +2989,7 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
                             </div>
                           ` : `
                             <div style="font-size:11px;color:var(--slate-500);line-height:1.4;margin:6px 0;padding:6px 8px;background:var(--slate-50);border-radius:5px;border:1px dashed var(--slate-200)">
-                              Expected from regional registry or IR platform.
+                              ${st.type === 'other' ? 'Theme-related sources will appear here.' : 'Expected from regional registry or IR platform.'}
                             </div>
                             <div style="display:flex;gap:6px;margin-top:8px">
                               <button class="btn btn-sm btn-ghost" onclick="selectCompanyForUpload('${esc(comp.id)}', '${esc(st.type)}')" style="font-size:11px;padding:3px 8px;color:var(--teal-700)">

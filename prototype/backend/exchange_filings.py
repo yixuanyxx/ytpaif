@@ -22,6 +22,11 @@ MARKET_DOMAINS = {
     'VN': ('hsx.vn', 'hnx.vn'), 'AU': ('asx.com.au',), 'NZ': ('nzx.com',),
     'BD': ('dsebd.org', 'cse.com.bd'), 'PA': ('psx.com.pk',), 'SL': ('cse.lk',),
 }
+WEBSITE_LABEL = re.compile(r'(?:(?:company|official|corporate|issuer|investor relations)\s+)?web\s*site\s*:?|official homepage', re.I)
+
+
+class FilingEvidenceError(ValueError):
+    """An exchange response was readable but did not verify the filing."""
 
 
 def listing(company):
@@ -47,8 +52,8 @@ def indexed_issuer_website(name, ticker, day, public_url):
     if not hosts or not name_words(name):
         return ''
     deadline = time.monotonic() + 8
-    websites = set()
-    for page in discover(company, ['company_website'], '', hosts, 3)[:3]:
+    websites = {}
+    for page in discover(company, ['company_website'], '', hosts, 3):
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             break
@@ -56,23 +61,26 @@ def indexed_issuer_website(name, ticker, day, public_url):
             profile = Selector(text=read(page, public_url, min(remaining, 3)))
         except (OSError, ValueError):
             continue
-        headings = profile.css('h1::text, h2::text, [itemprop="legalName"]::text').getall()
+        headings = [' '.join(node.xpath('.//text()').getall()) for node in
+                    profile.css('h1, h2, [itemprop="legalName"], [itemprop="name"]')]
+        headings += profile.css('meta[property="og:title"]::attr(content)').getall()
         if not any(name_words(heading) == name_words(name) for heading in headings):
             continue
         for anchor in profile.css('a[href]'):
             label = ' '.join(anchor.xpath('.//text()').getall()).strip()
-            cell = anchor.xpath('ancestor::td[1]/preceding-sibling::*[1]')
+            cell = anchor.xpath('ancestor::*[self::td or self::dd][1]/preceding-sibling::*[1]')
             field = ' '.join(cell.xpath('.//text()').getall()).strip()
-            if not any(re.fullmatch(r'(?:company\s+|official\s+|corporate\s+)?web\s*site\s*:?', text, re.I)
-                       for text in (label, field)):
+            if not any(WEBSITE_LABEL.fullmatch(text) for text in (label, field, anchor.attrib.get('aria-label', ''))):
                 continue
             try:
                 website = urljoin(page, anchor.attrib['href'])
                 if not allowed(website, hosts):
-                    websites.add(public_url(website).rstrip('/'))
+                    verified = public_url(website)
+                    host = urlsplit(verified).hostname.removeprefix('www.')
+                    websites.setdefault(host, verified.rstrip('/'))
             except ValueError:
                 continue
-    return next(iter(websites)) if len(websites) == 1 else ''
+    return next(iter(websites.values())) if len(websites) == 1 else ''
 
 
 def pdf_evidence(url, company, public_url, timeout):
@@ -83,7 +91,7 @@ def pdf_evidence(url, company, public_url, timeout):
 
     hosts = domains(company)
     if not allowed(url, hosts) or not urlsplit(url).path.lower().endswith('.pdf'):
-        return None
+        raise FilingEvidenceError('URL is not a PDF on an approved exchange')
     limit = 4 * 1024 * 1024
     public_url(url)
     if not robots_permits(url, hosts, public_url, min(timeout, 3)):
@@ -92,21 +100,31 @@ def pdf_evidence(url, company, public_url, timeout):
     with opener.open(Request(url, headers={'User-Agent': AGENT}), timeout=timeout) as response:
         content = response.read(limit + 1)
     try:
-        if len(content) > limit or not content.startswith(b'%PDF-'):
-            return None
+        if len(content) > limit:
+            raise FilingEvidenceError('PDF exceeds the 4 MiB inspection limit')
+        if not content.startswith(b'%PDF-'):
+            raise FilingEvidenceError('Exchange returned content other than a PDF')
         pages = PdfReader(io.BytesIO(content)).pages
         cover = (pages[0].extract_text() or '')[:12000]
         subject = re.search(r'^\s*Subject\s*[:–-]+\s*([^\n]+)', cover, re.I | re.M)
-        if not subject or not company_matches(cover, company):
-            return None
+        if not cover.strip():
+            raise FilingEvidenceError('PDF cover has no extractable text')
+        if not company_matches(cover, company):
+            raise FilingEvidenceError('PDF cover does not identify the selected issuer')
+        if not subject:
+            raise FilingEvidenceError('PDF cover has no labelled filing subject')
         dates = explicit_dates(cover[:subject.start()])
+        if not dates:
+            raise FilingEvidenceError('PDF cover has no filing date above the subject')
         if len(dates) != 1:
-            return None
+            raise FilingEvidenceError('PDF cover has multiple possible filing dates')
         title = ' '.join(subject[1].split())
         next_page = (pages[1].extract_text() or '')[:2500] if len(pages) > 1 else ''
         return title, dates[0], next_page
-    except (ValueError, IndexError, PyPdfError):
-        return None
+    except FilingEvidenceError:
+        raise
+    except (ValueError, IndexError, PyPdfError) as error:
+        raise FilingEvidenceError('PDF text could not be read') from error
 
 
 def read(url, public_url, timeout, data=None, limit=1_048_576):

@@ -313,7 +313,7 @@ def source_update(d):
     # Evidence and fiscal periods stay immutable once ingested.
     source_type = d.get('source_type', source.get('source_type'))
     if source_type != source.get('source_type') and source_type not in ('annual_report', 'regulatory_filing', 'investor_presentation',
-                            'earnings_call', 'company_website', 'sustainability_report'):
+                            'earnings_call', 'company_website', 'sustainability_report', 'other'):
         raise ValueError('Unknown source type')
     url = str(d.get('url', source.get('url', ''))).strip()
     if url and urlparse(url).scheme not in ('http', 'https'):

@@ -31,7 +31,7 @@ def claim_value(snak):
     return snak.get('datavalue', {}).get('value')
 
 
-def matching_websites(entities, company_name, ticker):
+def matching_websites(entities, company_name, ticker, *, require_ticker=True):
     company_words = name_words(company_name)
     if not company_words or not ticker:
         return set()
@@ -44,7 +44,7 @@ def matching_websites(entities, company_name, ticker):
         symbols = [claim_value(claim.get('mainsnak', {})) for claim in statements(entity, 'P249')]
         symbols += [claim_value(snak) for claim in statements(entity, 'P414')
                     for snak in claim.get('qualifiers', {}).get('P249', [])]
-        if not any(isinstance(value, str) and ticker_key(value) == ticker for value in symbols):
+        if require_ticker and not any(isinstance(value, str) and ticker_key(value) == ticker for value in symbols):
             continue
         websites = statements(entity, 'P856')
         preferred = [item for item in websites if item.get('rank') == 'preferred']
@@ -86,7 +86,25 @@ def lookup(company_name, bloomberg_ticker, day, public_url):
         if not ids:
             return ''
         response = fetch({'action': 'wbgetentities', 'ids': '|'.join(ids), 'props': 'labels|aliases|claims', 'languages': 'en'})
-        urls = matching_websites(response.get('entities', {}), company_name, ticker_key(ticker_parts[0]))
+        entities = response.get('entities', {})
+        ticker = ticker_key(ticker_parts[0])
+        urls = matching_websites(entities, company_name, ticker)
+        if not urls:
+            # Some directory records omit the stock symbol. In that case the
+            # independently listed website must publish the issuer and symbol.
+            from exchange_filings import read
+            from approved_collector import company_matches
+            from scrapy import Selector
+
+            candidates = matching_websites(entities, company_name, ticker, require_ticker=False)
+            if len(candidates) == 1:
+                website = next(iter(candidates))
+                page = Selector(text=read(website, public_url, 4))
+                identity = ' '.join(page.css('title::text, h1::text, meta[property="og:site_name"]::attr(content)').getall())
+                visible = ' '.join(page.xpath('//body//text()[not(ancestor::script or ancestor::style)]').getall())
+                symbol = r'\b(?:ticker|stock\s+(?:code|symbol)|trading\s+symbol|NSE|BSE|SGX(?:-ST)?|HKEX|ASX)\s*[:：]\s*'
+                if company_matches(identity, {'name': company_name}) and re.search(symbol + re.escape(ticker_parts[0]) + r'\b', visible, re.I):
+                    urls = {website}
         if len(urls) != 1:
             return ''
         website = next(iter(urls))
