@@ -108,29 +108,52 @@ class DiscoveryTest(unittest.TestCase):
         self.assertFalse(approved_collector.company_matches('Marathon Petroleum Corporation earnings', company))
         self.assertTrue(approved_collector.company_matches('Venture Corporation annual report', company))
 
-    def test_link_parser_keeps_text_near_each_link(self):
+    def test_link_parser_uses_anchor_title_without_unrelated_dates(self):
         import approved_collector
-        parser = approved_collector.Links()
-        parser.feed('<p>Other item 2019</p><p>Annual Report 2025 published 02 Apr 2026 '
-                    '<a title="Annual Report 2025" href="/annual.pdf">Download</a></p>')
-        _, title, start, end = parser.links[0]
-        context = ''.join(parser.page_text)[max(0, start-100):end+100]
+        from scrapy import Selector
+        page = Selector(text='<p>Annual Report 2025 published 02 Apr 2026 '
+                             '<a title="Annual Report 2025" href="/annual.pdf">Download</a></p>')
+        _, title, context = next(approved_collector.page_links(page))
         self.assertEqual(title, 'Annual Report 2025')
-        self.assertIn('2026-04-02', approved_collector.explicit_dates(context))
+        self.assertEqual(approved_collector.explicit_dates(context), [])
 
     def test_link_parser_separates_adjacent_table_rows(self):
         import approved_collector
-        parser = approved_collector.Links()
-        parser.feed('<table><tr><td>Annual Report 2024</td><td>02 Apr 2025</td>'
-                    '<td><a href="/annual.pdf">Annual Report</a></td></tr>'
-                    '<tr><td>Sustainability Report 2025</td><td>02 Apr 2026</td>'
-                    '<td><a href="/sustain.pdf">Sustainability Report</a></td></tr></table>')
-        text = ''.join(parser.page_text)
-        _, _, start, _ = parser.links[0]
-        row = next((a, b) for a, b in parser.rows if a <= start <= b)
-        context = text[row[0]:row[1]]
+        from scrapy import Selector
+        page = Selector(text='<table><tr><td>Annual Report 2024</td><td>02 Apr 2025</td>'
+                             '<td><a href="/annual.pdf">Annual Report</a></td></tr>'
+                             '<tr><td>Sustainability Report 2025</td><td>02 Apr 2026</td>'
+                             '<td><a href="/sustain.pdf">Sustainability Report</a></td></tr></table>')
+        _, _, context = next(approved_collector.page_links(page))
         self.assertIn('Annual Report 2024', context)
         self.assertNotIn('Sustainability Report', context)
+
+    def test_scrapy_batches_keep_redirects_within_approved_and_permitted_urls(self):
+        import approved_collector
+        base = 'https://issuer.test'
+        company = {'name': 'Example Industries', 'website': base}
+        domains = [*discovery.APPROVED_DOMAINS, 'issuer.test']
+        batches = []
+
+        def download(batch, timeout, limit, agent):
+            batches.extend(batch)
+            return {
+                base: (302, '/restricted/annual-report', ''),
+                base + '/investors': (302, 'https://unapproved.test/report', ''),
+                base + '/sitemap.xml': (200, '', '<sitemapindex><sitemap><loc>http://issuer.test/investor.xml</loc></sitemap></sitemapindex>'),
+                base + '/investor.xml': (200, '', f'<urlset><url><loc>{base}/annual-reports</loc></url></urlset>'),
+                base + '/annual-reports': (200, '', '<a href="/annual-2025.pdf">Annual Report 2025 | April 2, 2026</a>'),
+            }
+
+        with patch.object(approved_collector, 'build_opener') as opener, \
+                patch('scrapy_pages.download', side_effect=download):
+            opener.return_value.open.return_value.__enter__.return_value.read.return_value = (
+                b'User-agent: *\nDisallow: /restricted/\nSitemap: https://issuer.test/sitemap.xml')
+            rows, _ = approved_collector.collect(company, domains, lambda url: url, 5)
+        self.assertNotIn(base + '/restricted/annual-report', batches)
+        self.assertFalse(any('unapproved.test' in url for url in batches))
+        self.assertIn(base + '/annual-reports', batches)
+        self.assertEqual(rows[0]['publication_dates'], ['2026-04-02'])
 
     def test_collected_links_use_free_key_and_no_search_grounding(self):
         import approved_collector

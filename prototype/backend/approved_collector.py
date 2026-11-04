@@ -2,7 +2,6 @@
 import re
 import time
 from datetime import datetime
-from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse, urldefrag, parse_qs, unquote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
@@ -24,6 +23,11 @@ def allowed(url, domains):
                 and parsed.port in (None, 443) and any(host == d or host.endswith('.' + d) for d in domains))
     except ValueError:
         return False
+
+
+def sitemap_location(value):
+    value = value.strip()
+    return 'https://' + value[7:] if value.startswith('http://') else value
 
 
 class ApprovedRedirect(HTTPRedirectHandler):
@@ -54,54 +58,18 @@ def robots_permits(url, domains, public_url, timeout):
         return False
 
 
-class Links(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.href = None
-        self.text = []
-        self.links = []
-        self.page_text = []
-        self.text_offset = 0
-        self.anchor_start = 0
-        self.hidden = 0
-        self.anchor_title = ''
-        self.row_start = None
-        self.rows = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag in ('script', 'style', 'noscript'):
-            self.hidden += 1
-        if tag == 'tr' and self.row_start is None:
-            self.row_start = self.text_offset
-        if tag == 'a':
-            attributes = dict(attrs)
-            self.href = attributes.get('href')
-            self.anchor_title = attributes.get('title', '')
-            self.text = []
-            self.anchor_start = self.text_offset
-        if tag == 'img' and self.href is not None:
-            self.text.append(dict(attrs).get('alt') or '')
-
-    def handle_data(self, data):
-        if self.hidden:
-            return
-        clean = ' '.join(data.split())
-        if clean:
-            self.page_text.append(clean + ' ')
-            self.text_offset += len(clean) + 1
-        if self.href is not None:
-            self.text.append(data)
-
-    def handle_endtag(self, tag):
-        if tag in ('script', 'style', 'noscript') and self.hidden:
-            self.hidden -= 1
-        if tag == 'tr' and self.row_start is not None:
-            self.rows.append((self.row_start, self.text_offset))
-            self.row_start = None
-        if tag == 'a' and self.href is not None:
-            label = self.anchor_title or ' '.join(' '.join(self.text).split())
-            self.links.append((self.href, label[:300], self.anchor_start, self.text_offset))
-            self.href = None
+def page_links(selector):
+    """Extract links with dates scoped to their own anchor or a single-link row."""
+    visible = './/text()[not(ancestor::script or ancestor::style or ancestor::noscript)]'
+    for anchor in selector.css('a[href]'):
+        href = anchor.attrib.get('href')
+        title = anchor.attrib.get('title') or ' '.join(anchor.xpath(visible + ' | .//img/@alt').getall())
+        title = ' '.join(title.split())[:300]
+        row = anchor.xpath('ancestor::tr[1]')
+        evidence = title
+        if row and len(row.css('a[href]')) == 1:
+            evidence += ' ' + ' '.join(' '.join(row.xpath(visible).getall()).split())
+        yield href, title, evidence
 
 
 def company_matches(text, company):
@@ -189,14 +157,18 @@ def official_annual_reports(company, reports, disclosures):
                                           'publication_date_source_url': disclosure_url}}
 
 
-def collect(company, domains, public_url, timeout):
+def collect(company, domains, public_url, timeout, indexed_pages=()):
     """Return observed links and whether the crawl had restricted/incomplete coverage."""
+    from scrapy import Selector
+    from scrapy_pages import download
+
     deadline = time.monotonic() + max(1, timeout)
     opener = build_opener(ApprovedRedirect(domains, public_url))
     robots = {}
     incomplete = False
     candidates, queue, seen = [], [], set()
     official_reports, official_disclosures = [], []
+    sitemap_urls = set()
     for field in ('investor_relations_url', 'website_url', 'website'):
         seed = str(company.get(field) or '').strip()
         if seed:
@@ -209,6 +181,7 @@ def collect(company, domains, public_url, timeout):
     if company.get('name', '').strip().upper() in ('COFORGE LTD', 'COFORGE LIMITED'):
         queue[0:0] = [(COFORGE_REPORTS, 0), (COFORGE_DISCLOSURES, 0),
                       (COFORGE_IR + '/quarter-reports', 0), (COFORGE_IR + '/', 0)]
+    queue.extend((url, 0) for url in indexed_pages if allowed(url, domains))
     official_domains = domains[7:]
     # Company IR pages tend to contain the most direct filings, so visit them
     # before the large publishers when an official domain is recorded.
@@ -231,6 +204,12 @@ def collect(company, domains, public_url, timeout):
                 parser = RobotFileParser()
                 parser.parse(raw.splitlines())
                 robots[host] = parser
+                if allowed(url, official_domains):
+                    for value in (parser.site_maps() or [])[:2]:
+                        sitemap = sitemap_location(urljoin(robots_url, value))
+                        if allowed(sitemap, official_domains) and sitemap not in sitemap_urls:
+                            sitemap_urls.add(sitemap)
+                            queue.insert(0, (sitemap, 0))
             except HTTPError as error:
                 if error.code in (404, 410):
                     parser = RobotFileParser(); parser.parse([]); robots[host] = parser
@@ -240,27 +219,83 @@ def collect(company, domains, public_url, timeout):
                 robots[host] = None; incomplete = True
         return robots[host] is not None and robots[host].can_fetch(AGENT, url)
 
-    while queue and len(seen) < MAX_PAGES and time.monotonic() < deadline:
-        url, depth = queue.pop(0)
-        if url in seen or not allowed(url, domains):
-            continue
-        seen.add(url)
-        if not can_fetch(url):
-            incomplete = True
-            continue
-        try:
-            public_url(url)
-            with opener.open(Request(url, headers={'User-Agent': AGENT, 'Accept': 'text/html'}), timeout=min(5, max(.1, deadline-time.monotonic()))) as response:
-                if 'html' not in response.headers.get('Content-Type', '').lower():
+    indexed_pages = set(indexed_pages)
+
+    def crawl_pages():
+        nonlocal incomplete
+        while queue and len(seen) < MAX_PAGES and time.monotonic() < deadline:
+            batch = {}
+            while queue and len(batch) < 4 and len(seen) < MAX_PAGES and time.monotonic() < deadline:
+                url, depth = queue.pop(0)
+                if url in seen or not allowed(url, domains):
                     continue
-                page_url = response.geturl()
-                page = response.read(MAX_BYTES).decode('utf-8', errors='replace')
-        except (OSError, ValueError, URLError):
-            incomplete = True
+                seen.add(url)
+                try:
+                    public_url(url)
+                    if can_fetch(url):
+                        batch[url] = depth
+                    else:
+                        incomplete = True
+                except (OSError, ValueError):
+                    incomplete = True
+            if not batch or time.monotonic() >= deadline:
+                continue
+            pages = download(batch, deadline - time.monotonic(), MAX_BYTES, AGENT)
+            for url, depth in batch.items():
+                result = pages.get(url)
+                if result is None:
+                    incomplete = True
+                    continue
+                status, location, body = result
+                if status in (301, 302, 303, 307, 308) and location:
+                    try:
+                        target = urldefrag(urljoin(url, location))[0]
+                    except ValueError:
+                        incomplete = True
+                        continue
+                    if allowed(target, domains):
+                        queue.insert(0, (target, depth))
+                        if url in indexed_pages:
+                            indexed_pages.add(target)
+                        if url in sitemap_urls:
+                            sitemap_urls.add(target)
+                    else:
+                        incomplete = True
+                elif 200 <= status < 300 and body:
+                    yield url, depth, body
+                elif status >= 400:
+                    incomplete = True
+
+    for page_url, depth, page in crawl_pages():
+        url = page_url
+        if url in sitemap_urls:
+            sitemap = Selector(text=page, type='xml')
+            children = sitemap.xpath('//*[local-name()="sitemap"]/*[local-name()="loc"]/text()').getall()
+            children = dict.fromkeys(link for link in map(sitemap_location, children)
+                                     if link not in sitemap_urls and allowed(link, official_domains))
+            prioritized = sorted(children, key=lambda link: not bool(
+                re.search(r'main|investor|about|tentang|corporate|financial', urlparse(link).path, re.I)))
+            prioritized = prioritized[:max(0, 4 - len(sitemap_urls))]
+            sitemap_urls.update(prioritized)
+            queue[0:0] = [(child, 0) for child in prioritized]
+            links = sitemap.xpath('//*[local-name()="url"]/*[local-name()="loc"]/text()').getall()
+            relevant = [link for link in map(sitemap_location, links) if allowed(link, official_domains)
+                        and keywords.search(unquote(urlparse(link).path))]
+            prioritized = sorted(dict.fromkeys(relevant), key=lambda link: (
+                    not bool(re.search(r'annual|tahunan|sustainab|keberlanjutan|financial|disclosure', link, re.I)),
+                    len(link)))[:8]
+            queue[0:0] = [(link, 0) for link in prioritized if link not in seen]
             continue
-        parser = Links(); parser.feed(page)
-        page_text = ''.join(parser.page_text)
-        for href, title, start, end in parser.links:
+        selector = Selector(text=page)
+        title = selector.css('title::text').get(default='').strip()
+        if url in indexed_pages and title and company_matches(title, company):
+            raw_date = selector.css('meta[property="article:published_time"]::attr(content), meta[name="datePublished"]::attr(content)').get(default='')
+            published = explicit_dates(raw_date[:10])
+            if len(published) == 1:
+                candidates.append({'url': page_url, 'title': title[:300],
+                                   'context': f'{title[:300]} Published {published[0]}',
+                                   'publication_dates': published, 'issuer_hosted': allowed(page_url, official_domains)})
+        for href, title, evidence in page_links(selector):
             try:
                 link = urldefrag(urljoin(page_url, href))[0]
             except ValueError:
@@ -273,10 +308,6 @@ def collect(company, domains, public_url, timeout):
                     link = urldefrag(redirect[0])[0]
             if not allowed(link, domains):
                 continue
-            row = next(((a, b) for a, b in parser.rows if a <= start < b), None)
-            evidence = title
-            if row and sum(row[0] <= offset < row[1] for _, _, offset, _ in parser.links) == 1:
-                evidence += ' ' + page_text[row[0]:row[1]]
             if keywords.search(title + ' ' + link):
                 if depth < 2 and not urlparse(link).path.lower().endswith(('.pdf', '.zip')):
                     if allowed(link, official_domains):

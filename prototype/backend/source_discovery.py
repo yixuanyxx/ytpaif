@@ -420,6 +420,7 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     """Collect permitted website links, then classify supplied evidence without grounding."""
     import approved_collector
     import exchange_filings
+    import web_source_index
     key = os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()
     started = time.monotonic()
     website, website_basis = resolve_issuer_website(company)
@@ -442,7 +443,10 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
                      'ai_confidence': 80, 'ai_confidence_basis': website_basis,
                      'ai_confidence_reason': 'The directory matches the issuer name and ticker. Date records when the website was checked.'})
     remaining = timeout - (time.monotonic() - started)
-    candidates, incomplete = (approved_collector.collect(company, domains, public_url, min(remaining, 25))
+    indexed_pages = web_source_index.discover(company, types, period, domains, remaining)
+    remaining = timeout - (time.monotonic() - started)
+    candidates, incomplete = (approved_collector.collect(company, domains, public_url, min(remaining, 25),
+                                                        indexed_pages=indexed_pages)
                               if remaining > 1 else ([], True))
     # Avoid sending unrelated navigation and other reporting years to Gemini.
     # A reliable publication date must be present in the collected context;

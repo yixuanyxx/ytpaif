@@ -1,9 +1,12 @@
 import unittest
+import io
 from unittest.mock import patch
 
 import issuer_directory
 import source_discovery
-from approved_collector import Links, explicit_dates
+from approved_collector import page_links, explicit_dates
+from scrapy import Selector
+import web_source_index
 
 
 def snak(value):
@@ -18,6 +21,19 @@ def entity(name, symbol, site):
 
 
 class IssuerDirectoryTest(unittest.TestCase):
+    def test_web_index_returns_only_approved_crawl_entry_points(self):
+        response = io.BytesIO(b'{"web":{"results":[{"url":"https://issuer.test/results"},'
+                              b'{"url":"https://issuer.test.evil.test/results"},'
+                              b'{"url":"https://issuer.test/report.pdf"}]}}')
+        company = {'name': 'Example Industries'}
+        with patch.dict(web_source_index.os.environ, {'BRAVE_SEARCH_API_KEY': 'test'}), \
+                patch.object(web_source_index, 'build_opener') as opener:
+            opener.return_value.open.return_value = response
+            urls = web_source_index.discover(company, ['annual_report'], '2025', ['issuer.test'], 5)
+        self.assertEqual(urls, ['https://issuer.test/results'])
+        request = opener.return_value.open.call_args.args[0]
+        self.assertIn('site%3Aissuer.test', request.full_url)
+
     def test_requires_both_matching_issuer_name_and_ticker(self):
         records = {'Q1': entity('Example Holdings Limited', '0700', 'https://issuer.test/'),
                    'Q2': entity('Other Company', '700', 'https://wrong.test/'),
@@ -40,7 +56,7 @@ class IssuerDirectoryTest(unittest.TestCase):
         self.assertEqual(rows[0]['ai_confidence_basis'], 'issuer-hosted document listing')
 
     def test_crawler_accepts_missing_image_alt_and_localized_dates(self):
-        parser = Links()
-        parser.feed('<a href="/report.pdf"><img alt>2025年度報告（2026年4月2日）</a>')
-        self.assertEqual(parser.links[0][0], '/report.pdf')
-        self.assertEqual(explicit_dates(parser.links[0][1]), ['2026-04-02'])
+        page = Selector(text='<a href="/report.pdf"><img alt>2025年度報告（2026年4月2日）</a>')
+        href, title, _ = next(page_links(page))
+        self.assertEqual(href, '/report.pdf')
+        self.assertEqual(explicit_dates(title), ['2026-04-02'])
