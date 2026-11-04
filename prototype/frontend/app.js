@@ -2277,7 +2277,7 @@ async function viewSources() {
 
   $('#page-actions').innerHTML = '';
   const portfolioSelectorHtml = `
-    <div class="panel">
+    <div class="form-group">
       <label class="field-label" for="source-portfolio-select">Portfolio</label>
       <select id="source-portfolio-select" ${searchSettingsLocked ? 'disabled' : ''}>
         ${eligiblePortfolios.map(item => `<option value="${esc(item.id)}" ${item.id === portfolio.id ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}
@@ -2326,8 +2326,7 @@ async function viewSources() {
   monitorSourceSearches();
 
   $('#page-content').innerHTML = `
-    ${portfolioSelectorHtml}
-    <div class="grid-1-2" style="align-items:start">
+    <div>
 
       <!-- Search config -->
       <div class="panel">
@@ -2337,6 +2336,7 @@ async function viewSources() {
         </div>
 
         <fieldset id="source-search-settings" aria-label="Document search settings" ${searchSettingsLocked ? 'disabled' : ''} style="border:0;padding:0;margin:0;min-width:0">
+        ${portfolioSelectorHtml}
         <div class="form-section-title">Companies to search</div>
         <div class="form-group mb-8">
           <label class="field-label">Search universe by SEDOL (London Stock Exchange), Ticker or Name</label>
@@ -2403,13 +2403,10 @@ async function viewSources() {
           </span>
         </div>
         <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${searchStatus}</div>
+        <div id="source-search-results">${sourceSearchResults(latestSearchRun, companyIds)}</div>
       </div>
 
-      <!-- Source library + manual upload -->
-      <div>
-        <!-- Candidate Search Results -->
-        <div id="source-search-results">${sourceSearchResults(latestSearchRun, companyIds)}</div>
-
+      <!-- Manual upload and source library -->
         <div class="panel">
           <div class="panel-title">Manual upload</div>
           <div class="panel-subtitle">Upload actual company filings as evidence for analysis.</div>
@@ -2466,7 +2463,6 @@ async function viewSources() {
               <p>${portfolio ? 'The selected portfolio has no saved company holdings.' : 'Import a portfolio to choose its companies for source search.'}</p>
             </div>`}
         </div>
-      </div>
     </div>`;
 
   $('#source-portfolio-select').addEventListener('change', event => {
