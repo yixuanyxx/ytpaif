@@ -941,6 +941,7 @@ def cancel(app, data):
     import source_jobs
     run = source_jobs.Queue().cancel(run_id)
     app.put('search_runs', run)
+    source_jobs.ensure_worker()
     return run
 
 

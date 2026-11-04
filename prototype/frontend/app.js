@@ -15,10 +15,15 @@ let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
 let sourceSearchPollTimer = null;
 let sourceSearchStarting = false;
+let displayedSourceSearchId = '';
 const trackedSourceSearches = new Set();
 const loadedSourceCompanyIds = new Set();
 function activeSourceSearch() {
   return (state.search_runs || []).findLast(search => ['running', 'cancelling'].includes(search.status));
+}
+function displayedSourceSearch(portfolio) {
+  const search = activeSourceSearch() || (state.search_runs || []).find(run => run.id === displayedSourceSearchId);
+  return search && (!search.portfolio_id || search.portfolio_id === portfolio.id) ? search : null;
 }
 function updateLongSearchEstimate() {
   const button = $('#btn-run-long-search');
@@ -85,6 +90,8 @@ function notifyFinishedSourceSearches() {
   }
 }
 function monitorSourceSearches() {
+  const active = activeSourceSearch();
+  if (active) displayedSourceSearchId = active.id;
   for (const search of state.search_runs || []) {
     if (['running', 'cancelling'].includes(search.status)) trackedSourceSearches.add(search.id);
   }
@@ -2289,7 +2296,7 @@ async function viewSources() {
   const part = type => parts.find(p => p.type === type).value;
   const today = `${part('year')}-${part('month')}-${part('day')}`;
   const currentYear = Number(part('year'));
-  const latestSearchRun = activeSearch || (state.search_runs || []).at(-1) || null;
+  const latestSearchRun = displayedSourceSearch(portfolio);
   const searchIsActive = Boolean(activeSearch);
   const searchSettingsLocked = searchIsActive || sourceSearchStarting;
   const uploadCompanyId = companies.some(company => company.id === pendingManualUploadCompanyId)
@@ -2329,9 +2336,9 @@ async function viewSources() {
     </label>`;
   }).join('');
 
-  const searchStatus = latestSearchRun?.status === 'running'
+  const searchStatus = activeSearch?.status === 'running'
     ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Searching for source documents in the background… You can continue browsing.'
-    : latestSearchRun?.status === 'cancelling'
+    : activeSearch?.status === 'cancelling'
       ? 'Stopping source search…'
       : latestSearchRun?.status === 'cancelled'
         ? `Source search stopped. ${esc(latestSearchRun.cancel_reason || '')}`
@@ -2422,7 +2429,7 @@ async function viewSources() {
           <button class="btn btn-secondary" id="btn-run-long-search" data-empty="${companies.length === 0}" ${companies.length===0 || searchSettingsLocked ? 'disabled' : ''}>
             Long search
           </button>
-          ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${latestSearchRun.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
+          ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${activeSearch.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
           <span class="text-muted text-small">
             Both searches run in the background, even if you close this page. Try Long search if a short search leaves gaps.
           </span>
@@ -2577,6 +2584,8 @@ async function viewSources() {
       return;
     }
     sourceSearchStarting = true;
+    displayedSourceSearchId = '';
+    $('#source-search-results').innerHTML = '';
     updateSourceSearchLock();
     $('#source-search-status').innerHTML = '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> Starting source search…';
     try {
@@ -2592,6 +2601,7 @@ async function viewSources() {
       latest_documents: latestDocuments
     });
     if (res.search_run?.id) {
+      displayedSourceSearchId = res.search_run.id;
       trackedSourceSearches.add(res.search_run.id);
       state.search_runs = [...(state.search_runs || []).filter(run => run.id !== res.search_run.id), res.search_run];
       monitorSourceSearches();
@@ -2614,7 +2624,7 @@ async function viewSources() {
     button.disabled = true;
     $('#source-search-status').textContent = 'Stopping source search…';
     try {
-      await api('source/search/cancel', { id: latestSearchRun.id });
+      await api('source/search/cancel', { id: activeSearch.id });
       await refresh();
       if (currentView === 'sources') await viewSources();
       monitorSourceSearches();
@@ -2813,7 +2823,7 @@ async function updateSourceLibraryProgress(previousSummaries) {
   const results = $('#source-search-results');
   if (results) {
     const scrollTop = $('#source-search-results-scroll')?.scrollTop || 0;
-    results.innerHTML = sourceSearchResults((state.search_runs || []).at(-1), companyIds);
+    results.innerHTML = sourceSearchResults(displayedSourceSearch(portfolio), companyIds);
     const scroll = $('#source-search-results-scroll');
     if (scroll) scroll.scrollTop = scrollTop;
   }

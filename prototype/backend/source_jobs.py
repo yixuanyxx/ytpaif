@@ -33,6 +33,9 @@ class Queue:
                 (job_id TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL,
                  PRIMARY KEY (job_id, id))''')
             db.execute('CREATE TABLE IF NOT EXISTS source_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL)')
+            db.execute('''CREATE TABLE IF NOT EXISTS completion_notifications
+                (job_id TEXT NOT NULL, channel TEXT NOT NULL, state TEXT NOT NULL,
+                 PRIMARY KEY (job_id, channel))''')
 
     @contextmanager
     def connect(self):
@@ -65,8 +68,40 @@ class Queue:
     def save(self, run):
         # A late network response must never resurrect a terminal job.
         with self.connect() as db:
-            db.execute("UPDATE jobs SET payload=?, state=? WHERE id=? AND state IN ('queued','running')",
-                       (json.dumps(run), 'running' if run['status'] == 'running' else run['status'], run['id']))
+            updated = db.execute("UPDATE jobs SET payload=?, state=? WHERE id=? AND state IN ('queued','running')",
+                                 (json.dumps(run), run['status'], run['id']))
+            if updated.rowcount and run['status'] in ('completed', 'incomplete', 'failed', 'cancelled'):
+                self.queue_notifications(db, run)
+
+    @staticmethod
+    def queue_notifications(db, run):
+        if run.get('search_mode') in ('short', 'long'):
+            db.executemany("INSERT OR IGNORE INTO completion_notifications VALUES (?, ?, 'pending')",
+                           ((run['id'], channel) for channel in ('email', 'sms')))
+
+    def deliver_next_notification(self):
+        from source_notifications import send
+
+        with self.connect() as db:
+            row = db.execute("""SELECT n.job_id, n.channel, j.payload FROM completion_notifications n
+                                JOIN jobs j ON j.id=n.job_id WHERE n.state='pending'
+                                ORDER BY n.rowid LIMIT 1""").fetchone()
+            if not row:
+                return False
+            job_id, channel, payload = row
+            # Claim before sending. An interrupted provider call may have succeeded,
+            # so automatically repeating it could send the same notice twice.
+            db.execute("UPDATE completion_notifications SET state='sending' WHERE job_id=? AND channel=?",
+                       (job_id, channel))
+        try:
+            state = send(channel, json.loads(payload))
+        except Exception as error:
+            state = 'failed'
+            print(f'Source search notification {job_id} ({channel}) failed: {type(error).__name__}', file=sys.stderr)
+        with self.connect() as db:
+            db.execute('UPDATE completion_notifications SET state=? WHERE job_id=? AND channel=?',
+                       (state, job_id, channel))
+        return True
 
     def cancel(self, job_id, reason='Search cancelled by user.'):
         """Durably stop a queued/running job without letting a late worker revive it."""
@@ -79,8 +114,10 @@ class Queue:
                 return run
             run['status'] = 'cancelled'
             run['cancel_reason'] = reason
-            db.execute('UPDATE jobs SET payload=?, state=? WHERE id=? AND state IN (\'queued\',\'running\')',
-                       (json.dumps(run), 'cancelled', job_id))
+            updated = db.execute('UPDATE jobs SET payload=?, state=? WHERE id=? AND state IN (\'queued\',\'running\')',
+                                 (json.dumps(run), 'cancelled', job_id))
+            if updated.rowcount:
+                self.queue_notifications(db, run)
             return run
 
     def merge(self, remote):
@@ -166,6 +203,9 @@ def supervise(queue, command=None, idle_seconds=None):
             return
         idle_since = time.monotonic()
         while True:
+            if queue.deliver_next_notification():
+                idle_since = time.monotonic()
+                continue
             job = queue.next_job()
             if not job:
                 if idle_seconds is not None and time.monotonic() - idle_since >= idle_seconds:

@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import source_jobs
 
@@ -96,6 +96,19 @@ q.save(r)
         self.assertEqual(self.queue.records()[0]['status'], 'completed')
         self.assertEqual(self.queue.records()[0]['results_count'], 1)
         self.assertIsNone(self.queue.next_job())
+
+    def test_terminal_search_queues_email_and_sms_once_across_restart(self):
+        run = {**self.run, 'search_mode': 'long'}
+        self.queue.enqueue(run, [])
+        completed = {**run, 'status': 'completed', 'results_count': 2}
+        self.queue.save(completed)
+        self.queue.save(completed)
+        reopened = source_jobs.Queue(self.path)
+        with patch('source_notifications.send', return_value='submitted') as send:
+            self.assertTrue(reopened.deliver_next_notification())
+            self.assertTrue(reopened.deliver_next_notification())
+            self.assertFalse(reopened.deliver_next_notification())
+        self.assertEqual([call.args for call in send.call_args_list], [('email', completed), ('sms', completed)])
 
     def test_cancelled_job_is_terminal_and_does_not_run_again(self):
         self.queue.enqueue(self.run, [])

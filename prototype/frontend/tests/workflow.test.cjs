@@ -534,6 +534,9 @@ test('Source search failure explains provider quota limits and search coverage',
   };
   selectedDashboardThemeId='theme-1';`);
   await run('viewSources()');
+  assert.doesNotMatch(node('#page-content').innerHTML,/0 of 75 companies searched/);
+  run("displayedSourceSearchId='search-failed'");
+  await run('viewSources()');
   const html = node('#page-content').innerHTML;
   assert.match(html,/0 documents saved; 0 of 75 companies searched/);
   assert.match(html,/Check the configured key, model availability, and free-tier quota/);
@@ -548,7 +551,7 @@ test('Source search quota completion shows actual completed companies',async()=>
       errors:[{reason:'Gemini returned no Google Search citations'},{reason:'Google Search quota reached (HTTP 429)'}]
     }],
     portfolio_imports:[{id:'portfolio-a',theme_id:'theme-1',name:'Asia Core',rows:[{company_id:'company-a'}]}]
-  }; selectedDashboardThemeId='theme-1';`);
+  }; selectedDashboardThemeId='theme-1'; displayedSourceSearchId='search-quota';`);
   await run('viewSources()');
   const html = node('#page-content').innerHTML;
   assert.match(html,/stopped after 2 of 3 companies because the Gemini quota was reached/);
