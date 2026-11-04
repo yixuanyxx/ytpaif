@@ -2714,8 +2714,7 @@ function sourceTypeCountBadge(summary) {
 
 function sourceSearchResults(searchRun, companyIds) {
   const candidateResults = (searchRun?.results || []).filter(result => companyIds.has(result.company_id));
-  const diagnostics = sourceRejectionDetails(searchRun, companyIds);
-  if (!candidateResults.length) return diagnostics;
+  if (!candidateResults.length) return '';
   const candidateCompanyCount = new Set(candidateResults.map(result => result.company_id)).size;
   return `
   <div class="panel" style="margin-bottom:20px">
@@ -2741,28 +2740,7 @@ function sourceSearchResults(searchRun, companyIds) {
         </tbody>
       </table>
     </div>
-  </div>${diagnostics}`;
-}
-
-function sourceRejectionDetails(searchRun, companyIds) {
-  if (!searchRun || ['running', 'cancelling'].includes(searchRun.status)) return '';
-  const passes = (searchRun.grounding_diagnostics || [])
-    .filter(pass => companyIds.has(pass.company_id) && Array.isArray(pass.rejections));
-  const verificationErrors = (searchRun.errors || [])
-    .filter(error => companyIds.has(error.company_id) && error.stage === 'link verification');
-  if (!passes.length && !verificationErrors.length) return '';
-  const companyNames = new Map((state.companies || []).map(company => [company.id, company.name]));
-  const renderRejection = item => `<li style="overflow-wrap:anywhere">${esc(item.stage)} · ${esc(item.reason)}<br><small>${esc(item.url)}</small></li>`;
-  return `<details class="panel" style="margin-bottom:20px">
-    <summary>Source search diagnostics</summary>
-    ${passes.map(pass => `<details style="margin-top:8px">
-      <summary>${esc(companyNames.get(pass.company_id) || pass.company_id)} · ${esc(pass.period)} · ${pass.rejections.length} rejected or skipped</summary>
-      <p class="text-muted text-small">${pass.issuer_website_available ? esc(pass.issuer_website_basis) : 'No verified issuer website'}</p>
-      <ul>${pass.rejections.map(renderRejection).join('')}</ul>
-    </details>`).join('')}
-    ${verificationErrors.length ? `<h4>Final link checks</h4><ul>${verificationErrors.map(error =>
-      renderRejection({...error, stage: `${companyNames.get(error.company_id) || error.company_id} · ${error.period || ''} · ${error.stage}`})).join('')}</ul>` : ''}
-  </details>`;
+  </div>`;
 }
 
 function updateSourceCompanyCoverage(summaryById) {

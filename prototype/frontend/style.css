@@ -1437,6 +1437,7 @@ tr:hover td { background: var(--slate-50); }
   justify-content: center;
 }
 .alert-modal-actions .btn { min-width: 110px; }
+#alert-modal-ok { justify-content: center; }
 
 
 /* Confirm modal variants (reuses .alert-modal) */
