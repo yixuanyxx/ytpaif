@@ -4,13 +4,16 @@ import time
 from datetime import datetime
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse, urldefrag, parse_qs
+from urllib.parse import urljoin, urlparse, urldefrag, parse_qs, unquote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from urllib.robotparser import RobotFileParser
 
 AGENT = 'ThemeLabResearchBot'
 MAX_PAGES = 24
 MAX_BYTES = 1048576
+COFORGE_IR = 'https://investors.coforge.com'
+COFORGE_REPORTS = COFORGE_IR + '/annual-report'
+COFORGE_DISCLOSURES = COFORGE_IR + '/disclosure-under-listing-regulations'
 
 
 def allowed(url, domains):
@@ -109,7 +112,12 @@ def company_matches(text, company):
 
 
 def explicit_dates(text):
-    dates = set(re.findall(r'\b20\d{2}-\d{2}-\d{2}\b', text))
+    dates = set()
+    for match in re.findall(r'\b20\d{2}-\d{2}-\d{2}\b', text):
+        try:
+            dates.add(datetime.fromisoformat(match).date().isoformat())
+        except ValueError:
+            continue
     for match in re.finditer(r'\b\d{1,2}\s+[A-Za-z]{3,9}\s+20\d{2}\b', text):
         for fmt in ('%d %b %Y', '%d %B %Y'):
             try:
@@ -117,7 +125,60 @@ def explicit_dates(text):
                 break
             except ValueError:
                 continue
+    for match in re.finditer(r'\b[A-Za-z]{3,9}\s+\d{1,2},\s+20\d{2}\b', text):
+        for fmt in ('%b %d, %Y', '%B %d, %Y'):
+            try:
+                dates.add(datetime.strptime(match.group(), fmt).date().isoformat())
+                break
+            except ValueError:
+                continue
     return sorted(dates)
+
+
+def annual_report_year(label):
+    """Read an explicit fiscal period, excluding the date after a disclosure label."""
+    label = label.split('|', 1)[0]
+    match = re.search(r'\b(?:FY\s*|annual report(?:\s+for)?\s+)(20\d{2})(?:\s*[-–/]\s*(20\d{2}|\d{2}))?\b', label, re.I)
+    if not match:
+        return None
+    start, end = match.groups()
+    if not end:
+        return start
+    year = str(int(start) + 1)
+    return year if year.endswith(end) else None
+
+
+def official_annual_reports(company, reports, disclosures):
+    """Pair issuer-hosted report PDFs with the same issuer's dated release notices."""
+    notices = {}
+    for link, title in disclosures:
+        if not (re.search(r'\bannual report\b', title, re.I)
+                and re.search(r'\b(?:intimation|submission|publication|published|release|filed|filing)\b', title, re.I)):
+            continue
+        year = annual_report_year(title)
+        dates = explicit_dates(title)
+        if year and len(dates) == 1 and 0 <= int(dates[0][:4]) - int(year) <= 1:
+            notices.setdefault(year, {}).setdefault(dates[0], link)
+    for report in reports:
+        year = annual_report_year(report['title'])
+        evidence = notices.get(year, {})
+        if len(evidence) != 1:
+            continue
+        path = unquote(urlparse(report['url']).path)
+        if not path.lower().endswith('.pdf'):
+            continue
+        if not (re.search(r'\bannual report\b', report['title'], re.I)
+                or re.search(r'(?:annual[-_ ]*report|[-_ ]ar)[-_ ]*' + year + r'\.pdf$', path, re.I)):
+            continue
+        publication, disclosure_url = next(iter(evidence.items()))
+        if report['url'] == disclosure_url:
+            continue
+        name = company['name']
+        yield {**report, 'title': f'{name} FY{year} Annual Report',
+               'context': f'{name} annual report FY{year}, published {publication}.',
+               'publication_dates': [publication],
+               'official_annual_report': {'publication_date': publication, 'period': year,
+                                          'publication_date_source_url': disclosure_url}}
 
 
 def collect(company, domains, public_url, timeout):
@@ -127,6 +188,7 @@ def collect(company, domains, public_url, timeout):
     robots = {}
     incomplete = False
     candidates, queue, seen = [], [], set()
+    official_reports, official_disclosures = [], []
     for field in ('investor_relations_url', 'website_url', 'website'):
         seed = str(company.get(field) or '').strip()
         if seed:
@@ -137,9 +199,9 @@ def collect(company, domains, public_url, timeout):
                     root = 'https://' + urlparse(seed).netloc
                     queue.extend([(root + '/investors', 0), (root + '/investor-relations', 0)])
     if company.get('name', '').strip().upper() in ('COFORGE LTD', 'COFORGE LIMITED'):
-        queue[0:0] = [('https://investors.coforge.com/annual-report', 0),
-                      ('https://investors.coforge.com/quarter-reports', 0),
-                      ('https://investors.coforge.com/', 0)]
+        queue[0:0] = [(COFORGE_REPORTS, 0), (COFORGE_DISCLOSURES, 0),
+                      (COFORGE_IR + '/quarter-reports', 0), (COFORGE_IR + '/', 0)]
+    official_domains = domains[7:]
     # Company IR pages tend to contain the most direct filings, so visit them
     # before the large publishers when an official domain is recorded.
     for domain in [*domains[7:], *domains[:7]]:
@@ -197,25 +259,31 @@ def collect(company, domains, public_url, timeout):
                     link = urldefrag(redirect[0])[0]
             if not allowed(link, domains):
                 continue
-            row_bounds = next(((a, b) for a, b in parser.rows if a <= start <= b), None)
-            nearby = page_text[row_bounds[0]:row_bounds[1]] if row_bounds else page_text[max(0, start - 80):end + 80]
-            context = title + ' ' + link + ' ' + nearby
+            row = next(((a, b) for a, b in parser.rows if a <= start < b), None)
+            evidence = title
+            if row and sum(row[0] <= offset < row[1] for _, _, offset, _ in parser.links) == 1:
+                evidence += ' ' + page_text[row[0]:row[1]]
             if keywords.search(title + ' ' + link):
                 if depth < 2 and not urlparse(link).path.lower().endswith(('.pdf', '.zip')):
-                    if urlparse(page_url).hostname in domains[7:]:
-                        queue.insert(0, (link, depth + 1))
+                    if allowed(link, official_domains):
+                        position = next((i for i, (seed, _) in enumerate(queue)
+                                         if not allowed(seed, official_domains)), len(queue))
+                        queue.insert(position, (link, depth + 1))
                     else:
                         queue.append((link, depth + 1))
-                company_host = urlparse(page_url).hostname or ''
-                official = any(company_host == d or company_host.endswith('.' + d) for d in domains[7:])
+                official = allowed(page_url, official_domains) and allowed(link, official_domains)
                 if title and (company_matches(title + ' ' + link, company) or official):
-                    evidence = context[:600]
+                    context = f'{evidence[:600]} URL: {link}'
                     if official:
-                        evidence += ' Official investor-relations site for ' + company.get('name', '')
+                        context += ' Official investor-relations site for ' + company.get('name', '')
                     dates = explicit_dates(evidence)
-                    if dates:
-                        evidence += ' Explicit publication-date candidates: ' + ', '.join(dates)
-                    candidates.append({'url': link, 'title': title, 'context': evidence})
+                    candidate = {'url': link, 'title': title, 'context': context, 'publication_dates': dates}
+                    candidates.append(candidate)
+                    if official:
+                        if re.search(r'\b(?:intimation|submission|publication|published|release|filed|filing)\b', title, re.I):
+                            official_disclosures.append((link, evidence))
+                        elif re.search(r'annual[-_ /]*reports?|financial[-_ /]*reports?', title + ' ' + page_url, re.I):
+                            official_reports.append(candidate)
     if queue or time.monotonic() >= deadline:
         incomplete = True
     # A bounded crawl cannot prove that the full site has no other documents.
@@ -224,11 +292,12 @@ def collect(company, domains, public_url, timeout):
         previous = unique.get(item['url'])
         # Keep descriptive titles and dated context when the same filing is
         # linked from several places (e.g. an image, a menu and a report list).
-        if previous is None or (len(explicit_dates(item['context'])), len(item['title'])) > (
-                len(explicit_dates(previous['context'])), len(previous['title'])):
+        if previous is None or (len(item['publication_dates']), len(item['title'])) > (
+                len(previous['publication_dates']), len(previous['title'])):
             unique[item['url']] = item
     ranked = sorted(unique.values(), key=lambda item: (
-        bool(explicit_dates(item['context'])),
+        bool(item['publication_dates']),
         bool(re.search(r'20\d{2}', item['title'] + ' ' + item['url'])),
     ), reverse=True)
-    return ranked[:80], True
+    verified = {report['url']: report for report in official_annual_reports(company, official_reports, official_disclosures)}
+    return (list(verified.values()) + [item for item in ranked if item['url'] not in verified])[:80], True

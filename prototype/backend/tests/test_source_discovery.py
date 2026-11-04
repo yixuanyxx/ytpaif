@@ -46,6 +46,62 @@ class DiscoveryTest(unittest.TestCase):
     def test_coforge_official_site_is_approved(self):
         self.assertTrue(discovery.approved_source_url('https://investors.coforge.com/annual-report', {'name': 'COFORGE LTD'}))
         self.assertFalse(discovery.approved_source_url('https://investors.coforge.com.evil.test/x', {'name': 'COFORGE LTD'}))
+
+    def test_coforge_uses_the_matching_disclosure_date_without_gemini(self):
+        import approved_collector
+        report = {'url': 'https://investors.coforge.com/hubfs/Annual-Report-2025.pdf',
+                  'title': 'FY 2024-25 pdf'}
+        notice = 'https://investors.coforge.com/hubfs/Intimation-of-Annual-Report-FY2025.pdf'
+        company = {'name': 'COFORGE LTD'}
+        candidates = list(approved_collector.official_annual_reports(company, [report], [
+            (notice, 'Intimation of Annual Report FY2025 | August 28, 2025'),
+            (notice, 'Intimation of Annual Report for FY2024 | August 01, 2024'),
+        ]))
+        with patch.dict(discovery.os.environ, {'FINANCIALS_LLM_API_KEY': ''}), \
+                patch.object(approved_collector, 'collect', return_value=(candidates, True)), \
+                patch.object(discovery, 'urlopen') as send:
+            rows = discovery.grounded_search(company, ['annual_report'], '2025', '2026-11-03', False, 20)
+            early = discovery.grounded_search(company, ['annual_report'], '2025', '2025-08-27', False, 20)
+        send.assert_not_called()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['url'], report['url'])
+        self.assertEqual(rows[0]['publication_date'], '2025-08-28')
+        self.assertEqual(rows[0]['publication_date_source_url'], notice)
+        self.assertEqual(early, [])
+
+    def test_issuer_disclosure_matching_handles_other_issuers_and_conflicts(self):
+        from approved_collector import official_annual_reports
+        company = {'name': 'Example Industries'}
+        report = {'title': 'FY 2024–25', 'url': 'https://ir.example.test/files/annual-report-2025.pdf'}
+        notice = ('https://ir.example.test/disclosure/123',
+                  'Submission of Annual Report for FY 2024–25 | April 2, 2026')
+        self.assertEqual(list(official_annual_reports(company, [report], [notice]))[0]
+                         ['official_annual_report']['publication_date'], '2026-04-02')
+        conflicting = (notice[0] + '4', notice[1].replace('April 2', 'April 3'))
+        self.assertEqual(list(official_annual_reports(company, [report], [notice, conflicting])), [])
+
+    def test_scraped_links_require_their_own_document_type_and_date_evidence(self):
+        import approved_collector
+        candidates = [
+            {'url': 'https://reuters.com/example/2025', 'title': 'Example market news 2025',
+             'context': 'Nearby investor presentation dated 2025-06-01', 'publication_dates': ['2025-06-01']},
+            {'url': 'https://reuters.com/example/investor-presentation-2025',
+             'title': 'Example investor presentation 2025', 'context': 'Nearby filing dated 2025-06-01',
+             'publication_dates': []},
+            {'url': 'https://reuters.com/example/transcript-intimation-2025',
+             'title': 'Example earnings call transcript intimation 2025', 'context': '2025-06-01',
+             'publication_dates': ['2025-06-01']},
+            {'url': 'https://reuters.com/example/investor-presentation-fy26',
+             'title': 'Example investor presentation Q1 FY26, published July 23, 2025',
+             'publication_dates': ['2025-07-23']},
+        ]
+        with patch.object(approved_collector, 'collect', return_value=(candidates, True)), \
+                patch.object(discovery, 'urlopen') as send:
+            rows = discovery.grounded_search({'name': 'Example'}, ['investor_presentation', 'earnings_call'],
+                                             '2025', '2026-11-03', False, 20)
+        send.assert_not_called()
+        self.assertEqual(rows, [])
+
     def test_company_matching_ignores_generic_company_suffixes(self):
         import approved_collector
         company = {'name': 'VENTURE CORP LTD'}
