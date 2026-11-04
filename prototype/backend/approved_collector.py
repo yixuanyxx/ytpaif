@@ -157,7 +157,7 @@ def official_annual_reports(company, reports, disclosures):
                                           'publication_date_source_url': disclosure_url}}
 
 
-def collect(company, domains, public_url, timeout, indexed_pages=()):
+def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_domains=()):
     """Return observed links and whether the crawl had restricted/incomplete coverage."""
     from scrapy import Selector
     from scrapy_pages import download
@@ -178,14 +178,14 @@ def collect(company, domains, public_url, timeout, indexed_pages=()):
                 if field in ('website', 'website_url'):
                     root = 'https://' + urlparse(seed).netloc
                     queue.extend([(root + '/investors', 0), (root + '/investor-relations', 0)])
+    queue[0:0] = [(url, 0) for url in indexed_pages if allowed(url, domains)]
     if company.get('name', '').strip().upper() in ('COFORGE LTD', 'COFORGE LIMITED'):
         queue[0:0] = [(COFORGE_REPORTS, 0), (COFORGE_DISCLOSURES, 0),
                       (COFORGE_IR + '/quarter-reports', 0), (COFORGE_IR + '/', 0)]
-    queue.extend((url, 0) for url in indexed_pages if allowed(url, domains))
-    official_domains = domains[7:]
+    official_domains = [domain for domain in domains[7:] if domain not in exchange_domains]
     # Company IR pages tend to contain the most direct filings, so visit them
     # before the large publishers when an official domain is recorded.
-    for domain in [*domains[7:], *domains[:7]]:
+    for domain in [*official_domains, *domains[:7]]:
         queue.append((f'https://{domain}/', 0))
     keywords = re.compile(
         r'investor|financial|annual|report|filing|earnings|results|presentation|sustainab|esg|transcript|disclosure'
@@ -288,9 +288,14 @@ def collect(company, domains, public_url, timeout, indexed_pages=()):
             continue
         selector = Selector(text=page)
         title = selector.css('title::text').get(default='').strip()
+        raw_date = selector.css('meta[property="article:published_time"]::attr(content), meta[name="datePublished"]::attr(content)').get(default='')
+        published = explicit_dates(raw_date[:10])
+        dated_disclosure = (
+            allowed(page_url, official_domains) and len(published) == 1
+            and re.search(r'\b(?:financial statements|financial results|quarterly results|yearly results|financial announcement)\b', title, re.I)
+            and not re.search(r'\b(?:archive|library)\b', title, re.I)
+        )
         if url in indexed_pages and title and company_matches(title, company):
-            raw_date = selector.css('meta[property="article:published_time"]::attr(content), meta[name="datePublished"]::attr(content)').get(default='')
-            published = explicit_dates(raw_date[:10])
             if len(published) == 1:
                 candidates.append({'url': page_url, 'title': title[:300],
                                    'context': f'{title[:300]} Published {published[0]}',
@@ -324,6 +329,13 @@ def collect(company, domains, public_url, timeout, indexed_pages=()):
                     dates = explicit_dates(evidence)
                     candidate = {'url': link, 'title': title, 'context': context, 'publication_dates': dates,
                                  'issuer_hosted': official}
+                    if official and dated_disclosure and not dates and urlparse(link).path.lower().endswith('.pdf'):
+                        # Use the disclosure's date only for a labelled financial attachment.
+                        attachment = re.sub(r'[_/-]+', ' ', title + ' ' + unquote(urlparse(link).path).rsplit('/', 1)[-1])
+                        if (re.search(r'\b(?:FY\s*20\d{2}|20\d{2}\s+(?:results|investor))\b', attachment, re.I)
+                                and re.search(r'\b(?:investor deck|investor presentation|results presentation|results announcement)\b', attachment, re.I)):
+                            candidate['publication_dates'] = published
+                            candidate['publication_date_source_url'] = page_url
                     candidates.append(candidate)
                     if official:
                         if re.search(r'\b(?:intimation|submission|publication|published|release|filed|filing)\b', title, re.I):
@@ -346,4 +358,5 @@ def collect(company, domains, public_url, timeout, indexed_pages=()):
         bool(re.search(r'20\d{2}', item['title'] + ' ' + item['url'])),
     ), reverse=True)
     verified = {report['url']: report for report in official_annual_reports(company, official_reports, official_disclosures)}
-    return (list(verified.values()) + [item for item in ranked if item['url'] not in verified])[:80], True
+    combined = list(verified.values()) + [item for item in ranked if item['url'] not in verified]
+    return combined[:80], incomplete or len(combined) > 80

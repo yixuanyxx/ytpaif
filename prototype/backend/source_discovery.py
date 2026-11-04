@@ -225,7 +225,10 @@ def resolve_issuer_website(company):
             or (len(parts) >= 2 and parts[1] in ('JP', 'JT'))):
         return '', ''
     website = issuer_directory.lookup(company.get('name') or '', ticker, exchange_filings.singapore_today(), public_url)
-    return (website, 'issuer name and ticker directory match') if website else ('', '')
+    if website:
+        return website, 'issuer name and ticker directory match'
+    website = exchange_filings.indexed_issuer_website(company.get('name') or '', ticker, exchange_filings.singapore_today(), public_url)
+    return (website, 'official exchange issuer profile') if website else ('', '')
 
 
 def verify_document_link(row, timeout=20, company=None):
@@ -427,6 +430,8 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     if website and not any(company.get(field) for field in ('website', 'website_url', 'investor_relations_url')):
         company = {**company, 'website': website}
     domains = approved_domains(company)
+    market_domains = exchange_filings.domains(company)
+    crawl_domains = list(dict.fromkeys([*domains, *market_domains]))
     excluded = {normalized_url(url) for url in exclude_urls}
     sites = excluded_sites_by_type or {}
     exchange_website = website if website_basis == 'official exchange issuer directory' else ''
@@ -443,18 +448,61 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
                      'ai_confidence': 80, 'ai_confidence_basis': website_basis,
                      'ai_confidence_reason': 'The directory matches the issuer name and ticker. Date records when the website was checked.'})
     remaining = timeout - (time.monotonic() - started)
-    indexed_pages = web_source_index.discover(company, types, period, domains, remaining)
+    indexed_pages = web_source_index.discover(company, types, period, crawl_domains, remaining,
+                                             pdf_domains=market_domains)
+    indexed_pdfs = [url for url in indexed_pages if urlparse(url).path.lower().endswith('.pdf')]
+    indexed_pages = [url for url in indexed_pages if url not in indexed_pdfs]
     remaining = timeout - (time.monotonic() - started)
-    candidates, incomplete = (approved_collector.collect(company, domains, public_url, min(remaining, 25),
-                                                        indexed_pages=indexed_pages)
+    candidates, incomplete = (approved_collector.collect(company, crawl_domains, public_url, min(remaining, 25),
+                                                        indexed_pages=indexed_pages, exchange_domains=market_domains)
                               if remaining > 1 else ([], True))
+    pdf_urls = list(dict.fromkeys([*indexed_pdfs, *(item['url'] for item in candidates
+                    if approved_collector.allowed(item['url'], market_domains)
+                    and urlparse(item['url']).path.lower().endswith('.pdf'))]))
+    if len(pdf_urls) > 6:
+        incomplete = True
+    for url in pdf_urls[:6]:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 1:
+            incomplete = True
+            break
+        if normalized_url(url) in excluded:
+            continue
+        try:
+            evidence = exchange_filings.pdf_evidence(url, company, public_url, min(remaining, 5))
+        except (OSError, ValueError):
+            incomplete = True
+            continue
+        if not evidence:
+            continue
+        title, published, attachment = evidence
+        if published > cutoff or not attachment.strip() or re.search(r'\b(?:invitation|invite|audio recording)\b', title, re.I):
+            continue
+        label = re.sub(r'[_/.-]+', ' ', title.lower())
+        if re.search(r'\binvestor update\b', label):
+            label += ' investor presentation'
+        kinds = [kind for kind in types if kind != 'company_website'
+                 and re.search(SOURCE_TYPE_EVIDENCE[kind], label)]
+        fiscal_label = re.sub(r"\bFY\s*['’]\s*", 'FY', title, flags=re.I)
+        if not re.search(r'\b(?:FY\s*\d{2,4}|annual report\s+(?:for\s+)?20\d{2})\b', fiscal_label, re.I):
+            fiscal_label = re.sub(r"\bFY\s*['’]\s*", 'FY', attachment[:600], flags=re.I)
+            if not re.search(r'\bFY\s*\d{2,4}\b', fiscal_label, re.I):
+                continue
+        if len(kinds) != 1 or not matches_reporting_year(fiscal_label, period):
+            continue
+        kind = kinds[0]
+        if not website_is_excluded(url, sites.get(kind, ())):
+            rows.append({'url': url, 'title': f'{company["name"]} — {title}', 'source_type': kind,
+                         'publication_date': published, 'period': str(period), 'publication_date_source_url': url,
+                         'ai_confidence': 95, 'ai_confidence_basis': 'official exchange filing cover',
+                         'ai_confidence_reason': 'The exchange PDF cover identifies the issuer, filing subject and date.'})
     # Avoid sending unrelated navigation and other reporting years to Gemini.
     # A reliable publication date must be present in the collected context;
     # candidates without one cannot pass the independent date validation.
     eligible = []
     for candidate in candidates:
         url = candidate['url']
-        if normalized_url(url) in excluded or not specific_document_url(url):
+        if url in pdf_urls or normalized_url(url) in excluded or not specific_document_url(url):
             continue
         official = candidate.get('official_annual_report')
         if official:
@@ -484,10 +532,17 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
                              'publication_date': dates[0], 'period': str(period), 'ai_confidence': 90,
                              'ai_confidence_basis': 'issuer-hosted document listing',
                              'ai_confidence_reason': 'The issuer links this PDF with a matching document type, period and date.'})
+                if candidate.get('publication_date_source_url'):
+                    rows[-1]['publication_date_source_url'] = candidate['publication_date_source_url']
                 continue
             eligible.append({**candidate, 'publication_dates': dates, 'supported_types': supported_types})
+    scraped_candidate_count = len(candidates)
     candidates = eligible
     diagnostics = {'model': FIRST_PASS_MODEL, 'candidate_count': len(candidates),
+                   'issuer_website_available': bool(website or any(company.get(field) for field in
+                                                                  ('website', 'website_url', 'investor_relations_url'))),
+                   'indexed_page_count': len(indexed_pages), 'indexed_pdf_count': len(indexed_pdfs),
+                   'scraped_candidate_count': scraped_candidate_count,
                    'exchange_candidates': sum(row.get('ai_confidence_basis') in ('official regulator filing', 'official exchange issuer directory') for row in rows),
                    'collection_incomplete': incomplete, 'outcome': 'approved_site_collection'}
     if not candidates or (rows and not key):

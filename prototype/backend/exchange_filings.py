@@ -1,17 +1,27 @@
 """Issuer lookup through public Korean and Taiwanese market registries."""
+import io
 import json
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.request import Request, build_opener
 
-from approved_collector import AGENT, ApprovedRedirect, robots_permits
+from approved_collector import AGENT, ApprovedRedirect, allowed, company_matches, explicit_dates, robots_permits
 
 TWSE_DIRECTORY = 'https://openapi.twse.com.tw/v1/opendata/t187ap03_L'
 DART_SEARCH = 'https://dart.fss.or.kr/dsab001/search.ax'
 DART_VIEWER = 'https://opendart.fss.or.kr/xbrl/viewer/main.do'
+MARKET_DOMAINS = {
+    'SP': ('sgx.com',), 'IN': ('nseindia.com', 'bseindia.com'),
+    'HK': ('hkex.com.hk', 'hkexnews.hk'), 'CH': ('sse.com.cn', 'szse.cn', 'cninfo.com.cn', 'bse.cn'),
+    'TT': ('twse.com.tw', 'tpex.org.tw'), 'KS': ('opendart.fss.or.kr', 'kind.krx.co.kr'),
+    'KQ': ('opendart.fss.or.kr', 'kind.krx.co.kr'), 'MK': ('bursamalaysia.com',),
+    'IJ': ('idx.co.id',), 'TB': ('set.or.th',), 'PM': ('pse.com.ph',),
+    'VN': ('hsx.vn', 'hnx.vn'), 'AU': ('asx.com.au',), 'NZ': ('nzx.com',),
+    'BD': ('dsebd.org', 'cse.com.bd'), 'PA': ('psx.com.pk',), 'SL': ('cse.lk',),
+}
 
 
 def listing(company):
@@ -21,8 +31,82 @@ def listing(company):
 
 
 def domains(company):
-    _, market = listing(company)
-    return ['opendart.fss.or.kr'] if market in ('KS', 'KQ') else []
+    parts = (company.get('bloomberg_ticker') or '').upper().split()
+    return list(MARKET_DOMAINS.get(parts[1], ())) if len(parts) >= 2 else []
+
+
+@lru_cache(maxsize=256)
+def indexed_issuer_website(name, ticker, day, public_url):
+    """Use indexed exchange profiles to corroborate an issuer's website."""
+    from scrapy import Selector
+    from issuer_directory import name_words
+    from web_source_index import discover
+
+    company = {'name': name, 'bloomberg_ticker': ticker}
+    hosts = domains(company)
+    if not hosts or not name_words(name):
+        return ''
+    deadline = time.monotonic() + 8
+    websites = set()
+    for page in discover(company, ['company_website'], '', hosts, 3)[:3]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            break
+        try:
+            profile = Selector(text=read(page, public_url, min(remaining, 3)))
+        except (OSError, ValueError):
+            continue
+        headings = profile.css('h1::text, h2::text, [itemprop="legalName"]::text').getall()
+        if not any(name_words(heading) == name_words(name) for heading in headings):
+            continue
+        for anchor in profile.css('a[href]'):
+            label = ' '.join(anchor.xpath('.//text()').getall()).strip()
+            cell = anchor.xpath('ancestor::td[1]/preceding-sibling::*[1]')
+            field = ' '.join(cell.xpath('.//text()').getall()).strip()
+            if not any(re.fullmatch(r'(?:company\s+|official\s+|corporate\s+)?web\s*site\s*:?', text, re.I)
+                       for text in (label, field)):
+                continue
+            try:
+                website = urljoin(page, anchor.attrib['href'])
+                if not allowed(website, hosts):
+                    websites.add(public_url(website).rstrip('/'))
+            except ValueError:
+                continue
+    return next(iter(websites)) if len(websites) == 1 else ''
+
+
+def pdf_evidence(url, company, public_url, timeout):
+    """Read a bounded exchange PDF and require issuer and dated filing-cover evidence."""
+    from pypdf import PdfReader
+    from pypdf.errors import PyPdfError
+    from web_source_index import NoRedirect
+
+    hosts = domains(company)
+    if not allowed(url, hosts) or not urlsplit(url).path.lower().endswith('.pdf'):
+        return None
+    limit = 4 * 1024 * 1024
+    public_url(url)
+    if not robots_permits(url, hosts, public_url, min(timeout, 3)):
+        raise OSError('Exchange PDF could not be checked under the site access rules')
+    opener = build_opener(NoRedirect())
+    with opener.open(Request(url, headers={'User-Agent': AGENT}), timeout=timeout) as response:
+        content = response.read(limit + 1)
+    try:
+        if len(content) > limit or not content.startswith(b'%PDF-'):
+            return None
+        pages = PdfReader(io.BytesIO(content)).pages
+        cover = (pages[0].extract_text() or '')[:12000]
+        subject = re.search(r'^\s*Subject\s*[:–-]+\s*([^\n]+)', cover, re.I | re.M)
+        if not subject or not company_matches(cover, company):
+            return None
+        dates = explicit_dates(cover[:subject.start()])
+        if len(dates) != 1:
+            return None
+        title = ' '.join(subject[1].split())
+        next_page = (pages[1].extract_text() or '')[:2500] if len(pages) > 1 else ''
+        return title, dates[0], next_page
+    except (ValueError, IndexError, PyPdfError):
+        return None
 
 
 def read(url, public_url, timeout, data=None, limit=1_048_576):

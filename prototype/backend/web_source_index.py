@@ -14,14 +14,15 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def discover(company, types, period, domains, timeout):
+def discover(company, types, period, domains, timeout, pdf_domains=()):
     key = os.environ.get('TAVILY_API_KEY', '').strip()
     if not key or not domains or not types or timeout <= 0:
         return []
     name = str(company.get('name') or '').replace('"', ' ').strip()[:120]
     if not name:
         return []
-    categories = ' OR '.join('"' + kind.replace('_', ' ') + '"' for kind in types)
+    labels = {'company_website': 'company profile', 'earnings_call': 'earnings call transcript'}
+    categories = ' OR '.join('"' + labels.get(kind, kind.replace('_', ' ')) + '"' for kind in types)
     payload = {
         'query': f'"{name}" {period} ({categories})',
         'include_domains': list(domains),
@@ -45,6 +46,7 @@ def discover(company, types, period, domains, timeout):
         if not isinstance(url, str) or not allowed(url, domains):
             continue
         url = urldefrag(url)[0]
-        if url not in urls and not urlsplit(url).path.lower().endswith(('.pdf', '.zip')):
+        path = urlsplit(url).path.lower()
+        if url not in urls and not path.endswith('.zip') and (not path.endswith('.pdf') or allowed(url, pdf_domains)):
             urls.append(url)
     return urls[:6]
