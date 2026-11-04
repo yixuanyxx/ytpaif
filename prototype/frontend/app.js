@@ -2248,6 +2248,10 @@ async function viewSources() {
   const sources = (state.sources || []).filter(source => companyIds.has(source.company_id));
   const sourceSummaries = (state.source_summaries || []).filter(summary => companyIds.has(summary.company_id));
   const theme     = (state.themes || []).find(t => t.id === selectedDashboardThemeId);
+  const parts = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+  const part = type => parts.find(p => p.type === type).value;
+  const today = `${part('year')}-${part('month')}-${part('day')}`;
+  const currentYear = Number(part('year'));
   const uploadCompanyId = companies.some(company => company.id === pendingManualUploadCompanyId)
     ? pendingManualUploadCompanyId : '';
   pendingManualUploadCompanyId = '';
@@ -2333,10 +2337,10 @@ async function viewSources() {
           <div style="margin-bottom:12px;padding:10px 12px;background:var(--teal-50);border-radius:6px;border:1px solid var(--teal-200)">
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--teal-900);cursor:pointer">
               <input type="checkbox" id="src-latest-documents" style="width:auto" checked>
-              <span id="latest-documents-label">Use latest documents for the selected reporting year</span>
+              <span id="latest-documents-label">Use today as the evidence cutoff</span>
             </label>
             <div class="text-muted text-small" style="margin-left:22px;margin-top:2px">
-              Find the most up-to-date documents in every source category for the selected financial year, published on or before the cutoff date.
+              Only include documents published on or before the evidence cutoff date.
             </div>
           </div>
 
@@ -2356,17 +2360,13 @@ async function viewSources() {
           <div class="form-section-title">Reporting period & cutoff</div>
           <div class="form-grid">
             <div class="form-group">
-              <label class="field-label">Reporting period</label>
-              <select id="src-period" required>
-                <option value="2026" selected>2026</option>
-                <option value="2025">2025</option>
-                <option value="2024">2024</option>
-              </select>
+              <div class="field-label">Reporting period</div>
+              <div id="src-period">${currentYear - 2} to ${currentYear}</div>
             </div>
             <div class="form-group">
               <label class="field-label">Evidence cutoff date</label>
               <input type="date" id="src-cutoff" disabled>
-              <div class="field-hint">For a completed year, this is 31 December of that year. For the current year, it is today.</div>
+              <div class="field-hint">Defaults to today in Singapore.</div>
             </div>
           </div>
         </div>
@@ -2377,7 +2377,7 @@ async function viewSources() {
           </button>
           ${searchIsActive ? `<button class="btn btn-secondary" id="btn-cancel-source-search" ${latestSearchRun.status === 'cancelling' ? 'disabled' : ''}>Cancel search</button>` : ''}
           <span class="text-muted text-small">
-            Searches approved websites only, across the selected year and two preceding years. Stops when at least 2 sources per type are found or 5 minutes elapse.
+            Searches approved websites only, across the current year and two preceding years. Stops when at least 2 sources per type are found or 5 minutes elapse.
           </span>
         </div>
         <div id="source-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-top:12px">${searchStatus}</div>
@@ -2475,18 +2475,11 @@ async function viewSources() {
 
   const updateLatestDocumentFields = () => {
     const latest = $('#src-latest-documents').checked;
-    const periodInput = $('#src-period');
     const cutoffInput = $('#src-cutoff');
-    const parts = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Singapore',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
-    const part = type => parts.find(p => p.type === type).value;
-    const today = `${part('year')}-${part('month')}-${part('day')}`;
-    const reportingYear = Number(periodInput.value);
-    const currentYear = Number(part('year'));
-    periodInput.disabled = false;
     cutoffInput.disabled = latest;
     $('#latest-documents-label').textContent = latest
-      ? 'Use latest documents for the selected reporting year'
-      : 'Use documents from the selected reporting year';
+      ? 'Use today as the evidence cutoff'
+      : 'Use a custom evidence cutoff';
     for (const input of [cutoffInput]) {
       input.style.backgroundColor = latest ? '#f1f5f9' : '';
       input.style.color = latest ? '#64748b' : '';
@@ -2494,9 +2487,7 @@ async function viewSources() {
       input.setAttribute?.('aria-disabled', String(latest));
     }
     if (latest) {
-      cutoffInput.value = Number.isInteger(reportingYear) && reportingYear >= 1000 && reportingYear < currentYear
-        ? `${reportingYear}-12-31`
-        : today;
+      cutoffInput.value = today;
     } else {
       cutoffInput.value = theme?.cutoff || today;
     }
@@ -2504,9 +2495,6 @@ async function viewSources() {
   $('#select-all-companies').onclick = () => document.querySelectorAll('.company-search-item').forEach(item => { const input = item.querySelector?.('input'); if (input && !input.disabled) input.checked = true; });
   $('#deselect-all-companies').onclick = () => document.querySelectorAll('.company-search-item').forEach(item => { const input = item.querySelector?.('input'); if (input) input.checked = false; });
   $('#src-latest-documents').addEventListener('change', updateLatestDocumentFields);
-  $('#src-period').addEventListener('input', () => {
-    if ($('#src-latest-documents').checked) updateLatestDocumentFields();
-  });
   updateLatestDocumentFields();
   updateSourceCompanyCoverage(new Map(sourceSummaries.map(summary => [summary.company_id, summary])));
 
@@ -2515,7 +2503,6 @@ async function viewSources() {
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
     const selectedTypes = Array.from($$('input[name="source_types"]:checked')).map(cb => cb.value);
-    const period = $('#src-period')?.value || '2026';
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
     const latestDocuments = $('#src-latest-documents')?.checked ?? true;
     if (selectedCompanyIds.length === 0) {
@@ -2524,10 +2511,6 @@ async function viewSources() {
     }
     if (selectedTypes.length === 0) {
       showAlert('Select at least one source type per search.', 'Source type selection');
-      return;
-    }
-    if (!/^\d{4}$/.test(period)) {
-      showAlert('Enter a four-digit reporting year, for example 2026.', 'Invalid reporting year');
       return;
     }
     const button = $('#btn-run-search');
@@ -2541,7 +2524,6 @@ async function viewSources() {
       discover_web: true,
       company_ids: selectedCompanyIds,
       source_types: selectedTypes,
-      period: period,
       cutoff: cutoff,
       latest_documents: latestDocuments
     });

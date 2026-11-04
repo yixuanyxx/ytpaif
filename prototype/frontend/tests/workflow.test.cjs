@@ -450,11 +450,9 @@ test('Source Documents has an independent portfolio selector and scopes the AI s
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Samsung/);
   assert.equal(storage.get('theme-lab-source-portfolio-selection'),'portfolio-a');
+  const year = Number(new Intl.DateTimeFormat('en', {timeZone:'Asia/Singapore',year:'numeric'}).format(new Date()));
+  assert.match(node('#page-content').innerHTML, new RegExp(`<div id="src-period">${year - 2} to ${year}</div>`));
   node('#src-latest-documents').checked = true;
-  assert.equal(node('#src-period').disabled,false);
-  node('#src-period').value = '2025';
-  node('#src-period').input();
-  assert.equal(node('#src-cutoff').value,'2025-12-31');
 
   context.document.querySelectorAll = selector =>
     selector === 'input[name="company_ids"]:checked' ? [{value:'company-a'}] :
@@ -464,7 +462,7 @@ test('Source Documents has an independent portfolio selector and scopes the AI s
   assert.equal(run('searchCalls[0].data.portfolio_id'),'portfolio-a');
   assert.equal(run('searchCalls[0].data.discover_web'),true);
   assert.equal(run('searchCalls[0].data.latest_documents'),true);
-  assert.equal(run('searchCalls[0].data.period'),'2025');
+  assert.equal(run('searchCalls[0].data.period'),undefined);
   assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.company_ids'))),['company-a']);
   assert.deepEqual(JSON.parse(JSON.stringify(run('searchCalls[0].data.source_types'))),['annual_report']);
 });

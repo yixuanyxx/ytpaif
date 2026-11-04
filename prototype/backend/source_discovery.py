@@ -7,6 +7,7 @@ import re
 import socket
 import time
 import threading
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from urllib.error import HTTPError, URLError
@@ -463,15 +464,14 @@ def start(app, data):
         raise ValueError('Select at least one source type')
     if any(t not in TYPES for t in types):
         raise ValueError('Unknown source type selected')
-    if not re.fullmatch(r'\d{4}', str(data.get('period', ''))):
-        raise ValueError('Reporting period must be a four-digit year, for example 2025')
     types = list(dict.fromkeys(types))
     if len(types) > MAX_SOURCE_TYPES_PER_SEARCH:
         raise ValueError(f'Select at most {MAX_SOURCE_TYPES_PER_SEARCH} source types per search')
-    period = str(data.get('period')).strip()
+    today = datetime.now(timezone(timedelta(hours=8))).date()
+    period = str(today.year)
     # Search a bounded three-year window, newest first.  The two earlier years
     # are only queried for company/source-type gaps left by the newer years.
-    search_periods = [str(int(period) - offset) for offset in range(3)]
+    search_periods = [str(today.year - offset) for offset in range(3)]
     if not data.get('portfolio_id'):
         raise ValueError('Select a portfolio in Portfolio Exposure Dashboard')
     portfolio = app.get('portfolio_imports', data['portfolio_id'])
@@ -487,7 +487,7 @@ def start(app, data):
         if any(cid not in company_ids for cid in selected):
             raise ValueError('Selected companies must belong to the portfolio')
         company_ids = list(dict.fromkeys(selected))
-    cutoff = data.get('cutoff') or app.now()[:10]
+    cutoff = data.get('cutoff') or today.isoformat()
     app.parse_date(cutoff)
     company_index = {company['id']: company for company in app.all_records('companies')}
     if any(cid not in company_index for cid in company_ids):

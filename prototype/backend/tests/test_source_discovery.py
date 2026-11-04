@@ -203,7 +203,9 @@ class DiscoveryTest(unittest.TestCase):
                               all_records=lambda kind: [{'id': cid, 'name': cid} for cid in ('a', 'b')],
                               ident=lambda kind: 'job', now=lambda: 'now', parse_date=lambda value: value,
                               put=lambda kind, record: record)
-        with patch('source_jobs.Queue') as queue, patch('source_jobs.ensure_worker'):
+        with patch('source_jobs.Queue') as queue, patch('source_jobs.ensure_worker'), \
+                patch.object(discovery, 'datetime', wraps=discovery.datetime) as clock:
+            clock.now.return_value = discovery.datetime(2026, 1, 1)
             result = discovery.start(app, {'portfolio_id': 'portfolio', 'company_ids': ['a'],
                 'source_types': ['annual_report', 'annual_report'], 'period': '2025',
                 'cutoff': '2026-11-02'})['search_run']
@@ -213,8 +215,8 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result['search_models'], {'first_pass': 'gemini-3.5-flash-lite',
                                                  'missing_results': 'gemini-3.5-flash-lite'})
         self.assertEqual(result['storage_mode'], 'url_only')
-        self.assertEqual(result['period'], '2025')
-        self.assertEqual(result['search_periods'], ['2025', '2024', '2023'])
+        self.assertEqual(result['period'], '2026')
+        self.assertEqual(result['search_periods'], ['2026', '2025', '2024'])
         self.assertEqual(result['time_limit_seconds'], 300)
         self.assertGreater(result['deadline_unix'], discovery.time.time())
         self.assertEqual(len(result['missing']), 1)
@@ -226,10 +228,6 @@ class DiscoveryTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'source type'):
                     discovery.start(None, {'source_types': types})
             queue.assert_not_called()
-
-    def test_reporting_year_is_required_even_when_using_latest_documents(self):
-        with self.assertRaisesRegex(ValueError, 'four-digit year'):
-            discovery.start(None, {'latest_documents': True, 'period': '', 'source_types': ['annual_report']})
 
     def test_all_six_source_types_are_supported_in_one_search(self):
         self.assertEqual(discovery.MAX_SOURCE_TYPES_PER_SEARCH, 6)
