@@ -389,6 +389,7 @@ test('Portfolio Import defaults to Excel import, lists saved portfolios, and ope
   run("selectedDashboardPortfolioId=''");
   portfolioCards[0].click();
   assert.equal(run('selectedDashboardPortfolioId'),'');
+  assert.equal(run('selectedSourcePortfolioId'),'portfolio-1');
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.match(node('#page-content').innerHTML,/Portfolio wt/);
   assert.equal(node('#page-content').innerHTML.includes('20.0%'),true);
@@ -607,7 +608,7 @@ test('Step 3 renders six source categories even before uploads, and counts disti
   await run('viewSources()');
   assert.match(node('#page-content').innerHTML,/Market Cap/);
   assert.match(node('#page-content').innerHTML,/Net Revenue/);
-  assert.match(node('#page-content').innerHTML,/Expand all 6 sources/);
+  assert.match(node('#page-content').innerHTML,/Expand all companies/);
   const html = run(`sourceLibrary(
     [{company_id:'a',source_type:'annual_report'}, {company_id:'a',source_type:'annual_report'}],
     [{id:'a',name:'TSMC'}], {rows:[{company_id:'a'}]}
@@ -620,19 +621,55 @@ test('Financials use evidence and keep missing values unknown',()=>{
   assert.equal(run(`getCompanyFinancials({id:'a',bloomberg_ticker:'2330 TT'}, {}, [], []).mcap`),'—');
   assert.equal(run(`getCompanyFinancials({id:'a'}, {}, [{filename:'report.txt',financial_facts:[{metric:'revenue',display:'USD 100 million',page:2}]}], []).rev`),'USD 100 million');
 });
+test('Financial citations count documents separately from source categories',()=>{
+  const {run} = setup();
+  const html = run(`sourceLibrary([], [{
+    company_id:'a', count:12,
+    types:Object.fromEntries(SIX_SOURCE_TYPES.map(({type}) => [type, 2]))
+  }], [{
+    id:'a', name:'TSMC', market_cap:'USD 980.0B', net_revenue:'USD 89.6B',
+    market_cap_citation:'market cap 980.0b (4/6 sources)',
+    net_revenue_citation:'net revenue 89.6 billion (4/6 sources)'
+  }], {rows:[{company_id:'a'}]})`);
+  assert.match(html,/market cap 980\.0b \(4\/12 documents\)/);
+  assert.match(html,/net revenue 89\.6 billion \(4\/12 documents\)/);
+  assert.match(html,/6 \/ 6/);
+  assert.match(html,/View documents/);
+  assert.equal(run(`getCompanyFinancials({id:'a'}, {}, [
+    {financial_facts:Array(2).fill({metric:'revenue',display:'USD 100 million'})}, {}
+  ], []).revCitation`), 'net revenue usd 100 million (1/2 documents)');
+});
 test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
-  const {run,node} = setup(); await run('viewAnalysis()');
+  const {run,node} = setup();
+  run(`state.themes=[{id:'theme-a',approved:true}];
+    state.portfolio_imports=[
+      {id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b',excluded:true}]},
+      {id:'korea',theme_id:'theme-a',name:'Korea Growth',rows:[{company_id:'b'}]}
+    ];
+    state.source_summaries=[{company_id:'a',count:3}];
+    selectedDashboardThemeId='theme-a';
+    selectedSourcePortfolioId='core';`);
+  await run('viewAnalysis()');
   assert.equal(node('#page-title').textContent,'Calculate Exposure');
   assert.match(node('#page-content').innerHTML,/Company-level Exposure/);
   assert.doesNotMatch(node('#page-content').innerHTML,/analysis-company-search|Search company name/);
   assert.doesNotMatch(node('#page-content').innerHTML,/max-height:480px;overflow-y:auto/);
   assert.match(node('#page-content').innerHTML,/case-detail-panel/);
+  assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Asia Core<\/h2>/);
+  assert.match(node('#page-content').innerHTML,/TSMC/);
+  assert.match(node('#page-content').innerHTML,/3 docs/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Targeted passage analysis|Create manual case|btn-open-manual/);
   assert.match(node('#page-content').innerHTML,/Analyse all ready companies/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Confidence color guide|Revenue figures align across all credible sources/);
   const sidebar = fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');
   assert.match(sidebar,/<strong>Calculate Exposure<\/strong>/);
   assert.doesNotMatch(sidebar,/data-view="review"/);
+  run("renderPortfolioDetails(state.portfolio_imports[1])");
+  await run('viewAnalysis()');
+  assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Korea Growth<\/h2>/);
+  assert.match(node('#page-content').innerHTML,/Samsung/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
 });
 test('Queue Upload opens manual upload with the clicked company selected',async()=>{
   const {run,node} = setup();

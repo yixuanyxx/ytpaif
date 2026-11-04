@@ -416,6 +416,15 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(res['analysed_count'], 1)
         self.assertEqual({e['company_id'] for e in res['errors']}, {'READY_B', 'TOO_LONG'})
 
+        self.app.put('portfolio_imports', {'id': 'scoped', 'theme_id': self.theme['id'],
+                                          'rows': [{'company_id': 'READY_A'},
+                                                   {'company_id': 'READY_B', 'excluded': True}]})
+        with patch.object(self.app, 'analyze', return_value={'id': 'case_ready'}) as mocked:
+            scoped = self.app.analyze_all({'theme_id': self.theme['id'], 'portfolio_id': 'scoped'})
+        self.assertEqual([item['company_id'] for item in scoped['results']], ['READY_A'])
+        self.assertEqual(scoped['errors'], [])
+        mocked.assert_called_once()
+
     def test_generate_handles_counts_gracefully(self):
         # Non-int or 'auto'
         themes_before = self.app.all_records('themes')

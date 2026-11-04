@@ -864,6 +864,13 @@ def analyze_all(d):
         raise ValueError('No theme selected for batch analysis')
     theme = get('themes', theme_id)
     companies = all_records('companies')
+    if d.get('portfolio_id'):
+        portfolio = get('portfolio_imports', d['portfolio_id'])
+        if portfolio.get('theme_id') != theme_id:
+            raise ValueError('Selected portfolio does not belong to the analysis theme')
+        company_ids = {row['company_id'] for row in portfolio.get('rows', [])
+                       if not row.get('excluded') and row.get('company_id') not in (None, '', 'CASH')}
+        companies = [company for company in companies if company['id'] in company_ids]
     sources = all_records('sources')
     cases = all_records('cases')
 

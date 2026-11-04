@@ -2106,7 +2106,9 @@ function bindEditTable(rows) {
       state.companies = [...companiesById.values()];
       updateSidebarBadges();
       selectedDashboardPortfolioId = res.import.id;
+      selectedSourcePortfolioId = res.import.id;
       saveDashboardSelection();
+      saveSourcePortfolioSelection();
       notice(`"${name}" imported — ${clean.length} companies registered and snapshot created. Dashboard is ready.`);
       render();
     }, 'Importing holdings…');
@@ -2170,6 +2172,8 @@ function refreshConfirmButton(rows) {
 
 // ─── Phase 3: Already-imported view ──────────────────────────────────────────
 function renderPortfolioDetails(portfolio) {
+  selectedSourcePortfolioId = portfolio.id;
+  saveSourcePortfolioSelection();
   const rows = portfolio.rows || [];
   $('#page-content').innerHTML = `
     <div class="panel">
@@ -2229,12 +2233,11 @@ function renderExistingPortfolioCards() {
 // ══════════════════════════════════════════════════════
 // VIEW: SOURCE DOCUMENTS  (YTP-17, YTP-18)
 // ══════════════════════════════════════════════════════
-async function viewSources() {
-  setPageHeader('STEP 3', 'Source Documents',
-    'Find and upload company filings');
-  const portfolios = state.portfolio_imports || [];
-  const eligiblePortfolios = portfolios.filter(p => p.theme_id === selectedDashboardThemeId);
-  const activeSearch = activeSourceSearch();
+function sourcePortfolios() {
+  return (state.portfolio_imports || []).filter(p => p.theme_id === selectedDashboardThemeId);
+}
+
+function activeSourcePortfolio(eligiblePortfolios = sourcePortfolios(), runningPortfolioId) {
   let savedSourcePortfolioId = '';
   try {
     savedSourcePortfolioId = localStorage.getItem(SOURCE_PORTFOLIO_STORAGE_KEY) || '';
@@ -2242,19 +2245,31 @@ async function viewSources() {
     // Keep using the current in-memory selection when browser storage is unavailable.
   }
   const preferredSourcePortfolioId = selectedSourcePortfolioId || savedSourcePortfolioId;
-  const sourcePortfolio = eligiblePortfolios.find(p => p.id === activeSearch?.portfolio_id)
+  const sourcePortfolio = eligiblePortfolios.find(p => p.id === runningPortfolioId)
     || eligiblePortfolios.find(p => p.id === preferredSourcePortfolioId)
+    || eligiblePortfolios.find(p => p.id === selectedDashboardPortfolioId)
     || eligiblePortfolios.at(-1);
   selectedSourcePortfolioId = sourcePortfolio?.id || '';
   saveSourcePortfolioSelection();
-  const portfolio = sourcePortfolio;
+  return sourcePortfolio;
+}
+
+function portfolioCompanyIds(portfolio) {
+  return new Set((portfolio?.rows || []).filter(row => !row.excluded && row.company_id && row.company_id !== 'CASH').map(row => row.company_id));
+}
+
+async function viewSources() {
+  setPageHeader('STEP 3', 'Source Documents',
+    'Find and upload company filings');
+  const eligiblePortfolios = sourcePortfolios();
+  const activeSearch = activeSourceSearch();
+  const portfolio = activeSourcePortfolio(eligiblePortfolios, activeSearch?.portfolio_id);
   if (!portfolio) {
     $('#page-actions').innerHTML = '';
     $('#page-content').innerHTML = '<div class="panel">Select a theme in Portfolio Exposure Dashboard and import a portfolio to view source documents.</div>';
     return;
   }
-  const portfolioRows = portfolio?.rows || [];
-  const companyIds = new Set(portfolioRows.map(row => row.company_id).filter(id => id && id !== 'CASH'));
+  const companyIds = portfolioCompanyIds(portfolio);
   const companies = (state.companies || []).filter(company => companyIds.has(company.id));
   const sources = (state.sources || []).filter(source => companyIds.has(source.company_id));
   const sourceSummaries = (state.source_summaries || []).filter(summary => companyIds.has(summary.company_id));
@@ -2611,7 +2626,7 @@ async function viewSources() {
   };
 }
 
-function getCompanyFinancials(comp, row, compSources, cases) {
+function getCompanyFinancials(comp, row, compSources, cases, documentCount = compSources?.length || 0) {
   // 1. Direct stored consensus on company record
   let mcap = comp?.market_cap || comp?.mcap;
   let rev = comp?.net_revenue || comp?.revenue || comp?.rev;
@@ -2619,10 +2634,9 @@ function getCompanyFinancials(comp, row, compSources, cases) {
   let revCitation = comp?.net_revenue_citation || (comp?.net_revenue_sources ? `net revenue ${rev} (${comp.net_revenue_sources})` : null);
 
   // 2. Derive consensus from sources' financial_facts if available
-  const facts = (compSources || []).flatMap(source => (source.financial_facts || []).map(fact => ({
+  const facts = (compSources || []).flatMap((source, index) => (source.financial_facts || []).map(fact => ({
     ...fact,
-    source_type: source.source_type,
-    filename: source.filename
+    documentIndex: index
   }))).sort((a, b) => (b.publication_date || '').localeCompare(a.publication_date || ''));
 
   if (facts.length > 0) {
@@ -2633,24 +2647,24 @@ function getCompanyFinancials(comp, row, compSources, cases) {
       const counts = {};
       const phrases = {};
       revFacts.forEach(f => {
-        counts[f.display] = (counts[f.display] || 0) + 1;
+        (counts[f.display] ||= new Set()).add(f.documentIndex);
         if (f.citation) phrases[f.display] = f.citation;
       });
-      const topRev = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+      const topRev = Object.keys(counts).sort((a, b) => counts[b].size - counts[a].size)[0];
       rev = topRev;
-      revCitation = phrases[topRev] || `net revenue ${topRev.toLowerCase()} (${counts[topRev]}/6 sources)`;
+      revCitation = phrases[topRev] || `net revenue ${topRev.toLowerCase()} (${counts[topRev].size}/${documentCount} documents)`;
     }
 
     if (mcapFacts.length > 0 && !mcap) {
       const counts = {};
       const phrases = {};
       mcapFacts.forEach(f => {
-        counts[f.display] = (counts[f.display] || 0) + 1;
+        (counts[f.display] ||= new Set()).add(f.documentIndex);
         if (f.citation) phrases[f.display] = f.citation;
       });
-      const topMcap = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+      const topMcap = Object.keys(counts).sort((a, b) => counts[b].size - counts[a].size)[0];
       mcap = topMcap;
-      mcapCitation = phrases[topMcap] || `market cap ${topMcap.toLowerCase()} (${counts[topMcap]}/6 sources)`;
+      mcapCitation = phrases[topMcap] || `market cap ${topMcap.toLowerCase()} (${counts[topMcap].size}/${documentCount} documents)`;
     }
   }
 
@@ -2663,11 +2677,19 @@ function getCompanyFinancials(comp, row, compSources, cases) {
     revCitation = `Approved case ${approved.id}`;
   }
 
+  // Use the library's document total for stored citations, including legacy ratios.
+  const documentCitation = citation => citation?.replace(
+    /(\()?\b(\d+)\s*\/\s*\d+\s+sources?\b(\))?/gi,
+    (_, open = '', support, close = '') => Number(support) <= documentCount && documentCount > 0
+      ? `${open}${support}/${documentCount} documents${close}`
+      : ''
+  ).replace(/^\s*·\s*/, '').trim();
+
   return {
     mcap: mcap || '—',
     rev: rev || '—',
-    mcapCitation: mcapCitation || 'No sourced market capitalisation',
-    revCitation: revCitation || 'No sourced revenue'
+    mcapCitation: documentCitation(mcapCitation) || 'No sourced market capitalisation',
+    revCitation: documentCitation(revCitation) || 'No sourced revenue'
   };
 }
 
@@ -2780,7 +2802,7 @@ function sourceCoverageBadge(summary) {
 async function updateSourceLibraryProgress(previousSummaries) {
   const portfolio = (state.portfolio_imports || []).find(p => p.id === selectedSourcePortfolioId);
   if (!portfolio) return;
-  const companyIds = new Set((portfolio.rows || []).map(row => row.company_id));
+  const companyIds = portfolioCompanyIds(portfolio);
   const summaries = (state.source_summaries || []).filter(s => companyIds.has(s.company_id));
   const summaryById = new Map(summaries.map(s => [s.company_id, s]));
   const previousById = new Map((previousSummaries || []).map(s => [s.company_id, s]));
@@ -2799,14 +2821,24 @@ async function updateSourceLibraryProgress(previousSummaries) {
     const badge = document.getElementById(`src-coverage-${company.id}`);
     if (badge) badge.innerHTML = sourceCoverageBadge(summary);
     const detail = document.getElementById(`src-detail-${company.id}`);
-    if (!detail || detail.style.display === 'none' ||
-        JSON.stringify(previousById.get(company.id)?.types || {}) === JSON.stringify(summary?.types || {})) continue;
-    await loadCompanySources(company.id);
-    if (currentView !== 'sources' || detail.style.display === 'none') continue;
+    if (JSON.stringify(previousById.get(company.id)?.types || {}) === JSON.stringify(summary?.types || {})) continue;
+    const isOpen = detail && detail.style.display !== 'none';
+    if (isOpen) await loadCompanySources(company.id);
+    if (currentView !== 'sources') continue;
+    const master = document.getElementById(`src-master-${company.id}`);
+    const financialCells = master?.querySelectorAll?.('.source-financial');
+    if (!isOpen && !financialCells?.length) continue;
     const template = document.createElement('template');
     template.innerHTML = sourceLibrary(state.sources || [], summaries, [company], portfolio);
-    const updated = template.content.querySelector('.source-detail-row');
-    if (updated) detail.innerHTML = updated.innerHTML;
+    if (financialCells?.length) {
+      const updatedMaster = template.content.querySelector('.source-master-row');
+      updatedMaster.querySelectorAll('.source-financial').forEach((cell, index) => {
+        financialCells[index].innerHTML = cell.innerHTML;
+      });
+    }
+    if (isOpen && detail.style.display !== 'none') {
+      detail.innerHTML = template.content.querySelector('.source-detail-row').innerHTML;
+    }
   }
 }
 
@@ -2834,7 +2866,7 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
       && (s.source_type !== 'other' || !s.theme_id || s.theme_id === portfolio.theme_id));
     const compSourceSummary = sourceSummaries.find(s => s.company_id === c.id);
     const row = rowMap.get(c.id) || {};
-    const financials = getCompanyFinancials(c, row, compSources, cases);
+    const financials = getCompanyFinancials(c, row, compSources, cases, compSourceSummary?.count);
     return {
       index: idx + 1,
       comp: c,
@@ -2853,7 +2885,7 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
           style="width:100%;padding:9px 12px;border:1px solid var(--slate-300);border-radius:6px;font-size:13px">
       </div>
       <button class="btn btn-sm btn-secondary" onclick="toggleAllSourceRows()" id="btn-toggle-all-sources">
-        Expand all 6 sources
+        Expand all companies
       </button>
       <button class="btn btn-sm btn-primary" onclick="populatePortfolioFinancials('${esc(portfolio.id)}')" id="btn-populate-financials">
         ✦ Populate Market Cap &amp; Revenue
@@ -2905,16 +2937,16 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
                 <td style="font-family:monospace;font-size:12px;color:var(--slate-700);font-weight:600">
                   ${esc(sedol)}
                 </td>
-                <td class="td-num" style="font-weight:700;font-size:13px;color:var(--slate-800)">
+                <td class="td-num source-financial" style="font-weight:700;font-size:13px;color:var(--slate-800)">
                   ${esc(financials.mcap)}<div class="text-muted text-small">${esc(financials.mcapCitation)}</div>
                 </td>
-                <td class="td-num" style="font-weight:700;font-size:13px;color:var(--teal-700)">
+                <td class="td-num source-financial" style="font-weight:700;font-size:13px;color:var(--teal-700)">
                   ${esc(financials.rev)}<div class="text-muted text-small">${esc(financials.revCitation)}</div>
                 </td>
                 <td id="src-coverage-${esc(comp.id)}" style="text-align:center">${sourceCoverageBadge(compSourceSummary)}</td>
                 <td style="text-align:right" onclick="event.stopPropagation()">
                   <button class="btn btn-sm btn-secondary" onclick="toggleSourceRow('${esc(comp.id)}')" style="font-size:11.5px;padding:4px 9px">
-                    View 6 sources
+                    View documents
                   </button>
                 </td>
               </tr>
@@ -3054,7 +3086,7 @@ window.toggleAllSourceRows = async function() {
   if (!anyClosed) {
     details.forEach(d => d.style.display = 'none');
     chevs.forEach(c => c.style.transform = 'rotate(0deg)');
-    if (btn) btn.textContent = 'Expand all 6 sources';
+    if (btn) btn.textContent = 'Expand all companies';
     return;
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Loading sources…'; }
@@ -3064,10 +3096,10 @@ window.toggleAllSourceRows = async function() {
     document.querySelectorAll('.source-detail-row').forEach(d => d.style.display = 'table-row');
     document.querySelectorAll('.src-chevron').forEach(c => c.style.transform = 'rotate(90deg)');
     const refreshedButton = document.getElementById('btn-toggle-all-sources');
-    if (refreshedButton) refreshedButton.textContent = 'Collapse all 6 sources';
+    if (refreshedButton) refreshedButton.textContent = 'Collapse all companies';
   } catch (error) {
     notice(`Could not load all source documents: ${error.message}`, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Expand all 6 sources'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Expand all companies'; }
   }
 };
 
@@ -3167,16 +3199,20 @@ async function viewAnalysis() {
   setPageHeader('STEP 4', 'Calculate Exposure',
     'Extract revenue facts, audit classifications with Claude Sonnet 5, and review cases');
 
-  const theme     = (state.themes||[]).filter(t=>t.approved).at(-1);
-  const companies = state.companies || [];
-  const sources   = state.sources   || [];
-  const cases     = (state.cases    || []).filter(c => !theme || c.theme_id === theme?.id);
+  const portfolio = activeSourcePortfolio();
+  const companyIds = portfolioCompanyIds(portfolio);
+  const theme = (state.themes || []).find(t => t.approved && t.id === portfolio?.theme_id);
+  const companies = (state.companies || []).filter(c => companyIds.has(c.id));
+  const counts = new Map((state.source_summaries || []).map(summary => [summary.company_id, summary.count]));
+  const sources = state.sources || [];
+  const cases = (state.cases || []).filter(c => companyIds.has(c.company_id) && c.theme_id === theme?.id);
   const approved  = cases.filter(c => c.review_status === 'approved');
   const pending   = cases.filter(c => c.review_status === 'needs_review');
 
   const companyProgress = companies.map(c => {
     const compSources = sources.filter(s => s.company_id === c.id);
-    const hasSrc      = compSources.length > 0;
+    const sourceCount = counts.get(c.id) ?? compSources.length;
+    const hasSrc = sourceCount > 0;
     const caseRec     = cases.find(x => x.company_id === c.id);
     let status, color;
     if (caseRec?.review_status === 'approved')          { status = 'Approved';        color = 'green'; }
@@ -3184,7 +3220,7 @@ async function viewAnalysis() {
     else if (caseRec?.review_status === 'rejected')     { status = 'Rejected';         color = 'red'; }
     else if (hasSrc)                                    { status = 'Ready to analyse'; color = 'neutral'; }
     else                                                { status = 'No sources';       color = 'red'; }
-    return { c, hasSrc, status, color, caseRec, compSources };
+    return { c, hasSrc, status, color, caseRec, sourceCount };
   });
 
   const readyCount = companyProgress.filter(p => p.hasSrc && p.status === 'Ready to analyse').length;
@@ -3209,6 +3245,7 @@ async function viewAnalysis() {
   const selectedCaseId = cases.find(c => c.review_status === 'needs_review')?.id || cases.at(-1)?.id || null;
 
   $('#page-content').innerHTML = `
+    ${portfolio ? `<h2 id="analysis-portfolio-name">${esc(portfolio.name)}</h2>` : ''}
     <div class="grid-1-2" style="align-items:start">
 
       <!-- Left Column: Queue & Cases -->
@@ -3240,7 +3277,7 @@ async function viewAnalysis() {
                 </tr>
               </thead>
               <tbody id="analysis-queue-rows">
-                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, compSources }) => {
+                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount }) => {
                   const pt = caseRec?.estimate?.point != null ? pct(caseRec.estimate.point) : (caseRec ? '—' : '');
                   const conf = caseRec?.classification_confidence || '';
                   const confDisplay = conf === 'high' ? 'High · 92%' : (conf === 'medium' ? 'Med · 70%' : (conf === 'low' ? 'Low · 35%' : '—'));
@@ -3255,8 +3292,8 @@ async function viewAnalysis() {
                         <div class="ticker" style="font-size:10.5px">${esc(c.bloomberg_ticker || c.id)}</div>
                       </td>
                       <td>
-                        <span class="badge ${compSources.length > 0 ? 'neutral' : 'amber'}" style="font-size:11px">
-                          ${compSources.length} docs
+                        <span class="badge ${hasSrc ? 'neutral' : 'amber'}" style="font-size:11px">
+                          ${sourceCount} docs
                         </span>
                       </td>
                       <td class="td-num" style="font-weight:700">
@@ -3321,7 +3358,7 @@ async function viewAnalysis() {
   if (btnAll) {
     btnAll.onclick = () => run(async () => {
       showLoading(`Running batch AI extraction & classification across ready companies...`);
-      const res = await api('analyze_all', { theme_id: theme.id });
+      const res = await api('analyze_all', { theme_id: theme.id, portfolio_id: portfolio.id });
       await refresh();
       notice(`Batch analysis complete: ${res.analysed_count} companies sent to review.` +
         (res.errors?.length ? ` ${res.errors.length} failed: ${res.errors.map(e => `${e.company_name}: ${e.error}`).join('; ')}` : ''),
@@ -3335,11 +3372,10 @@ async function viewAnalysis() {
   }
 }
 
-function analysisSelectPanel(selectedCompanyId, companies, sources, state) {
+function analysisSelectPanel(selectedCompanyId, companies, sources, state, theme) {
   const company = selectedCompanyId ? companies.find(c=>c.id===selectedCompanyId) : null;
   const compSources = company ? sources.filter(s=>s.company_id===company.id) : [];
   const allEvidence = compSources.flatMap(s => s.evidence||[]);
-  const theme = (state.themes||[]).filter(t=>t.approved).at(-1);
 
   return `
     <div class="panel">
@@ -3424,14 +3460,21 @@ function analysisSelectPanel(selectedCompanyId, companies, sources, state) {
     </div>`;
 }
 
-window.openAnalysisPanel = function(companyId) {
-  const companies = state.companies || [];
-  const sources   = state.sources   || [];
+window.openAnalysisPanel = async function(companyId) {
+  const portfolio = activeSourcePortfolio();
+  const companyIds = portfolioCompanyIds(portfolio);
+  const companies = (state.companies || []).filter(company => companyIds.has(company.id));
+  const theme = (state.themes || []).find(t => t.approved && t.id === portfolio?.theme_id);
   const panel = $('#case-detail-panel') || $('#analysis-panel');
-  if (panel) {
-    panel.innerHTML = analysisSelectPanel(companyId, companies, sources, state);
-    bindAnalysisPanel(companyId);
+  if (!panel || (companyId && !companyIds.has(companyId))) return;
+  try {
+    if (companyId) await loadCompanySources(companyId);
+    if (currentView !== 'analysis') return;
+    panel.innerHTML = analysisSelectPanel(companyId, companies, state.sources || [], state, theme);
+    bindAnalysisPanel(companyId, theme);
     panel.scrollIntoView({ behavior: 'smooth' });
+  } catch (error) {
+    notice(error.message, 'error');
   }
 };
 
@@ -3440,8 +3483,7 @@ window.openManualUploadForCompany = function(companyId) {
   setView('sources');
 };
 
-function bindAnalysisPanel(companyId) {
-  const theme = (state.themes||[]).filter(t=>t.approved).at(-1);
+function bindAnalysisPanel(companyId, theme) {
   const allCheckboxes = () => $$('.ev-checkbox');
 
   // Char count
