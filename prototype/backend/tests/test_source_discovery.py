@@ -285,9 +285,11 @@ class DiscoveryTest(unittest.TestCase):
                     discovery.start(None, {'source_types': types})
             queue.assert_not_called()
 
-    def test_all_six_source_types_are_supported_in_one_search(self):
-        self.assertEqual(discovery.MAX_SOURCE_TYPES_PER_SEARCH, 6)
-        self.assertEqual(len(discovery.TYPES), 6)
+    def test_search_rejects_more_than_two_source_types(self):
+        with patch('source_jobs.Queue') as queue:
+            with self.assertRaisesRegex(ValueError, 'Select at most 2 source types'):
+                discovery.start(None, {'source_types': list(discovery.TYPES[:3])})
+            queue.assert_not_called()
 
     def test_coverage_counts_two_unique_eligible_urls_only_for_selected_types(self):
         run = {'source_types': ['annual_report'], 'period': '2025', 'cutoff': '2026-11-02'}

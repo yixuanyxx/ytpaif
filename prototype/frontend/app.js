@@ -2268,11 +2268,12 @@ async function viewSources() {
   const SOURCE_TYPES = [
     { value:'annual_report',         label:'Annual report',                  default:true },
     { value:'regulatory_filing',     label:'Regulatory filing (10-K/20-F)',  default:true },
-    { value:'investor_presentation', label:'Investor presentation',          default:true },
-    { value:'earnings_call',         label:'Earnings call transcript',       default:true },
-    { value:'company_website',       label:'Company website page',           default:true },
-    { value:'sustainability_report', label:'Sustainability report',          default:true },
+    { value:'investor_presentation', label:'Investor presentation' },
+    { value:'earnings_call',         label:'Earnings call transcript' },
+    { value:'company_website',       label:'Company website page' },
+    { value:'sustainability_report', label:'Sustainability report' },
   ];
+  const maxSourceTypes = 2;
 
   const companyList = companies.map(c => {
     const docsCount = sourceSummaries.find(s => s.company_id === c.id)?.count || 0;
@@ -2345,7 +2346,7 @@ async function viewSources() {
           </div>
 
           <div class="form-section-title">Source types</div>
-          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Search all six source types or choose the ones you need. The search stops when each selected type has 2 verified sources, or after 5 minutes.</div>
+          <div class="field-hint" style="margin-top:-8px;margin-bottom:10px">Choose up to ${maxSourceTypes} source types per search. Uncheck one to choose a different type.</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px">
             ${SOURCE_TYPES.map(t => `
               <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
@@ -2499,6 +2500,14 @@ async function viewSources() {
   updateSourceCompanyCoverage(new Map(sourceSummaries.map(summary => [summary.company_id, summary])));
 
 
+  const sourceTypeInputs = [...$$('input[name="source_types"]')];
+  const updateSourceTypeLimit = () => {
+    const atLimit = sourceTypeInputs.filter(input => input.checked).length >= maxSourceTypes;
+    sourceTypeInputs.forEach(input => { input.disabled = atLimit && !input.checked; });
+  };
+  sourceTypeInputs.forEach(input => input.addEventListener('change', updateSourceTypeLimit));
+  updateSourceTypeLimit();
+
   $('#btn-run-search').onclick = async () => {
     if ($('#src-latest-documents').checked) updateLatestDocumentFields();
     const selectedCompanyIds = Array.from($$('input[name="company_ids"]:checked')).map(cb => cb.value);
@@ -2511,6 +2520,10 @@ async function viewSources() {
     }
     if (selectedTypes.length === 0) {
       showAlert('Select at least one source type per search.', 'Source type selection');
+      return;
+    }
+    if (selectedTypes.length > maxSourceTypes) {
+      showAlert(`Choose up to ${maxSourceTypes} source types per search.`, 'Source type selection');
       return;
     }
     const button = $('#btn-run-search');

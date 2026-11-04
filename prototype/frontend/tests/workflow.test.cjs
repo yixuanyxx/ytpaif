@@ -437,9 +437,22 @@ test('Source Documents has an independent portfolio selector and scopes the AI s
   api=async(path,data)=>{searchCalls.push({path,data});return {results:[]};};
   refresh=async()=>{};
   render=async()=>{};`);
+  const originalQuery = context.document.querySelectorAll;
+  const sourceTypes = [true, true, false].map(checked => ({
+    checked, addEventListener(type, handler) { this[type] = handler; }
+  }));
+  context.document.querySelectorAll = selector =>
+    selector === 'input[name="source_types"]' ? sourceTypes : originalQuery(selector);
   await run('viewSources()');
   assert.match(node('#page-content').innerHTML,/id="source-portfolio-select"/);
-  assert.match(node('#page-content').innerHTML,/Search all six source types/);
+  assert.match(node('#page-content').innerHTML,/Choose up to 2 source types/);
+  assert.equal(sourceTypes[2].disabled, true);
+  sourceTypes[0].checked = false;
+  sourceTypes[0].change();
+  assert.equal(sourceTypes[2].disabled, false);
+  sourceTypes[2].checked = true;
+  sourceTypes[2].change();
+  assert.equal(sourceTypes[0].disabled, true);
   assert.match(node('#page-content').innerHTML,/Korea Growth/);
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
