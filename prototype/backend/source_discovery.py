@@ -115,7 +115,9 @@ def approved_domains(company):
 def approved_source_url(url, company):
     """Only known approved sites or explicitly recorded company websites."""
     host = (urlparse(url).hostname or '').lower().rstrip('.')
-    return bool(host and any(host == d or host.endswith('.' + d) for d in approved_domains(company)))
+    import exchange_filings
+    return bool(host and any(host == d or host.endswith('.' + d)
+                             for d in [*approved_domains(company), *exchange_filings.domains(company)]))
 
 
 def excluded_websites(sources, company_id, source_types):
@@ -158,7 +160,9 @@ class PublicRedirect(HTTPRedirectHandler):
         public_url(newurl)
         if self.company is not None:
             import approved_collector
-            if not approved_collector.robots_permits(newurl, approved_domains(self.company), public_url, 3):
+            import exchange_filings
+            domains = [*approved_domains(self.company), *exchange_filings.domains(self.company)]
+            if not approved_collector.robots_permits(newurl, domains, public_url, 3):
                 raise ValueError('Source site disallows automated access')
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -209,45 +213,74 @@ class PageMetadata(HTMLParser):
 
 def verify_document_link(row, timeout=20, company=None):
     """Resolve to a direct document/page, inspecting metadata only, never saving files."""
-    if company is not None and not approved_source_url(row['url'], company):
-        raise ValueError('Source is not on an approved website')
+    issuer_home = False
     if company is not None:
         import approved_collector
-        if not approved_collector.robots_permits(row['url'], approved_domains(company), public_url, min(timeout, 3)):
+        import exchange_filings
+        if not approved_source_url(row['url'], company) or row.get('ai_confidence_basis') == 'official exchange issuer directory':
+            website = exchange_filings.issuer_website(company, public_url)
+            if website:
+                issuer_home = (row.get('source_type') == 'company_website'
+                               and normalized_url(website) == normalized_url(row['url']))
+                company = {**company, 'website': website}
+        if not approved_source_url(row['url'], company):
+            raise ValueError('Source is not on an approved website')
+        domains = [*approved_domains(company), *exchange_filings.domains(company)]
+        if not approved_collector.robots_permits(row['url'], domains, public_url, min(timeout, 5)):
             raise ValueError('Source site disallows automated access')
     url = public_url(row['url'])
-    if not specific_document_url(url):
+    if not issuer_home and not specific_document_url(url):
         raise ValueError('Source URL is a homepage or generic landing page, not a specific document')
     opener = build_opener(PublicRedirect(company))
-    headers = {'User-Agent': 'ThemeLab-SourceResearch/1.0'}
-    try:
-        response = opener.open(Request(url, headers=headers, method='HEAD'), timeout=timeout)
-    except HTTPError as error:
-        if error.code not in (405, 501): raise
-        response = opener.open(Request(url, headers={**headers, 'Range': 'bytes=0-131071'}), timeout=timeout)
-    with response:
-        final_url = public_url(response.geturl())
-        mime = response.headers.get('Content-Type', '').split(';')[0].lower()
-        if not specific_document_url(final_url):
-            raise ValueError('Document URL redirects to a homepage or generic landing page')
-        if mime == 'application/pdf':
-            return final_url, mime
-        if mime == 'text/plain' and urlparse(final_url).path.lower().endswith('.txt'):
-            return final_url, mime
-        if 'html' not in mime and not mime.startswith('text/'):
-            raise ValueError('URL does not identify a supported online document')
+    headers = {'User-Agent': 'ThemeLabResearchBot'}
+    dart_viewer = (company is not None and row.get('ai_confidence_basis') == 'official regulator filing'
+                   and url.startswith(exchange_filings.DART_VIEWER + '?'))
+    final_url = url
+    if not dart_viewer:  # DART sends HEAD requests to a generic error page.
+        try:
+            response = opener.open(Request(url, headers=headers, method='HEAD'), timeout=timeout)
+        except HTTPError as error:
+            if error.code not in (405, 501): raise
+            response = opener.open(Request(url, headers={**headers, 'Range': 'bytes=0-131071'}), timeout=timeout)
+        with response:
+            final_url = public_url(response.geturl())
+            mime = response.headers.get('Content-Type', '').split(';')[0].lower()
+            if not issuer_home and not specific_document_url(final_url):
+                raise ValueError('Document URL redirects to a homepage or generic landing page')
+            if mime == 'application/pdf':
+                return final_url, mime
+            if mime == 'text/plain' and urlparse(final_url).path.lower().endswith('.txt'):
+                return final_url, mime
+            if 'html' not in mime and not mime.startswith('text/'):
+                raise ValueError('URL does not identify a supported online document')
     # HTML needs a small metadata check to distinguish an article/report viewer
     # from a generic listing. Cap reads; never persist page text or PDF bytes.
     with opener.open(Request(final_url, headers={**headers, 'Range': 'bytes=0-131071'}), timeout=timeout) as page:
         final_url = public_url(page.geturl())
-        if not specific_document_url(final_url):
+        if not issuer_home and not specific_document_url(final_url):
             raise ValueError('Document URL redirects to a generic page')
+        mime = page.headers.get('Content-Type', '').split(';')[0].lower()
+        if 'html' not in mime and not mime.startswith('text/'):
+            raise ValueError('Document page did not return HTML')
         text = page.read(131072).decode('utf-8', errors='replace')
     metadata = PageMetadata()
     metadata.feed(text)
     title = metadata.tags.get('og:title') or metadata.title
+    if dart_viewer:
+        receipt = parse_qs(urlparse(final_url).query).get('rcpNo', [])
+        expected_receipt = parse_qs(urlparse(url).query).get('rcpNo', [])
+        issuer = re.sub(r'[^a-z0-9]', '', company['name'].lower().split()[0])
+        document_title = metadata.title.lower()
+        kind = 'annual report' if row['source_type'] == 'annual_report' else r'(?:semi.?annual|quarterly|interim) report'
+        if (final_url.startswith(exchange_filings.DART_VIEWER + '?')
+                and receipt and receipt == expected_receipt and issuer and issuer in document_title
+                and re.search(kind, document_title) and row['publication_date'].replace('-', '.') in document_title):
+            return final_url, mime
+        raise ValueError('DART viewer does not match the selected filing')
     if re.search(r'just a moment|access denied|sign in|log in|page not found', title, re.I):
         raise ValueError('Document page is unavailable or requires authentication')
+    if issuer_home and title.strip():
+        return final_url, mime
     expected = set(re.findall(r'[a-z]{3,}|\d{4}', row.get('title', '').lower()))
     actual = set(re.findall(r'[a-z]{3,}|\d{4}', title.lower()))
     if len(expected & actual) < min(2, len(expected)) or not expected:
@@ -361,16 +394,25 @@ def matches_reporting_year(label, period):
 def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls=(), excluded_sites_by_type=None):
     """Collect permitted website links, then classify supplied evidence without grounding."""
     import approved_collector
+    import exchange_filings
     key = os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()
     started = time.monotonic()
+    website = exchange_filings.issuer_website(company, public_url)
+    if website and not any(company.get(field) for field in ('website', 'website_url', 'investor_relations_url')):
+        company = {**company, 'website': website}
     domains = approved_domains(company)
-    candidates, incomplete = approved_collector.collect(company, domains, public_url, min(timeout, 25))
     excluded = {normalized_url(url) for url in exclude_urls}
     sites = excluded_sites_by_type or {}
+    rows = [row for row in exchange_filings.collect(company, types, period, cutoff, public_url, min(timeout, 12), website)
+            if normalized_url(row['url']) not in excluded
+            and not website_is_excluded(row['url'], sites.get(row['source_type'], ()))]
+    remaining = timeout - (time.monotonic() - started)
+    candidates, incomplete = (approved_collector.collect(company, domains, public_url, min(remaining, 25))
+                              if remaining > 1 else ([], True))
     # Avoid sending unrelated navigation and other reporting years to Gemini.
     # A reliable publication date must be present in the collected context;
     # candidates without one cannot pass the independent date validation.
-    rows, eligible = [], []
+    eligible = []
     for candidate in candidates:
         url = candidate['url']
         if normalized_url(url) in excluded or not specific_document_url(url):
@@ -399,6 +441,7 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
             eligible.append({**candidate, 'publication_dates': dates, 'supported_types': supported_types})
     candidates = eligible
     diagnostics = {'model': FIRST_PASS_MODEL, 'candidate_count': len(candidates),
+                   'exchange_candidates': sum(row.get('ai_confidence_basis') in ('official regulator filing', 'official exchange issuer directory') for row in rows),
                    'collection_incomplete': incomplete, 'outcome': 'approved_site_collection'}
     if not candidates or (rows and not key):
         return GroundedSearchResults(rows, diagnostics)
@@ -584,8 +627,6 @@ def source_identity(source):
 def save_document(app, run, company, row, timeout=20):
     """Save metadata for a verified online document; never upload source files."""
     url, mime = verify_document_link(row, timeout=timeout, company=company)
-    if not approved_source_url(url, company):
-        raise ValueError('Source is not on an approved website')
     identity = json.dumps([source_identity({**row, 'url': url, 'company_id': company['id']}),
                            row['publication_date'], row['period']])
     sid = 'source_' + hashlib.sha256(identity.encode()).hexdigest()[:32]
