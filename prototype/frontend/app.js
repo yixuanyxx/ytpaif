@@ -46,6 +46,8 @@ function updateFinancialLookupStatus() {
   if (!button || !status) return;
   const search = financialLookupRun(selectedSourcePortfolioId);
   const running = search?.status === 'running';
+  const spinner = $('#financial-lookup-spinner');
+  if (spinner) spinner.hidden = !running;
   button.disabled = running;
   button.textContent = running ? 'Populating financial values…' : '✦ Populate Market Cap & Revenue';
   status.textContent = financialLookupStatusText(search);
@@ -2948,9 +2950,12 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
       <button class="btn btn-sm btn-secondary" onclick="toggleAllSourceRows()" id="btn-toggle-all-sources">
         Expand all companies
       </button>
-      <button class="btn btn-sm btn-primary" onclick="populatePortfolioFinancials('${esc(portfolio.id)}')" id="btn-populate-financials" ${financialSearchRunning ? 'disabled' : ''}>
-        ${financialSearchRunning ? 'Populating financial values…' : '✦ Populate Market Cap &amp; Revenue'}
-      </button>
+      <span style="display:inline-flex;align-items:center;gap:8px">
+        <span id="financial-lookup-spinner" class="dashboard-loading-spinner" aria-hidden="true" style="width:16px;height:16px;flex-shrink:0" ${financialSearchRunning ? '' : 'hidden'}></span>
+        <button class="btn btn-sm btn-primary" onclick="populatePortfolioFinancials('${esc(portfolio.id)}')" id="btn-populate-financials" ${financialSearchRunning ? 'disabled' : ''}>
+          ${financialSearchRunning ? 'Populating financial values…' : '✦ Populate Market Cap &amp; Revenue'}
+        </button>
+      </span>
     </div>
     <div id="financial-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-bottom:12px">${esc(financialLookupStatusText(financialSearch))}</div>
 
@@ -3188,6 +3193,8 @@ window.selectCompanyForUpload = function(companyId, sourceType) {
 window.populatePortfolioFinancials = async function(portfolioId) {
   const button = document.getElementById('btn-populate-financials');
   if (button) button.disabled = true;
+  const spinner = document.getElementById('financial-lookup-spinner');
+  if (spinner) spinner.hidden = false;
   clearNotice();
   try {
     const result = await api('financials/populate', { portfolio_id: portfolioId });
@@ -3203,7 +3210,10 @@ window.populatePortfolioFinancials = async function(portfolioId) {
   } catch (error) {
     showAlert(`Could not populate financial data: ${error.message}`, 'Financial lookup failed', { searchCompletion: true });
   } finally {
-    if (button) button.disabled = Boolean(financialLookupRun(portfolioId, true));
+    const running = Boolean(financialLookupRun(portfolioId, true));
+    if (button) button.disabled = running;
+    const currentSpinner = document.getElementById('financial-lookup-spinner');
+    if (currentSpinner) currentSpinner.hidden = !running;
   }
 };
 
