@@ -1547,7 +1547,12 @@ class Handler(BaseHTTPRequestHandler):
                 d = {}
             path = getattr(self, 'path', '')
             if path == '/api/login':
-                redis = app_auth.client()
+                try:
+                    redis = app_auth.client()
+                except RuntimeError:
+                    return self.respond({
+                        'error': 'Login unavailable; check REDIS_URL and ensure the shared Redis server is running.'
+                    }, 503)
                 attempts_key = source_cache._key('login-attempt:' + self.client_address[0])
                 if int(redis.get(attempts_key) or 0) >= 10:
                     return self.respond({'error': 'Too many login attempts. Try again later.'}, 429)

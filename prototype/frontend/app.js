@@ -10,6 +10,7 @@ let state = null;
 let currentView = 'dashboard';
 let selectedDashboardThemeId = '';
 let selectedDashboardPortfolioId = '';
+let dashboardDemoEnabled = false;
 let selectedSourcePortfolioId = '';
 let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
@@ -459,24 +460,43 @@ function metricTile(label, value, meta, accent) {
   </div>`;
 }
 
-function waterfallChart(companies, state) {
-  const pts = companies.map(r => Math.abs(r.contributions?.active?.point ?? 0));
-  const max = Math.max(...pts, 0.001);
-  return `<div class="waterfall">
-    ${companies.map(r => {
-      const v = r.contributions?.active?.point ?? null;
-      if (v === null) return '';
-      const w = Math.abs(v) / max * 47;
-      const name = (state.companies || []).find(c => c.id === r.company_id)?.name || r.company_id;
-      return `<div class="wf-row">
-        <div class="wf-label" title="${esc(name)}">${esc(name.length > 22 ? name.slice(0,20)+'…' : name)}</div>
-        <div class="wf-track">
-          <div class="wf-bar ${v >= 0 ? 'pos' : 'neg'}"
-            style="left:${v>=0?50:50-w}%;width:${w}%"></div>
-        </div>
-        <div class="wf-value ${v>=0?'pos':'neg'}">${pct(v, true)}</div>
-      </div>`;
-    }).join('')}
+function portfolioContributionBarChart(companies, companyRecords) {
+  const width = 760, height = 370;
+  const margin = {top: 20, right: 16, bottom: 116, left: 66};
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const max = Math.max(...companies.map(row => row.contributions.portfolio.point), 0.001);
+  const zeroY = margin.top + plotHeight;
+  const y = value => margin.top + (max - value) / max * plotHeight;
+  const slot = plotWidth / companies.length;
+  const barWidth = Math.min(42, slot * 0.62);
+  const ticks = [0, max / 2, max];
+  return `<div class="portfolio-contribution-chart">
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Top ${companies.length} company portfolio exposure contributions">
+      <text class="chart-axis-title" transform="translate(16 ${margin.top + plotHeight / 2}) rotate(-90)" text-anchor="middle">Portfolio exposure contribution (%)</text>
+      ${ticks.map(value => {
+        const tickY = y(value);
+        return `<g>
+          <line class="chart-gridline" x1="${margin.left}" y1="${tickY}" x2="${width - margin.right}" y2="${tickY}"></line>
+          <text class="chart-tick-label" x="${margin.left - 9}" y="${tickY + 4}" text-anchor="end">${pct(value)}</text>
+        </g>`;
+      }).join('')}
+      ${companies.map((row, index) => {
+        const value = row.contributions.portfolio.point;
+        const name = companyRecords.find(company => company.id === row.company_id)?.name || row.company_id;
+        const shortName = name.length > 18 ? name.slice(0, 16) + '…' : name;
+        const x = margin.left + slot * (index + 0.5);
+        const valueY = y(value);
+        return `<g>
+          <title>${esc(name)}: ${pct(value)}</title>
+          <rect class="contribution-bar positive"
+            x="${x - barWidth / 2}" y="${valueY}" width="${barWidth}"
+            height="${Math.max(zeroY - valueY, 1)}" rx="3"></rect>
+          <text class="chart-company-label" transform="translate(${x} ${height - margin.bottom + 5}) rotate(-40)"
+            text-anchor="end">${esc(shortName)}</text>
+        </g>`;
+      }).join('')}
+    </svg>
   </div>`;
 }
 
@@ -4038,25 +4058,96 @@ function dashboardEmptyState(title, description, actionView, actionLabel) {
   </div>`;
 }
 
-function activeContributionsPanel(rows, companies, hasSources) {
-  const holdings = rows.filter(r => r.company_id !== 'CASH' && (r.weights.portfolio || r.weights.benchmark));
+function portfolioContributionsPanel(rows, companies, hasSources) {
+  const holdings = rows.filter(r => r.company_id !== 'CASH' && r.weights.portfolio > 0);
   const assessed = holdings.filter(r => r.assessed);
-  const plotted = assessed.filter(r => Number.isFinite(r.exposure?.point) && Number.isFinite(r.contributions?.active?.point))
-    .sort((a, b) => Math.abs(b.contributions.active.point) - Math.abs(a.contributions.active.point));
-  const body = plotted.length
-    ? `${waterfallChart(plotted.slice(0, 8), {companies})}
-       <div class="contribution-legend"><span><i class="legend-dot negative-dot"></i>Negative contribution</span><span><i class="legend-dot positive-dot"></i>Positive contribution</span></div>`
+  const plotted = assessed.filter(r => Number.isFinite(r.exposure?.point) && Number.isFinite(r.contributions?.portfolio?.point))
+    .sort((a, b) => b.contributions.portfolio.point - a.contributions.portfolio.point);
+  const topCompanies = plotted.slice(0, 10);
+  const body = topCompanies.length
+    ? portfolioContributionBarChart(topCompanies, companies)
     : dashboardEmptyState(assessed.length ? 'Point estimates pending' : 'No approved exposure yet',
         assessed.length ? 'Reviewed cases currently contain ranges only. Resolve the missing revenue allocations to plot point contributions.'
           : 'Contributions will appear after company revenue exposure is analysed and approved. Missing evidence is not treated as zero exposure.',
         hasSources ? 'analysis' : 'sources', hasSources ? 'Review company analyses' : 'Add source documents');
   return `<div class="panel dashboard-chart-panel">
-    <div class="dashboard-panel-heading"><div class="panel-title">Active exposure contributions</div>
-      <span class="badge badge-${plotted.length ? 'green' : 'neutral'}">${plotted.length ? `${plotted.length} available` : 'Awaiting estimates'}</span></div>
-    <div class="panel-subtitle">How each holding contributes to exposure relative to the benchmark.</div>
+    <div class="dashboard-panel-heading"><div class="panel-title">Portfolio exposure contributions</div>
+      <span class="badge badge-${plotted.length ? 'green' : 'neutral'}">${plotted.length ? `Top ${topCompanies.length} of ${plotted.length}` : 'Awaiting estimates'}</span></div>
+    <div class="panel-subtitle">Top companies by portfolio exposure contribution. Y-axis shows portfolio weight × company exposure.</div>
     ${body}
-    <div class="dashboard-panel-footer"><span>${assessed.length} of ${holdings.length} holdings assessed</span><span>Active weight × company exposure</span></div>
+    <div class="dashboard-panel-footer"><span>${assessed.length} of ${holdings.length} holdings assessed</span><span>Portfolio weight × company exposure</span></div>
   </div>`;
+}
+
+function dashboardDemoFixture() {
+  const nodes = [
+    {node_id: 'compute', parent_id: null, name: 'Compute & Semiconductors'},
+    {node_id: 'accelerators', parent_id: 'compute', name: 'AI Accelerators'},
+    {node_id: 'memory', parent_id: 'compute', name: 'High-bandwidth Memory'},
+    {node_id: 'platforms', parent_id: null, name: 'AI Platforms'},
+    {node_id: 'cloud', parent_id: 'platforms', name: 'Cloud Services'},
+    {node_id: 'software', parent_id: 'platforms', name: 'Enterprise Software'},
+  ];
+  const theme = {id: 'demo-ai-theme', theme_name: 'AI Infrastructure (demo)', approved: true, nodes};
+  const holdings = [
+    ['Demo Semiconductor Co.', 0.20, 0.18, 0.82, [0.65, 0.25, 0.05, 0.05]],
+    ['Demo Memory Co.', 0.15, 0.17, 0.74, [0.20, 0.70, 0.05, 0.05]],
+    ['Demo Cloud Co.', 0.12, 0.10, 0.68, [0.05, 0.05, 0.75, 0.15]],
+    ['Demo Chip Design Co.', 0.10, 0.12, 0.63, [0.70, 0.15, 0.10, 0.05]],
+    ['Demo Network Co.', 0.09, 0.08, 0.52, [0.20, 0.10, 0.50, 0.20]],
+    ['Demo Equipment Co.', 0.08, 0.10, 0.48, [0.60, 0.15, 0.15, 0.10]],
+    ['Demo Data Center Co.', 0.07, 0.08, 0.41, [0.10, 0.10, 0.60, 0.20]],
+    ['Demo Software Co.', 0.06, 0.05, 0.36, [0.05, 0.05, 0.30, 0.60]],
+    ['Demo Power Systems Co.', 0.05, 0.05, 0.29, [0.25, 0.10, 0.45, 0.20]],
+    ['Demo Analytics Co.', 0.08, 0.07, 0.24, [0.10, 0.10, 0.25, 0.55]],
+  ];
+  const companies = holdings.map(([name], index) => ({
+    id: `demo-company-${index + 1}`, name, bloomberg_ticker: `DEMO${index + 1}`,
+  }));
+  const companyRows = holdings.map(([name, portfolio, benchmark, exposure, allocations], index) => {
+    const company_id = companies[index].id;
+    const active = portfolio - benchmark;
+    return {
+      company_id, assessed: true,
+      weights: {portfolio, benchmark, active},
+      exposure: {point: exposure, lower: exposure, upper: exposure},
+      contributions: {
+        portfolio: {point: portfolio * exposure},
+        benchmark: {point: benchmark * exposure},
+        active: {point: active * exposure},
+      },
+    };
+  });
+  const cases = holdings.map(([, , , exposure, allocations], index) => {
+    const subthemes = Object.fromEntries(nodes.filter(node => node.parent_id).map((node, i) => [
+      node.node_id, {point: exposure * allocations[i]},
+    ]));
+    const units = nodes.filter(node => node.parent_id).map((node, i) => ({
+      node_ids: [node.node_id], allocations: {[node.node_id]: allocations[i]},
+    }));
+    return {
+      company_id: companies[index].id, theme_id: theme.id, review_status: 'approved',
+      estimate: {subthemes}, case: {units},
+    };
+  });
+  const portfolioExposure = companyRows.reduce((sum, row) =>
+    sum + row.weights.portfolio * row.exposure.point, 0);
+  const benchmarkExposure = companyRows.reduce((sum, row) =>
+    sum + row.weights.benchmark * row.exposure.point, 0);
+  return {
+    theme, companies, cases,
+    portfolio: {id: 'demo-portfolio', theme_id: theme.id, name: 'Illustrative portfolio', snapshot_id: 'demo-snapshot'},
+    snapshot: {id: 'demo-snapshot', benchmark_name: 'Illustrative benchmark', portfolio: [{as_of_date: '2026-10-31'}]},
+    dashboard: {
+      summary: {
+        portfolio: {point: portfolioExposure},
+        benchmark: {point: benchmarkExposure},
+        active: {point: portfolioExposure - benchmarkExposure},
+      },
+      coverage: {portfolio: 0.82, benchmark: 0.76},
+      companies: companyRows,
+    },
+  };
 }
 
 async function viewDashboard() {
@@ -4065,39 +4156,51 @@ async function viewDashboard() {
   setPageHeader('PORTFOLIO ANALYTICS', 'Portfolio Exposure Dashboard',
     'Thematic exposure across portfolio and benchmark');
 
-  const themes = (state.themes || []).filter(t => t.approved);
+  const demoMode = dashboardDemoEnabled;
+  const demo = demoMode ? dashboardDemoFixture() : null;
+  const themes = demoMode ? [demo.theme] : (state.themes || []).filter(t => t.approved);
   const portfolios = state.portfolio_imports || [];
   const snapshots = state.snapshots || [];
-  const companies = state.companies || [];
-  const theme = themes.find(t => t.id === selectedDashboardThemeId);
-  const eligiblePortfolios = portfolios.filter(p => theme && p.theme_id === theme.id);
+  const companies = demoMode ? demo.companies : (state.companies || []);
+  const liveTheme = themes.find(t => t.id === selectedDashboardThemeId);
+  const eligiblePortfolios = demoMode ? [demo.portfolio] : portfolios.filter(p => liveTheme && p.theme_id === liveTheme.id);
   const portfolioImport = eligiblePortfolios.find(p => p.id === selectedDashboardPortfolioId) || eligiblePortfolios.at(-1);
-  selectedDashboardThemeId = theme?.id || '';
-  selectedDashboardPortfolioId = portfolioImport?.id || '';
-  saveDashboardSelection();
+  const selectedTheme = demoMode ? demo.theme : liveTheme;
+  if (!demoMode) {
+    selectedDashboardThemeId = liveTheme?.id || '';
+    selectedDashboardPortfolioId = portfolioImport?.id || '';
+    saveDashboardSelection();
+  }
 
   const selectorsHtml = `
     <div class="dashboard-selectors">
       <div class="dashboard-setup-header">
         <div>
           <div class="dashboard-setup-title">Analysis setup</div>
-          <div class="dashboard-setup-description">Choose a theme and portfolio to view exposure.</div>
+          <div class="dashboard-setup-description">${demoMode ? 'Illustrative sample only; your workspace data is unchanged.' : 'Choose a theme and portfolio to view exposure.'}</div>
         </div>
-        <button type="button" class="btn btn-primary dashboard-new-theme" id="btn-new-theme">
-          <span aria-hidden="true">+</span> New theme
-        </button>
+        <div class="dashboard-header-actions">
+          <label class="dashboard-demo-toggle">
+            <input type="checkbox" id="dashboard-demo-toggle" ${demoMode ? 'checked' : ''}>
+            <span>Demo data</span>
+          </label>
+          ${demoMode ? '<span class="badge badge-amber">Illustrative</span>' : ''}
+          <button type="button" class="btn btn-primary dashboard-new-theme" id="btn-new-theme">
+            <span aria-hidden="true">+</span> New theme
+          </button>
+        </div>
       </div>
       <label class="dashboard-selector">
         <span>Theme</span>
-        <select id="dashboard-theme-select" ${themes.length ? '' : 'disabled'}>
+        <select id="dashboard-theme-select" ${demoMode || themes.length === 0 ? 'disabled' : ''}>
           <option value="">Select a theme first</option>
-          ${themes.length ? themes.map(t => `<option value="${esc(t.id)}" ${t.id === theme?.id ? 'selected' : ''}>${esc(t.theme_name)}</option>`).join('') : '<option value="">No approved themes</option>'}
+          ${themes.length ? themes.map(t => `<option value="${esc(t.id)}" ${t.id === selectedTheme?.id ? 'selected' : ''}>${esc(t.theme_name)}</option>`).join('') : '<option value="">No approved themes</option>'}
         </select>
       </label>
       <label class="dashboard-selector">
         <span>Portfolio</span>
-        <select id="dashboard-portfolio-select">
-          ${eligiblePortfolios.length ? '' : `<option value="">${theme ? 'No portfolio for this theme' : 'Select a theme first'}</option>`}
+        <select id="dashboard-portfolio-select" ${demoMode ? 'disabled' : ''}>
+          ${eligiblePortfolios.length ? '' : `<option value="">${liveTheme ? 'No portfolio for this theme' : 'Select a theme first'}</option>`}
           ${eligiblePortfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolioImport?.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
         </select>
       </label>
@@ -4110,6 +4213,10 @@ async function viewDashboard() {
       _activeThemeId = '';
       clearNotice();
       viewTheme('');
+    });
+    $('#dashboard-demo-toggle')?.addEventListener('change', event => {
+      dashboardDemoEnabled = event.target.checked;
+      viewDashboard();
     });
     $('#dashboard-theme-select')?.addEventListener('change', event => {
       selectedDashboardThemeId = event.target.value;
@@ -4140,9 +4247,9 @@ async function viewDashboard() {
       <span class="dashboard-loading-spinner" aria-hidden="true"></span>
       <span>Loading portfolio exposure…</span>
     </div>`;
-  const selectedSnapshot = snapshots.find(s => s.id === portfolioImport?.snapshot_id);
+  const selectedSnapshot = demoMode ? demo.snapshot : snapshots.find(s => s.id === portfolioImport?.snapshot_id);
 
-  if (!theme) {
+  if (!selectedTheme) {
     renderDashboardBody(`
       <div class="empty-state">
         <div class="empty-icon">◫</div>
@@ -4163,13 +4270,17 @@ async function viewDashboard() {
 
   const snapshot = selectedSnapshot;
   let d;
-  try {
-    d = await api('dashboard', { theme_id: theme.id, snapshot_id: snapshot.id });
-  } catch (e) {
-    if (renderVersion !== dashboardRenderVersion) return;
-    notice(e.message, 'error');
-    renderDashboardBody(`<div class="notice error">${esc(e.message)}</div>`);
-    return;
+  if (demoMode) {
+    d = demo.dashboard;
+  } else {
+    try {
+      d = await api('dashboard', { theme_id: selectedTheme.id, snapshot_id: snapshot.id });
+    } catch (e) {
+      if (renderVersion !== dashboardRenderVersion) return;
+      notice(e.message, 'error');
+      renderDashboardBody(`<div class="notice error">${esc(e.message)}</div>`);
+      return;
+    }
   }
   if (renderVersion !== dashboardRenderVersion) return;
   if (!d) {
@@ -4179,13 +4290,14 @@ async function viewDashboard() {
 
   const s = d.summary;
   const assessedHoldings = d.companies.filter(r => r.company_id !== 'CASH' && r.assessed && (r.weights.portfolio || r.weights.benchmark));
-  const hasSources = (state.sources || []).some(source => d.companies.some(row => row.company_id === source.company_id));
+  const hasSources = !demoMode && (state.sources || []).some(source => d.companies.some(row => row.company_id === source.company_id));
   const companyName = id => companies.find(c=>c.id===id)?.name || id;
 
   // Subtheme rows from cases
+  const theme = selectedTheme;
   const nodes  = theme.nodes || [];
   const tier1  = nodes.filter(n=>!n.parent_id);
-  const cases  = state.cases || [];
+  const cases  = demoMode ? demo.cases : (state.cases || []);
 
   const subthemeExposure = {};
   nodes.forEach(n => subthemeExposure[n.node_id] = { point:0 });
@@ -4200,6 +4312,51 @@ async function viewDashboard() {
       if (v.point !== null) subthemeExposure[nid].point += w * v.point;
     });
   });
+  const defaultTier1 = tier1.find(node => nodes.some(child => child.parent_id === node.node_id)) || tier1[0];
+  const tier1PieHtml = selectedId => {
+    const children = nodes.filter(node => node.parent_id === selectedId);
+    const segments = children.map((node, index) => ({
+      node,
+      value: subthemeExposure[node.node_id]?.point || 0,
+      color: ['#0f766e', '#2563eb', '#7c3aed', '#d97706', '#db2777', '#0891b2', '#65a30d', '#dc2626'][index % 8],
+    })).filter(segment => Number.isFinite(segment.value) && segment.value > 0);
+    const total = segments.reduce((sum, segment) => sum + segment.value, 0);
+    if (!segments.length || total <= 0) {
+      return '<div class="subtheme-pie-empty">No Tier-2 point exposure is available for this Tier-1 node.</div>';
+    }
+
+    const center = 110, radius = 96;
+    let angle = -Math.PI / 2;
+    const wedges = segments.map(segment => {
+      const start = angle;
+      angle += segment.value / total * Math.PI * 2;
+      if (segments.length === 1) {
+        return `<circle cx="${center}" cy="${center}" r="${radius}" fill="${segment.color}">
+          <title>${esc(segment.node.name)}: ${pct(segment.value)}</title>
+        </circle>`;
+      }
+      const endX = center + radius * Math.cos(angle);
+      const endY = center + radius * Math.sin(angle);
+      const startX = center + radius * Math.cos(start);
+      const startY = center + radius * Math.sin(start);
+      const largeArc = angle - start > Math.PI ? 1 : 0;
+      return `<path d="M ${center} ${center} L ${startX} ${startY} A ${radius} ${radius} 0 ${largeArc} 1 ${endX} ${endY} Z"
+        fill="${segment.color}"><title>${esc(segment.node.name)}: ${pct(segment.value)}</title></path>`;
+    }).join('');
+    return `<div class="subtheme-pie-layout">
+      <svg class="subtheme-pie-chart" viewBox="0 0 220 220" role="img" aria-label="Tier-2 exposure split for ${esc(tier1.find(node => node.node_id === selectedId)?.name || '')}">
+        ${wedges}
+      </svg>
+      <div class="subtheme-pie-legend">
+        ${segments.map(segment => `<button type="button" class="subtheme-pie-legend-item" data-subtheme="${esc(segment.node.node_id)}">
+          <i style="background:${segment.color}"></i>
+          <span>${esc(segment.node.name)}</span>
+          <strong>${pct(segment.value)}</strong>
+          <small>${pct(segment.value / total)} of selected Tier-1</small>
+        </button>`).join('')}
+      </div>
+    </div>`;
+  };
 
   $('#page-actions').innerHTML = `
     <div style="display:flex;gap:8px">
@@ -4210,45 +4367,27 @@ async function viewDashboard() {
 
   renderDashboardBody(`
     <!-- Top-level exposure metrics -->
-    <div class="metric-grid">
-      ${metricTile('Portfolio exposure', pct(s.portfolio.point), '', '')}
+    <div class="metric-grid dashboard-summary-metrics">
       ${metricTile('Benchmark exposure', pct(s.benchmark.point), '', '')}
       ${metricTile('Active exposure', pct(s.active.point, true), '', 'accent')}
-      ${metricTile('Coverage', pct(d.coverage.portfolio), `Benchmark: ${pct(d.coverage.benchmark)}`, '')}
+      ${metricTile('Coverage', pct(s.benchmark.point == null || s.active.point == null
+        ? null : s.benchmark.point - s.active.point), 'Benchmark exposure − active exposure', '')}
     </div>
 
     <div class="grid-2 dashboard-breakdown-grid">
-      ${activeContributionsPanel(d.companies, companies, hasSources)}
+      ${portfolioContributionsPanel(d.companies, companies, hasSources)}
 
       <!-- Sub-theme breakdown -->
       <div class="panel dashboard-chart-panel">
         <div class="panel-title">Sub-theme exposure breakdown</div>
-        <div class="panel-subtitle">Portfolio weight × company Tier-2 allocation. Click any sub-theme row to filter companies.</div>
-        ${assessedHoldings.length && tier1.length ? `<div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Sub-theme</th><th class="td-num">Exposure</th></tr>
-            </thead>
-            <tbody>
-              ${tier1.map(t1 => {
-                const children = nodes.filter(n=>n.parent_id===t1.node_id);
-                const t1Pt   = children.reduce((s,n)=>s+(subthemeExposure[n.node_id]?.point||0),0);
-                return `
-                  <tr data-subtheme="${esc(t1.node_id)}" style="background:var(--slate-50);cursor:pointer" title="Click to filter companies by ${esc(t1.name)}">
-                    <td><strong>${esc(t1.name)}</strong> <span class="text-muted text-small">(Tier 1)</span></td>
-                    <td class="td-num">${pct(t1Pt)}</td>
-                  </tr>
-                  ${children.map(t2 => {
-                    const v = subthemeExposure[t2.node_id]||{point:0};
-                    return `<tr data-subtheme="${esc(t2.node_id)}" style="cursor:pointer" title="Click to filter companies by ${esc(t2.name)}">
-                      <td style="padding-left:28px">↳ ${esc(t2.name)} <span class="text-muted text-small">(Tier 2)</span></td>
-                      <td class="td-num text-muted">${pct(v.point)}</td>
-                    </tr>`;
-                  }).join('')}`;
-              }).join('')}
-            </tbody>
-          </table>
-        </div>` : dashboardEmptyState('Sub-theme breakdown pending',
+        <div class="panel-subtitle">Exposure split by Tier-2 sub-theme. Select a Tier-1 node to explore its breakdown.</div>
+        ${assessedHoldings.length && tier1.length ? `<label class="dashboard-selector subtheme-tier-selector">
+          <span>Tier-1 node</span>
+          <select id="dashboard-tier1-select">
+            ${tier1.map(node => `<option value="${esc(node.node_id)}" ${node.node_id === defaultTier1?.node_id ? 'selected' : ''}>${esc(node.name)}</option>`).join('')}
+          </select>
+        </label>
+        <div id="subtheme-pie-content">${tier1PieHtml(defaultTier1?.node_id || '')}</div>` : dashboardEmptyState('Sub-theme breakdown pending',
           tier1.length ? 'Approve company analyses to see how portfolio exposure is allocated across your taxonomy.' : 'Add a sub-theme taxonomy to organise company exposure by activity.',
           tier1.length ? (hasSources ? 'analysis' : 'sources') : 'theme',
           tier1.length ? (hasSources ? 'Open analysis & review' : 'Add source documents') : 'Define sub-themes')}
@@ -4341,37 +4480,40 @@ async function viewDashboard() {
     filterCompanies(snapshot.benchmark_name || 'MSCI Asia ex Japan', benchmarkIds, 'Benchmark');
   };
 
-  $$('[data-subtheme]').forEach(rowEl => {
-    rowEl.onclick = () => {
-      const nid = rowEl.dataset.subtheme;
-      const isAlreadyActive = rowEl.style.outline !== '';
+  const bindSubthemeFilters = () => {
+    $$('[data-subtheme]').forEach(item => {
+      item.onclick = () => {
+        const nid = item.dataset.subtheme;
+        if (item.style.outline !== '') {
+          clearFilter();
+          return;
+        }
 
-      if (isAlreadyActive) {
-        clearFilter();
-        return;
-      }
+        $$('[data-subtheme]').forEach(element => element.style.outline = '');
+        item.style.outline = '2px solid var(--teal-500)';
 
-      $$('[data-subtheme]').forEach(r => r.style.outline = '');
-      rowEl.style.outline = '2px solid var(--teal-500)';
+        const ids = new Set([nid]);
+        for (let sz = 0; sz !== ids.size;) {
+          sz = ids.size;
+          nodes.forEach(n => { if (ids.has(n.parent_id)) ids.add(n.node_id); });
+        }
 
-      const ids = new Set([nid]);
-      for (let sz = 0; sz !== ids.size;) {
-        sz = ids.size;
-        nodes.forEach(n => { if (ids.has(n.parent_id)) ids.add(n.node_id); });
-      }
+        const matchingCids = d.companies.filter(row => {
+          const c = cases.filter(c => c.company_id === row.company_id && c.theme_id === theme.id && c.review_status === 'approved').at(-1);
+          if (!c) return false;
+          return c.case?.units?.some(u => (u.node_ids || []).some(n => ids.has(n)) || Object.entries(u.allocations || {}).some(([n, s]) => ids.has(n) && s > 0));
+        }).map(r => r.company_id);
 
-      const matchingCids = d.companies.filter(row => {
-        const c = cases.filter(c => c.company_id === row.company_id && c.theme_id === theme.id && c.review_status === 'approved').at(-1);
-        if (!c) return false;
-        return c.case?.units?.some(u => (u.node_ids || []).some(n => ids.has(n)) || Object.entries(u.allocations || {}).some(([n, s]) => ids.has(n) && s > 0));
-      }).map(r => r.company_id);
-
-      const targetNode = nodes.find(n => n.node_id === nid);
-      filterCompanies(targetNode?.name || nid, matchingCids, 'Sub-theme');
-
-      // Smoothly scroll down to the filtered companies table
-      document.getElementById('dashboard-companies')?.scrollIntoView({ behavior: 'smooth' });
-    };
+        const targetNode = nodes.find(n => n.node_id === nid);
+        filterCompanies(targetNode?.name || nid, matchingCids, 'Sub-theme');
+        document.getElementById('dashboard-companies')?.scrollIntoView({ behavior: 'smooth' });
+      };
+    });
+  };
+  bindSubthemeFilters();
+  $('#dashboard-tier1-select')?.addEventListener('change', event => {
+    $('#subtheme-pie-content').innerHTML = tier1PieHtml(event.target.value);
+    bindSubthemeFilters();
   });
 
 }
@@ -4632,4 +4774,3 @@ if (typeof window.addEventListener === 'function') {
   window.addEventListener('beforeunload', syncSourcesOnExit);
   window.addEventListener('pagehide', syncSourcesOnExit);
 }
-

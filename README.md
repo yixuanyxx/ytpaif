@@ -49,6 +49,7 @@ Excel parsing runs in the browser using the bundled SheetJS CE 0.20.3 library in
 - `frontend/index.html`, `frontend/app.js`, `frontend/style.css`: frontend and workflow views.
 
 Runtime records and uploaded source files are stored in Supabase. The backend requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`; credentials stay server-side. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
+Login sessions and login rate limits also require a reachable shared Redis server. Configure `REDIS_URL` or run Redis on localhost before starting the backend; otherwise login returns 503 even if the username and password are correct.
 
 ## Official filing authorities
 
