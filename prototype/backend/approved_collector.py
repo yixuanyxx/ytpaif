@@ -185,9 +185,12 @@ def collect(company, domains, public_url, timeout, indexed_pages=(), exchange_do
     if company.get('name', '').strip().upper() in ('COFORGE LTD', 'COFORGE LIMITED'):
         queue[0:0] = [(COFORGE_REPORTS, 0), (COFORGE_DISCLOSURES, 0),
                       (COFORGE_IR + '/quarter-reports', 0), (COFORGE_IR + '/', 0)]
-    official_domains = [domain for domain in domains[7:] if domain not in exchange_domains]
-    # Company IR pages tend to contain the most direct filings, so visit them
-    # before the large publishers when an official domain is recorded.
+    # Everything after the vendor allow-list is either an issuer IR domain or
+    # its designated market authority.  Both are primary sources; a direct
+    # dated document found there is eligible without a vendor classification.
+    official_domains = list(dict.fromkeys(domains[7:]))
+    # Company IR pages and the designated authority tend to contain the most
+    # direct filings, so visit them before the large publishers.
     for domain in [*official_domains, *domains[:7]]:
         queue.append((f'https://{domain}/', 0))
     keywords = re.compile(

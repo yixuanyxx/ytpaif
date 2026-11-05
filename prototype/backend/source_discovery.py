@@ -450,6 +450,7 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
         company = {**company, 'website': website}
     domains = approved_domains(company)
     market_domains = exchange_filings.domains(company)
+    authority = exchange_filings.authority_metadata(company)
     crawl_domains = list(dict.fromkeys([*domains, *market_domains]))
     excluded = {normalized_url(url) for url in exclude_urls}
     sites = excluded_sites_by_type or {}
@@ -474,6 +475,12 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     remaining = timeout - (time.monotonic() - started)
     indexed_pages = web_source_index.discover(company, types, period, crawl_domains, remaining,
                                              pdf_domains=market_domains, reject=reject)
+    # Start with the responsible market authority even when a web-index
+    # provider is unavailable.  The collector still requires a dated,
+    # issuer-matched document link; this portal seed is never saved by itself.
+    registry = exchange_filings.authority(company)
+    if registry and registry['direct'] == 'portal':
+        indexed_pages = list(dict.fromkeys([registry['search_url'], *indexed_pages]))
     indexed_pdfs = [url for url in indexed_pages if urlparse(url).path.lower().endswith('.pdf')]
     indexed_pages = [url for url in indexed_pages if url not in indexed_pdfs]
     remaining = timeout - (time.monotonic() - started)
@@ -540,7 +547,8 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
             rows.append({'url': url, 'title': f'{company["name"]} — {title}', 'source_type': kind,
                          'publication_date': published, 'period': str(period), 'publication_date_source_url': url,
                          'ai_confidence': 95, 'ai_confidence_basis': 'official exchange filing cover',
-                         'ai_confidence_reason': 'The exchange PDF cover identifies the issuer, filing subject and date.'})
+                         'ai_confidence_reason': 'The exchange PDF cover identifies the issuer, filing subject and date.',
+                         **authority})
         else:
             reject(url, 'exchange PDF', 'Website excluded for this source type')
     # Avoid sending unrelated navigation and other reporting years to Gemini.
@@ -564,7 +572,8 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
                     and not website_is_excluded(url, sites.get('annual_report', ()))):
                 rows.append({'url': url, 'title': candidate['title'], 'source_type': 'annual_report', **official,
                              'ai_confidence': 95, 'ai_confidence_basis': 'official disclosure and report listing',
-                             'ai_confidence_reason': 'Fiscal year and publication date matched across the issuer’s official pages.'})
+                             'ai_confidence_reason': 'Fiscal year and publication date matched across the issuer’s official pages.',
+                             **authority})
             else:
                 reason = ('Annual reports were not selected' if 'annual_report' not in types
                           else f'Report is for FY{official["period"]}, not FY{period}' if official['period'] != str(period)
@@ -597,7 +606,8 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
                 rows.append({'url': url, 'title': candidate['title'], 'source_type': supported_types[0],
                              'publication_date': dates[0], 'period': str(period), 'ai_confidence': 90,
                              'ai_confidence_basis': 'issuer-hosted document listing',
-                             'ai_confidence_reason': 'The issuer links this PDF with a matching document type, period and date.'})
+                             'ai_confidence_reason': 'The issuer links this PDF with a matching document type, period and date.',
+                             **authority})
                 if candidate.get('publication_date_source_url'):
                     rows[-1]['publication_date_source_url'] = candidate['publication_date_source_url']
                 continue
@@ -611,6 +621,7 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
                    'issuer_website_available': bool(website or any(company.get(field) for field in
                                                                   ('website', 'website_url', 'investor_relations_url'))),
                    'indexed_page_count': len(indexed_pages), 'indexed_pdf_count': len(indexed_pdfs),
+                   'official_authority': authority,
                    'scraped_candidate_count': scraped_candidate_count,
                    'exchange_candidates': sum(row.get('ai_confidence_basis') in ('official regulator filing', 'official exchange issuer directory') for row in rows),
                    'collection_incomplete': incomplete, 'outcome': 'approved_site_collection'}
@@ -698,7 +709,8 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
             continue
         rows.append({'url': candidate['url'], 'title': candidate['title'], 'source_type': source_type,
                      'publication_date': pub, 'period': year, 'ai_confidence': score,
-                     'ai_confidence_reason': str(item.get('reason', ''))[:500]})
+                     'ai_confidence_reason': str(item.get('reason', ''))[:500],
+                     **(authority if source_type in ('annual_report', 'regulatory_filing') else {})})
     for index, candidate in enumerate(candidates):
         if index not in returned:
             reject(candidate['url'], 'classification', 'Gemini did not return a classification for this link')

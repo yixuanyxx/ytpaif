@@ -92,7 +92,10 @@ class IssuerDirectoryTest(unittest.TestCase):
             rows = source_discovery.grounded_search(company, ['annual_report'], '2025', '2026-11-05', False, 20)
         provider.assert_not_called()
         self.assertIn('issuer.test', collect.call_args.args[1])
-        self.assertEqual(collect.call_args.kwargs['indexed_pages'], ['https://issuer.test/filings'])
+        self.assertEqual(collect.call_args.kwargs['indexed_pages'], [
+            'https://www.bursamalaysia.com/market_information/announcements/company_announcement',
+            'https://issuer.test/filings',
+        ])
         self.assertEqual(rows[0]['publication_date'], '2026-04-01')
         self.assertEqual(rows[0]['ai_confidence_basis'], 'issuer-hosted document listing')
 

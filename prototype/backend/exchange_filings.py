@@ -13,15 +13,61 @@ from approved_collector import AGENT, ApprovedRedirect, allowed, company_matches
 TWSE_DIRECTORY = 'https://openapi.twse.com.tw/v1/opendata/t187ap03_L'
 DART_SEARCH = 'https://dart.fss.or.kr/dsab001/search.ax'
 DART_VIEWER = 'https://opendart.fss.or.kr/xbrl/viewer/main.do'
-MARKET_DOMAINS = {
-    'SP': ('sgx.com',), 'IN': ('nseindia.com', 'bseindia.com'),
-    'HK': ('hkex.com.hk', 'hkexnews.hk'), 'CH': ('sse.com.cn', 'szse.cn', 'cninfo.com.cn', 'bse.cn'),
-    'TT': ('twse.com.tw', 'tpex.org.tw'), 'KS': ('opendart.fss.or.kr', 'kind.krx.co.kr'),
-    'KQ': ('opendart.fss.or.kr', 'kind.krx.co.kr'), 'MK': ('bursamalaysia.com',),
-    'IJ': ('idx.co.id',), 'TB': ('set.or.th',), 'PM': ('pse.com.ph',),
-    'VN': ('hsx.vn', 'hnx.vn'), 'AU': ('asx.com.au',), 'NZ': ('nzx.com',),
-    'BD': ('dsebd.org', 'cse.com.bd'), 'PA': ('psx.com.pk',), 'SL': ('cse.lk',),
+
+# Official disclosure authorities for every exchange code that the portfolio
+# importer accepts in Asia (Japan is deliberately absent).  A regulator or an
+# exchange, rather than a data vendor, is the authority for annual reports and
+# regulatory filings.  `search_url` is an issuer-level official portal entry
+# point; it is never itself saved as a filing because only a verified document
+# URL may satisfy source coverage.
+OFFICIAL_FILING_AUTHORITIES = {
+    'TT': {'country': 'Taiwan', 'name': 'MOPS / TWSE',
+           'domains': ('mops.twse.com.tw', 'twse.com.tw', 'tpex.org.tw'),
+           'search_url': 'https://mops.twse.com.tw/mops/web/index', 'direct': 'directory'},
+    'KS': {'country': 'South Korea', 'name': 'DART (Financial Supervisory Service)',
+           'domains': ('dart.fss.or.kr', 'opendart.fss.or.kr', 'kind.krx.co.kr'),
+           'search_url': 'https://dart.fss.or.kr/dsab001/main.do', 'direct': 'dart'},
+    'KQ': {'country': 'South Korea', 'name': 'DART (Financial Supervisory Service)',
+           'domains': ('dart.fss.or.kr', 'opendart.fss.or.kr', 'kind.krx.co.kr'),
+           'search_url': 'https://dart.fss.or.kr/dsab001/main.do', 'direct': 'dart'},
+    'HK': {'country': 'Hong Kong', 'name': 'HKEXnews',
+           'domains': ('hkex.com.hk', 'hkexnews.hk', 'www1.hkexnews.hk', 'www2.hkexnews.hk', 'www3.hkexnews.hk'),
+           'search_url': 'https://www1.hkexnews.hk/search/titlesearch.xhtml?lang=EN&market=SEHK', 'direct': 'portal'},
+    'CH': {'country': 'China', 'name': 'CNINFO / Shanghai and Shenzhen Exchanges',
+           'domains': ('cninfo.com.cn', 'sse.com.cn', 'szse.cn', 'bse.cn'),
+           'search_url': 'https://www.cninfo.com.cn/new/index', 'direct': 'portal'},
+    'SP': {'country': 'Singapore', 'name': 'SGXNet',
+           'domains': ('sgx.com',), 'search_url': 'https://www.sgx.com/securities/company-announcements', 'direct': 'portal'},
+    'IN': {'country': 'India', 'name': 'NSE / BSE corporate filings',
+           'domains': ('nseindia.com', 'bseindia.com'), 'search_url': 'https://www.nseindia.com/companies-listing/corporate-filings-announcements', 'direct': 'portal'},
+    'IJ': {'country': 'Indonesia', 'name': 'Indonesia Stock Exchange (IDX)',
+           'domains': ('idx.co.id',), 'search_url': 'https://www.idx.co.id/en/listed-companies/company-profiles/', 'direct': 'portal'},
+    'MK': {'country': 'Malaysia', 'name': 'Bursa Malaysia announcements',
+           'domains': ('bursamalaysia.com',), 'search_url': 'https://www.bursamalaysia.com/market_information/announcements/company_announcement', 'direct': 'portal'},
+    'TB': {'country': 'Thailand', 'name': 'Stock Exchange of Thailand (SET)',
+           'domains': ('set.or.th',), 'search_url': 'https://www.set.or.th/en/market/news-and-alert/news', 'direct': 'portal'},
+    'PM': {'country': 'Philippines', 'name': 'PSE EDGE',
+           'domains': ('pse.com.ph', 'edge.pse.com.ph'), 'search_url': 'https://edge.pse.com.ph/', 'direct': 'portal'},
+    'VN': {'country': 'Vietnam', 'name': 'HOSE / HNX disclosures',
+           'domains': ('hsx.vn', 'hnx.vn'), 'search_url': 'https://www.hsx.vn/Modules/Listed/Web/SymTrading', 'direct': 'portal'},
+    'BD': {'country': 'Bangladesh', 'name': 'Dhaka / Chittagong Stock Exchanges',
+           'domains': ('dsebd.org', 'cse.com.bd'), 'search_url': 'https://www.dsebd.org/', 'direct': 'portal'},
+    'PA': {'country': 'Pakistan', 'name': 'Pakistan Stock Exchange (PSX)',
+           'domains': ('psx.com.pk',), 'search_url': 'https://www.psx.com.pk/psx/resources-and-tools/listings', 'direct': 'portal'},
+    'SL': {'country': 'Sri Lanka', 'name': 'Colombo Stock Exchange (CSE)',
+           'domains': ('cse.lk',), 'search_url': 'https://www.cse.lk/pages/company-profile/company-profile.component.html', 'direct': 'portal'},
 }
+
+# Australasia is retained because it is explicitly within the application's
+# portfolio scope, despite not being geographically in Asia.
+OFFICIAL_FILING_AUTHORITIES.update({
+    'AU': {'country': 'Australia', 'name': 'ASX announcements',
+           'domains': ('asx.com.au',), 'search_url': 'https://www.asx.com.au/markets/trade-our-cash-market/announcements', 'direct': 'portal'},
+    'NZ': {'country': 'New Zealand', 'name': 'NZX announcements',
+           'domains': ('nzx.com',), 'search_url': 'https://www.nzx.com/announcements', 'direct': 'portal'},
+})
+
+MARKET_DOMAINS = {code: authority['domains'] for code, authority in OFFICIAL_FILING_AUTHORITIES.items()}
 WEBSITE_LABEL = re.compile(r'(?:(?:company|official|corporate|issuer|investor relations)\s+)?web\s*site\s*:?|official homepage', re.I)
 
 
@@ -35,9 +81,35 @@ def listing(company):
     return (match[1], match[2].upper()) if match else ('', '')
 
 
-def domains(company):
+def exchange_code(company):
+    """Return the Bloomberg exchange suffix without treating Japan as supported."""
     parts = (company.get('bloomberg_ticker') or '').upper().split()
-    return list(MARKET_DOMAINS.get(parts[1], ())) if len(parts) >= 2 else []
+    return parts[1] if len(parts) >= 2 and parts[1] in OFFICIAL_FILING_AUTHORITIES else ''
+
+
+def authority(company):
+    """Return this issuer's official annual-report/filing authority, if supported."""
+    code = exchange_code(company)
+    return {'exchange_code': code, **OFFICIAL_FILING_AUTHORITIES[code]} if code else None
+
+
+def domains(company):
+    registry = authority(company)
+    return list(registry['domains']) if registry else []
+
+
+def authority_metadata(company):
+    """Stable provenance for diagnostics and source records; never a filing URL."""
+    registry = authority(company)
+    if not registry:
+        return {}
+    return {
+        'registry': registry['name'],
+        'short_registry': registry['name'],
+        'authority_country': registry['country'],
+        'authority_exchange_code': registry['exchange_code'],
+        'authority_search_url': registry['search_url'],
+    }
 
 
 @lru_cache(maxsize=256)
@@ -186,7 +258,8 @@ def dart_filings(html, company, period):
         yield {'url': url, 'title': f'{company["name"]} {title}', 'source_type': kind,
                'period': period, 'publication_date': published, 'publication_date_source_url': url,
                'ai_confidence': 95, 'ai_confidence_basis': 'official regulator filing',
-               'ai_confidence_reason': 'DART lists the issuer-specific filing, reporting period and receipt date.'}
+               'ai_confidence_reason': 'DART lists the issuer-specific filing, reporting period and receipt date.',
+               **authority_metadata(company)}
 
 
 def collect(company, types, period, cutoff, public_url, timeout, website=''):
@@ -201,7 +274,8 @@ def collect(company, types, period, cutoff, public_url, timeout, website=''):
                  'period': period, 'publication_date': observed, 'source_date_basis': 'observed',
                  'publication_date_source_url': TWSE_DIRECTORY, 'ai_confidence': 95,
                  'ai_confidence_basis': 'official exchange issuer directory',
-                 'ai_confidence_reason': 'TWSE identifies this website for the issuer ticker. The date records when it was checked.'}]
+                 'ai_confidence_reason': 'TWSE identifies this website for the issuer ticker. The date records when it was checked.',
+                 **authority_metadata(company)}]
     if not set(types) & {'annual_report', 'regulatory_filing'}:
         return []
     deadline = time.monotonic() + timeout

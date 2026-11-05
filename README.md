@@ -50,16 +50,22 @@ Excel parsing runs in the browser using the bundled SheetJS CE 0.20.3 library in
 
 Runtime records and uploaded source files are stored in Supabase. The backend requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`; credentials stay server-side. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
 
+## Official filing authorities
+
+Annual reports and regulatory filings are authority-first. The discovery service maps each supported Bloomberg exchange code to its responsible regulator or exchange, rather than treating vendor pages as filings. The catalogue covers Taiwan (MOPS/TWSE), South Korea (DART), Hong Kong (HKEXnews), China (CNINFO/SSE/SZSE), Singapore (SGXNet), India (NSE/BSE), Indonesia (IDX), Malaysia (Bursa Malaysia), Thailand (SET), Philippines (PSE EDGE), Vietnam (HOSE/HNX), Bangladesh (DSE/CSE), Pakistan (PSX), and Sri Lanka (CSE). Australia (ASX) and New Zealand (NZX) remain supported for the portfolio's Australasia scope. Japan is intentionally excluded.
+
+An authority portal is used only to locate filings: a source is saved only after the system has verified a direct, issuer-matched document URL, publication date, reporting period, and site-access rules. If an authority provides a dynamic viewer or blocks automated reading, the source stays visibly unresolved and the PM can upload the official PDF/TXT file.
+
 ## Prototype limitations
 
-- Document search filters uploaded documents only. Use manual uploads for actual filings.
+- Discovery is authority-first for annual reports and regulatory filings. A filing is only saved after its direct document link, issuer, date, reporting period and access rules are verified; upload the official PDF/TXT when an authority's viewer cannot be read automatically.
 - Confirming a portfolio saves companies and a portfolio/benchmark snapshot, including the benchmark name. Both sets of weights must total 100%. Editable draft rows remain in browser memory during the session; saved snapshots persist in Supabase.
 - Country and sector are saved with company records and portfolio imports.
 - No multi-user authentication or encrypted storage.
 
 ## Working dataset
 
-Use `docs/Example 80 Stock Portfolio.xlsx` as the working portfolio. Demo loading is unavailable. Upload actual company documents before analysis; source search filters uploaded documents and does not retrieve filings from the web. Synthetic examples exist only in isolated automated test fixtures.
+Use `docs/Example 80 Stock Portfolio.xlsx` as the working portfolio. Demo loading is unavailable. Upload actual company documents before analysis when the relevant authority blocks automated document reading. Synthetic examples exist only in isolated automated test fixtures.
 
 ## Enable AI
 
