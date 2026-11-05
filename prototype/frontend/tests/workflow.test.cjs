@@ -272,6 +272,109 @@ test('Dashboard shows a loading spinner until its data request completes',async(
   await render;
   assert.doesNotMatch(node('#page-content').innerHTML,/dashboard-loading/);
   assert.match(node('#page-content').innerHTML,/Company-level exposure/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/class="label">Portfolio exposure</);
+  assert.match(node('#page-content').innerHTML,/class="label">Benchmark exposure</);
+  assert.match(node('#page-content').innerHTML,/class="metric-grid dashboard-summary-metrics"/);
+});
+test('Dashboard charts top ten active contributions and filters the Tier-2 pie by Tier-1',async()=>{
+  const {run,node} = setup();
+  run(`state = {
+    themes:[{id:'theme-1',theme_name:'AI',approved:true,nodes:[
+      {node_id:'compute',parent_id:null,name:'Compute'},
+      {node_id:'chips',parent_id:'compute',name:'Chips'},
+      {node_id:'cloud',parent_id:'compute',name:'Cloud'},
+      {node_id:'energy',parent_id:null,name:'Energy'},
+      {node_id:'wind',parent_id:'energy',name:'Wind'}
+    ]}],
+    portfolio_imports:[{id:'portfolio-1',theme_id:'theme-1',name:'Core',snapshot_id:'snapshot-1'}],
+    snapshots:[{id:'snapshot-1',portfolio:[]}],
+    companies:Array.from({length:12},(_,i)=>({id:'company-'+(i+1),name:i===0?'TSMC':'Company '+(i+1)})),
+    sources:[],
+    cases:Array.from({length:12},(_,i)=>({
+      company_id:'company-'+(i+1),theme_id:'theme-1',review_status:'approved',
+      estimate:{subthemes:{chips:{point:0.5},cloud:{point:0.5},wind:{point:1}}}
+    }))
+  };
+  selectedDashboardThemeId='theme-1';
+  api=async()=>({
+    summary:{portfolio:{point:0.25},benchmark:{point:0.20},active:{point:0.05}},
+    coverage:{portfolio:0,benchmark:0},
+    companies:Array.from({length:12},(_,i)=>({
+      company_id:'company-'+(i+1),assessed:true,
+      weights:{portfolio:0.24-i*0.02,benchmark:0.3,active:-0.06-i*0.02},
+      exposure:{point:0.5},
+      contributions:{
+        active:{point:-0.06-i*0.02},
+        portfolio:{point:0.12-i*0.01}
+      }
+    }))
+  });`);
+  await run('viewDashboard()');
+  const html = node('#page-content').innerHTML;
+  assert.match(html,/<div class="label">Coverage<\/div>\s*<div class="value">15\.0%<\/div>\s*<div class="meta">Benchmark exposure − active exposure<\/div>/);
+  assert.match(html,/Top 10 of 12/);
+  assert.match(html,/Portfolio exposure contribution \(%\)/);
+  assert.match(html,/TSMC/);
+  const chart = html.match(/class="portfolio-contribution-chart"[\s\S]*?<\/svg>/)?.[0] || '';
+  assert.match(chart,/Company 10/);
+  assert.doesNotMatch(chart,/Company 11/);
+  assert.doesNotMatch(chart,/contribution-bar negative/);
+  assert.doesNotMatch(chart,/>-[\d.]+%<\/text>/);
+  assert.match(html,/id="dashboard-tier1-select"/);
+  assert.match(html,/aria-label="Tier-2 exposure split for Compute"/);
+  assert.match(html,/Chips/);
+  assert.match(html,/Cloud/);
+  node('#dashboard-tier1-select').change({target:{value:'energy'}});
+  assert.match(node('#subtheme-pie-content').innerHTML,/Wind/);
+  assert.doesNotMatch(node('#subtheme-pie-content').innerHTML,/Chips/);
+});
+test('Dashboard demo toggle previews sample data without changing workspace data or selections',async()=>{
+  const {run,node,storage} = setup();
+  run(`state = {
+    themes:[{id:'real-theme',theme_name:'Real Theme',approved:true,nodes:[]}],
+    portfolio_imports:[{id:'real-portfolio',theme_id:'real-theme',name:'Real Portfolio',snapshot_id:'real-snapshot'}],
+    snapshots:[{id:'real-snapshot',portfolio:[]}],
+    companies:[{id:'real-company',name:'Real Company'}],
+    sources:[],cases:[]
+  };
+  selectedDashboardThemeId='real-theme';
+  selectedDashboardPortfolioId='real-portfolio';
+  let dashboardApiCalls=0;
+  api=async()=>{dashboardApiCalls++;return {
+    summary:{portfolio:{point:0},benchmark:{point:0},active:{point:0}},
+    coverage:{portfolio:0,benchmark:0},companies:[]
+  };};`);
+  const initialWorkspace = run('JSON.stringify(state)');
+  await run('viewDashboard()');
+  const savedSelection = storage.get('theme-lab-dashboard-selection');
+  assert.match(node('#page-content').innerHTML,/id="dashboard-demo-toggle"/);
+  node('#dashboard-demo-toggle').change({target:{checked:true}});
+  const demoHtml = node('#page-content').innerHTML;
+  assert.match(demoHtml,/Illustrative sample only; your workspace data is unchanged/);
+  assert.match(demoHtml,/Demo Semiconductor Co\./);
+  assert.match(demoHtml,/Portfolio exposure contributions/);
+  assert.equal(run('dashboardApiCalls'),1);
+  assert.equal(run('JSON.stringify(state)'),initialWorkspace);
+  assert.equal(run('selectedDashboardThemeId'),'real-theme');
+  assert.equal(run('selectedDashboardPortfolioId'),'real-portfolio');
+  assert.equal(storage.get('theme-lab-dashboard-selection'),savedSelection);
+
+  node('#dashboard-demo-toggle').change({target:{checked:false}});
+  await run('new Promise(resolve=>setTimeout(resolve,0))');
+  assert.match(node('#page-content').innerHTML,/Real Theme/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Demo Semiconductor Co\./);
+  assert.equal(run('dashboardApiCalls'),2);
+  assert.equal(run('JSON.stringify(state)'),initialWorkspace);
+});
+test('Dashboard demo toggle works when the workspace has no approved theme or portfolio',async()=>{
+  const {run,node} = setup();
+  run(`let dashboardApiCalls=0;
+  api=async()=>{dashboardApiCalls++;return null;};`);
+  await run('viewDashboard()');
+  node('#dashboard-demo-toggle').change({target:{checked:true}});
+  assert.match(node('#page-content').innerHTML,/Demo Semiconductor Co\./);
+  assert.match(node('#page-content').innerHTML,/id="dashboard-tier1-select"/);
+  assert.equal(run('dashboardApiCalls'),0);
 });
 test('Dashboard New theme sits above the selector and opens a blank editor',async()=>{
   const {run,node} = setup();

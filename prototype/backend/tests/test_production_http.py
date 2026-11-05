@@ -45,6 +45,21 @@ class ProductionHttpTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def request_login(self):
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=10)
+        try:
+            connection.request('POST', '/api/login', json.dumps({
+                'username': 'test', 'password': 'test',
+            }), {
+                'Host': '127.0.0.1',
+                'Origin': 'http://127.0.0.1',
+                'Content-Type': 'application/json',
+            })
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
     def test_dashboard_works_through_production_proxy(self):
         with patch.object(app.app_auth, 'valid', return_value=True):
             status, body = self.request_dashboard('https://is4002.com')
@@ -55,6 +70,13 @@ class ProductionHttpTest(unittest.TestCase):
     def test_dashboard_requires_login(self):
         status, body = self.request_dashboard('https://is4002.com')
         self.assertEqual(status, 401)
+
+    def test_login_reports_unavailable_shared_redis(self):
+        with patch.object(app.app_auth, 'client', side_effect=RuntimeError(
+                'A shared Redis server is required for login')):
+            status, body = self.request_login()
+        self.assertEqual(status, 503)
+        self.assertIn('REDIS_URL', body['error'])
 
     def test_proxy_headers_do_not_allow_an_untrusted_origin(self):
         status, _ = self.request_dashboard('https://attacker.example')
