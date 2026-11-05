@@ -54,6 +54,8 @@ class Queue:
                     existing = json.loads(row[0])
                     if existing.get('job_type') == 'financials' and existing.get('portfolio_id') == run['portfolio_id']:
                         return existing
+            if run.get('search_mode') in ('short', 'long'):
+                run['awaiting_worker'] = True
             db.execute('INSERT INTO jobs (id, payload, companies, state) VALUES (?, ?, ?, ?)',
                        (run['id'], json.dumps(run), json.dumps(companies), 'queued'))
         return run
@@ -293,6 +295,9 @@ def execute(job_id):
                     pass
         else:
             import source_discovery
+            if run.pop('awaiting_worker', False):
+                run['deadline_unix'] = time.time() + run.get('time_limit_seconds', source_discovery.SEARCH_TIME_LIMIT_SECONDS)
+                queue.save(run)
             source_discovery.worker(WorkerApp(), run, companies)
 
 

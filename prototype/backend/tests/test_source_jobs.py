@@ -37,6 +37,17 @@ class SourceJobsTest(unittest.TestCase):
         with reopened.connect() as db:
             self.assertNotIn('deadline', [column[1] for column in db.execute('PRAGMA table_info(jobs)')])
 
+    def test_source_search_budget_starts_after_waiting_for_a_financial_job(self):
+        run = {**self.run, 'search_mode': 'short', 'time_limit_seconds': 60, 'deadline_unix': time.time() - 100}
+        self.queue.enqueue(run, [])
+        with patch.object(source_jobs, 'database_path', return_value=self.path), \
+                patch('source_discovery.worker'):
+            source_jobs.execute(run['id'])
+            saved, _ = self.queue.job(run['id'])
+            self.assertGreater(saved['deadline_unix'], time.time() + 59)
+            source_jobs.execute(run['id'])
+        self.assertEqual(self.queue.job(run['id'])[0]['deadline_unix'], saved['deadline_unix'])
+
     def test_uploaded_source_metadata_survives_restart_until_acknowledged(self):
         self.queue.enqueue(self.run, [])
         record = {'id': 'source-a', 'storage_path': 'sources/source-a.pdf', 'url': 'https://example.com/a'}
