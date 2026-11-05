@@ -19,6 +19,7 @@ import zipfile
 import engine
 import financials
 import financial_research
+import gemini_fallback
 import supabase_store
 import source_cache
 import app_auth
@@ -592,18 +593,21 @@ def llm(task, payload, run_rec):
     max_attempts = 4
     for attempt in range(max_attempts):
         try:
-            with urlopen(request, timeout=90) as response:
-                output = json.load(response)
+            output, model_info = gemini_fallback.request_json(request, 90, open_request=urlopen)
             put('provider_outputs', {'id': call['id'], 'response': output, 'created_at': now()})
             value = json.loads(output['choices'][0]['message']['content'])
             if not isinstance(value, dict):
                 raise ValueError('Model response must be a JSON object')
-            call.update(status='completed', usage=output.get('usage', {}), finished_at=now())
+            call.update(status='completed', usage=output.get('usage', {}), finished_at=now(), **model_info)
             put('model_calls', call)
-            run_rec['usage'].append({'task': task, 'model': model, 'usage': call['usage'],
+            run_rec['usage'].append({'task': task, **model_info, 'usage': call['usage'],
                                      'call_id': call['id'], 'cached': False})
             put('cache', {'id': cache_key, 'response': value})
             return value
+        except gemini_fallback.ModelsExhausted as error:
+            call.update(status='failed', error=str(error), model_attempts=error.attempts, finished_at=now())
+            put('model_calls', call)
+            raise ValueError(str(error)) from None
         except HTTPError as error:
             call.update(status='failed', error=f'Provider HTTP {error.code}')
             put('model_calls', call)
@@ -615,7 +619,7 @@ def llm(task, payload, run_rec):
                 call = put('model_calls', {'id': ident('call'), 'created_at': now(),
                                            'task': task, 'model': model, 'status': 'retry'})
             time.sleep(2 * (attempt + 1))
-        except (URLError, KeyError, json.JSONDecodeError) as error:
+        except (URLError, TimeoutError, KeyError, json.JSONDecodeError) as error:
             call.update(status='failed', error=type(error).__name__)
             put('model_calls', call)
             raise ValueError('Provider connection or JSON response failed') from None

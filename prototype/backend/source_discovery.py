@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urldefrag, parse_qs, unquote
 from urllib.request import Request, build_opener, HTTPRedirectHandler, urlopen
+import gemini_fallback
 
 TYPES = ('annual_report', 'regulatory_filing', 'earnings_call',
          'investor_presentation', 'sustainability_report', 'company_website', 'other')
@@ -24,7 +25,7 @@ SOURCE_TYPE_EVIDENCE = {
     'sustainability_report': r'sustainability report|esg report|business responsibility|corporate social responsibility|永續報告|可持續發展報告|지속가능경영보고서|laporan keberlanjutan|báo cáo phát triển bền vững|รายงานความยั่งยืน',
     'company_website': r'investor relations|corporate overview|company overview|about us|business overview',
 }
-FIRST_PASS_MODEL = 'gemini-3.5-flash-lite'
+FIRST_PASS_MODEL = gemini_fallback.DEFAULT_MODELS[0]
 MISSING_RESULTS_MODEL = 'gemini-3.8-flash'
 DOCUMENTS_PER_TYPE = 2
 MAX_SOURCE_TYPES_PER_SEARCH = 2
@@ -385,7 +386,9 @@ def legacy_grounded_search(company, types, period, cutoff, broad, timeout, exclu
                       data=json.dumps(request_body).encode(),
                       headers={'x-goog-api-key': key, 'Content-Type': 'application/json'})
     try:
-        with urlopen(request, timeout=timeout) as response: output = json.load(response)
+        output, model_info = gemini_fallback.request_json(request, timeout, open_request=urlopen)
+    except gemini_fallback.ModelsExhausted as error:
+        raise ProviderError(str(error), error.code, {'model_attempts': error.attempts}) from error
     except HTTPError as error:
         if error.code == 429:
             raise ProviderError('Google Search grounding is blocked by this project quota or billing settings (HTTP 429). '
@@ -414,8 +417,7 @@ def legacy_grounded_search(company, types, period, cutoff, broad, timeout, exclu
                 and r.get('source_type') in types
                 and not website_is_excluded(r.get('url'), excluded_sites_by_type.get(r.get('source_type'), ()))]
     diagnostics = {
-        'model': model,
-        'fallback_used': False,
+        **model_info,
         'step_types': [step.get('type') for step in steps if step.get('type')],
         'google_search_calls': search_call_count,
         'candidate_count': len(rows),
@@ -646,9 +648,13 @@ def grounded_search(company, types, period, cutoff, broad, timeout, exclude_urls
     deadline = started + timeout
     for attempt in range(3):
         try:
-            with urlopen(request, timeout=max(.1, deadline - time.monotonic())) as response:
-                output = json.load(response)
+            output, model_info = gemini_fallback.request_json(
+                request, max(.1, deadline - time.monotonic()), open_request=urlopen)
+            diagnostics.update(model_info)
             break
+        except gemini_fallback.ModelsExhausted as error:
+            diagnostics['model_attempts'] = error.attempts
+            return classification_failure(str(error), error.code)
         except HTTPError as error:
             if error.code not in (500, 502, 503, 504):
                 return classification_failure(f'Gemini source classification failed (HTTP {error.code}). Check the key, model access or quota.', error.code)

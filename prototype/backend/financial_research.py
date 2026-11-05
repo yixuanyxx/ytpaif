@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+import gemini_fallback
 
 
 DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions'
@@ -82,8 +83,7 @@ def research_company(company, sources, timeout=90):
         data=json.dumps({'model': model, 'input': prompt,
                          'tools': [{'type': 'google_search', 'search_types': ['web_search']}]}).encode(),
         headers={'x-goog-api-key': key, 'Content-Type': 'application/json'})
-    with urlopen(request, timeout=timeout) as response:
-        output = json.load(response)
+    output, model_info = gemini_fallback.request_json(request, timeout, open_request=urlopen)
     text = '\n'.join(block.get('text', '') for step in output.get('steps', [])
                      if step.get('type') == 'model_output' for block in step.get('content', []))
     response = _json(text)
@@ -91,6 +91,7 @@ def research_company(company, sources, timeout=90):
         'market_cap': consensus([row for item in response.get('market_cap', []) if (row := _candidate(item, allowed_ids))]),
         'net_revenue': consensus([row for item in response.get('net_revenue', []) if (row := _candidate(item, allowed_ids))]),
         'source_count': len(allowed_ids),
+        **model_info,
     }
 
 
@@ -102,6 +103,9 @@ def populate(companies, sources_by_company):
             company = futures[future]
             try:
                 results[company['id']] = future.result()
+            except gemini_fallback.ModelsExhausted as error:
+                results[company['id']] = {'error': str(error), 'http_status': error.code,
+                                          'model_attempts': error.attempts}
             except HTTPError as error:
                 message = {
                     400: 'Financial AI rejected the request (HTTP 400). Check the model and endpoint configuration.',

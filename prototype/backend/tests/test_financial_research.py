@@ -9,6 +9,23 @@ import financial_research
 
 
 class FinancialConsensusTest(unittest.TestCase):
+    def setUp(self):
+        blocked = patch.dict(financial_research.gemini_fallback._blocked, {}, clear=True)
+        blocked.start()
+        self.addCleanup(blocked.stop)
+
+    def test_financial_quota_falls_back_and_returns_supported_figures(self):
+        output = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({
+            'market_cap': [], 'net_revenue': [{'source_id': 'report', 'value': 'USD 20 million', 'year': '2026'}],
+        })}]}]}
+        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'test', 'FINANCIALS_LLM_MODEL': 'gemini-3.8-flash'}), \
+                patch.object(financial_research, 'urlopen', side_effect=[
+                    HTTPError('https://provider', 429, 'Quota', {}, None), io.BytesIO(json.dumps(output).encode())]) as send:
+            result = financial_research.research_company({'name': 'Example'}, [{'id': 'report'}])
+        self.assertEqual(result['model'], 'gemini-3.7-flash')
+        self.assertEqual(result['net_revenue']['value'], 'USD 20 million')
+        self.assertEqual(send.call_count, 2)
+
     def test_legacy_chat_endpoint_uses_grounded_interactions(self):
         output = {'steps': [{'type': 'model_output', 'content': [{'text': json.dumps({
             'market_cap': [],

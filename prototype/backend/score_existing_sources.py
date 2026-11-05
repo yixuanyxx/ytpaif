@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 import app
 import source_discovery
 import source_jobs
+import gemini_fallback
 
 BATCH_SIZE = 15
 DEMO_PORTFOLIO_NAME = re.compile(r'(?:demo|example|test(?:ing)?)', re.I)
@@ -36,8 +37,7 @@ def assess(records):
                       headers={'x-goog-api-key': key, 'Content-Type': 'application/json'})
     for attempt in range(3):
         try:
-            with urlopen(request, timeout=45) as response:
-                output = json.load(response)
+            output, _ = gemini_fallback.request_json(request, 45, open_request=urlopen)
             break
         except (HTTPError, URLError, TimeoutError) as error:
             if isinstance(error, HTTPError) and error.code not in (500, 502, 503, 504):

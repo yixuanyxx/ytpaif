@@ -30,7 +30,12 @@ def saved_document(app, run, company, row, timeout=20):
 
 
 class DiscoveryTest(unittest.TestCase):
-    def test_transient_gemini_error_retries_without_grounding(self):
+    def setUp(self):
+        blocked = patch.dict(discovery.gemini_fallback._blocked, {}, clear=True)
+        blocked.start()
+        self.addCleanup(blocked.stop)
+
+    def test_busy_model_falls_back_without_enabling_grounding(self):
         import approved_collector
         candidates = [{'url': 'https://reuters.com/2025', 'title': 'Example annual report 2025',
                        'context': 'Example annual report 2025 published 2026-04-01'}]
@@ -40,8 +45,10 @@ class DiscoveryTest(unittest.TestCase):
              patch.object(approved_collector, 'collect', return_value=(candidates, True)), \
              patch.object(discovery.time, 'sleep'), \
              patch.object(discovery, 'urlopen', side_effect=[error, io.BytesIO(json.dumps(output).encode())]) as send:
-            discovery.grounded_search({'name': 'Example'}, ['annual_report'], '2025', '2026-11-03', False, 20)
+            rows = discovery.grounded_search({'name': 'Example'}, ['annual_report'], '2025', '2026-11-03', False, 20)
         self.assertEqual(send.call_count, 2)
+        self.assertEqual(rows.diagnostics['model'], 'gemini-3.7-flash')
+        self.assertTrue(rows.diagnostics['fallback_used'])
 
     def test_coforge_official_site_is_approved(self):
         self.assertTrue(discovery.approved_source_url('https://investors.coforge.com/annual-report', {'name': 'COFORGE LTD'}))
@@ -169,7 +176,7 @@ class DiscoveryTest(unittest.TestCase):
         request = send.call_args.args[0]
         body = json.loads(request.data)
         self.assertNotIn('tools', body)
-        self.assertEqual(body['model'], 'gemini-3.5-flash-lite')
+        self.assertEqual(body['model'], 'gemini-3.8-flash')
         self.assertEqual(request.get_header('X-goog-api-key'), 'free-test-key')
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['url'], candidates[0]['url'])
@@ -264,7 +271,7 @@ class DiscoveryTest(unittest.TestCase):
     def test_both_grounded_search_models_share_one_api_key(self):
         output = {'steps': [{'type': 'google_search_call'}, {'type': 'model_output', 'content': [{
             'text': '{"sources":[]}', 'annotations': [{'type': 'url_citation', 'url': 'https://example.com'}]}]}]}
-        for broad, expected in ((False, 'gemini-3.5-flash-lite'), (True, 'gemini-3.8-flash')):
+        for broad, expected in ((False, 'gemini-3.8-flash'), (True, 'gemini-3.8-flash')):
             with self.subTest(broad=broad), patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'shared-test-key'}), \
                     patch.object(discovery, 'urlopen', return_value=io.BytesIO(json.dumps(output).encode())) as send:
                 discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', broad, 5)
@@ -294,8 +301,8 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result['company_ids'], ['a'])
         self.assertEqual(result['source_types'], ['annual_report'])
         self.assertEqual(result['documents_per_type'], 2)
-        self.assertEqual(result['search_models'], {'first_pass': 'gemini-3.5-flash-lite',
-                                                 'missing_results': 'gemini-3.5-flash-lite'})
+        self.assertEqual(result['search_models'], {'first_pass': 'gemini-3.8-flash',
+                                                 'missing_results': 'gemini-3.8-flash'})
         self.assertEqual(result['storage_mode'], 'url_only')
         self.assertEqual(result['period'], '2026')
         self.assertEqual(result['search_periods'], ['2026', '2025', '2024'])
@@ -502,7 +509,7 @@ class DiscoveryTest(unittest.TestCase):
             discovery.worker(app, run, companies)
         self.assertEqual(run['status'], 'completed')
         self.assertTrue(run['first_pass_completed'])
-        self.assertEqual(run['current_search_model'], 'gemini-3.5-flash-lite')
+        self.assertEqual(run['current_search_model'], 'gemini-3.8-flash')
         self.assertEqual(searches.call_count, 4)
         self.assertEqual(len(download_calls), 12)  # No first-pass cap of two.
         self.assertEqual(run['results_count'], 12)
@@ -649,7 +656,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(len(app.pending_sources()), 1)
 
     def test_quota_error_stops_with_actionable_message(self):
-        with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), patch.object(
+        with patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test', 'GEMINI_MODEL_FALLBACKS': ''}), patch.object(
                 discovery, 'urlopen', side_effect=HTTPError('https://provider', 429, 'Quota', {}, None)) as request:
             with self.assertRaisesRegex(discovery.ProviderError, 'quota.*billing'):
                 discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', False, 1)
@@ -668,8 +675,8 @@ class DiscoveryTest(unittest.TestCase):
 
     def test_unavailable_models_report_project_access_restriction(self):
         body = json.dumps({'error': {'message': 'This model is no longer available to new users.'}}).encode()
-        for broad, model in ((False, 'gemini-3.5-flash-lite'), (True, 'gemini-3.8-flash')):
-            with self.subTest(broad=broad), patch.dict(discovery.os.environ, {'GEMINI_API_KEY': 'test'}), \
+        for broad, model in ((False, 'gemini-3.8-flash'), (True, 'gemini-3.8-flash')):
+            with self.subTest(broad=broad), patch.dict(discovery.os.environ, {'GEMINI_API_KEY': f'test-{broad}', 'GEMINI_MODEL_FALLBACKS': ''}), \
                     patch.object(discovery, 'urlopen', side_effect=HTTPError('https://provider', 404, 'Unavailable', {}, io.BytesIO(body))):
                 with self.assertRaisesRegex(discovery.ProviderError, model + ' is no longer available'):
                     discovery.legacy_grounded_search({'name': 'Example'}, ['annual_report'], '', '2026-11-02', broad, 5)

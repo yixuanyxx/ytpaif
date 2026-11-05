@@ -12,6 +12,19 @@ from urllib.error import HTTPError
 from test_fixtures import MemoryStore, demo
 
 class AppFlowTest(unittest.TestCase):
+    def test_general_ai_falls_back_and_records_the_model_used(self):
+        output = json.dumps({'choices': [{'message': {'content': '{}'}}]}).encode()
+        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'test', 'LLM_MODEL': 'gemini-3.8-flash'}), \
+                patch.object(self.app, 'urlopen', side_effect=[
+                    HTTPError('https://provider', 503, 'Busy', {}, None), io.BytesIO(output)]) as send:
+            run = {'usage': []}
+            result = self.app.llm('taxonomy', {}, run)
+        self.assertEqual(result, {})
+        self.assertEqual(run['usage'][0]['model'], 'gemini-3.7-flash')
+        self.assertTrue(run['usage'][0]['fallback_used'])
+        self.assertEqual(self.app.all_records('model_calls')[0]['model'], 'gemini-3.7-flash')
+        self.assertEqual(send.call_count, 2)
+
     def test_financial_populate_counts_supported_results_and_preserves_unresolved_values(self):
         portfolio = {'id': 'financial-test', 'rows': [
             {'company_id': 'DEMO_A'}, {'company_id': 'DEMO_B'}, {'company_id': 'DEMO_MIXED'},
@@ -147,6 +160,9 @@ class AppFlowTest(unittest.TestCase):
             sys.path.insert(0, proto_dir)
         import app
         self.app = importlib.reload(app)
+        blocked = patch.dict(self.app.gemini_fallback._blocked, {}, clear=True)
+        blocked.start()
+        self.addCleanup(blocked.stop)
         self.app.store = MemoryStore()
         self.source_upload_mock = patch.object(self.app.supabase_store, 'upload_source')
         self.source_upload_mock.start()
