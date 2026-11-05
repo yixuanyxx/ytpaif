@@ -625,23 +625,69 @@ test('Financials use evidence and keep missing values unknown',()=>{
   assert.equal(run(`getCompanyFinancials({id:'a'}, {}, [{filename:'report.txt',financial_facts:[{metric:'revenue',display:'USD 100 million',page:2}]}], []).rev`),'USD 100 million');
 });
 
-test('Financial populate shows quota failures and unresolved companies',async()=>{
+test('Financial populate shows quota failures and unresolved companies in a modal',async()=>{
   const {run,node} = setup();
+  const dialog = node('#alert-modal');
+  dialog.showModal = () => { dialog.open = true; };
+  dialog.close = () => { dialog.open = false; };
+  node('#alert-modal-ok').focus = () => {};
+  dialog.classList.toggle = (name, enabled) => { dialog.dataset[name] = enabled; };
   run(`currentView = 'dashboard';
     api = async () => ({updated:0,failed:2,unresolved:1,results:{
       a:{error:'Financial AI quota or rate limit exceeded (HTTP 429).'},
       b:{error:'Financial AI quota or rate limit exceeded (HTTP 429).'}
     }});
-    refresh = async () => {};
-    run = async fn => fn();
-    notice = (message, level) => { window.financialNotice = {message, level}; };`);
+    refresh = async () => {};`);
   await run("window.populatePortfolioFinancials('p')");
-  assert.match(run('window.financialNotice.message'),/Lookup failed for 2 companies/);
-  assert.match(run('window.financialNotice.message'),/No supported financial figures found for 1 of the companies/);
-  assert.match(run('window.financialNotice.message'),/quota.*HTTP 429/);
-  assert.equal(run('window.financialNotice.message').match(/HTTP 429/g).length,1);
-  assert.equal(run('window.financialNotice.level'),'warning');
+  const message = node('#alert-modal-message').textContent;
+  assert.match(message,/Lookup failed for 2 companies/);
+  assert.match(message,/No supported financial figures found for 1 of the companies/);
+  assert.match(message,/quota.*HTTP 429/);
+  assert.equal(message.match(/HTTP 429/g).length,1);
+  assert.equal(dialog.open,true);
+  assert.equal(dialog.dataset['search-completion-modal'],true);
+  assert.equal(node('#notice-area').innerHTML,'');
+  assert.equal(node('#loading-overlay').hidden,true);
   assert.equal(node('#btn-populate-financials').disabled,false);
+  node('#alert-modal-ok').onclick();
+  assert.equal(dialog.open,false);
+});
+
+test('Financial request errors reach the modal through the normal button handler',async()=>{
+  const {run,node} = setup();
+  const dialog = node('#alert-modal');
+  dialog.showModal = () => { dialog.open = true; };
+  node('#alert-modal-ok').focus = () => {};
+  run(`api = async () => { throw new Error('Service unavailable (HTTP 503)'); };`);
+  await run("window.populatePortfolioFinancials('p')");
+  assert.equal(dialog.open,true);
+  assert.equal(node('#alert-modal-title').textContent,'Financial lookup failed');
+  assert.match(node('#alert-modal-message').textContent,/Service unavailable \(HTTP 503\)/);
+  assert.equal(node('#notice-area').innerHTML,'');
+  assert.equal(node('#loading-overlay').hidden,true);
+  assert.equal(node('#btn-populate-financials').disabled,false);
+});
+
+test('Short and long search submission errors open the completion modal',async()=>{
+  for (const button of ['#btn-run-search','#btn-run-long-search']) {
+    const {run,node,context} = setup();
+    context.document.querySelectorAll = selector =>
+      selector === 'input[name="company_ids"]:checked' ? [{value:'a'}] :
+      selector === 'input[name="source_types"]:checked' ? [{value:'annual_report'}] : [];
+    const dialog = node('#alert-modal');
+    dialog.showModal = () => { dialog.open = true; };
+    node('#alert-modal-ok').focus = () => {};
+    dialog.classList.toggle = (name, enabled) => { dialog.dataset[name] = enabled; };
+    await run(`currentView='sources'; selectedDashboardThemeId='t'; selectedSourcePortfolioId='p';
+      state.portfolio_imports=[{id:'p',theme_id:'t',name:'Portfolio',rows:[{company_id:'a'}]}];
+      api=async()=>{throw new Error('Provider quota exceeded (HTTP 429)');};
+      viewSources();`);
+    await node(button).onclick();
+    assert.equal(dialog.open,true);
+    assert.equal(dialog.dataset['search-completion-modal'],true);
+    assert.match(node('#alert-modal-message').textContent,/Could not start source search.*HTTP 429/);
+    assert.equal(node(button).disabled,false);
+  }
 });
 test('Financial citations count documents separately from source categories',()=>{
   const {run} = setup();

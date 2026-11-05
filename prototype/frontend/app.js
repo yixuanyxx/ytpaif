@@ -14,6 +14,7 @@ let selectedSourcePortfolioId = '';
 let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
 let sourceSearchPollTimer = null;
+let sourceSearchPollErrorShown = false;
 let sourceSearchStarting = false;
 let displayedSourceSearchId = '';
 const trackedSourceSearches = new Set();
@@ -102,6 +103,7 @@ function monitorSourceSearches() {
       if (!running.length) return;
       const previousSummaries = state.source_summaries || [];
       await refresh();
+      sourceSearchPollErrorShown = false;
       if (currentView === 'sources') {
         updateSourceSearchLock();
         await updateSourceLibraryProgress(previousSummaries);
@@ -123,6 +125,10 @@ function monitorSourceSearches() {
     } catch (error) {
       const status = $('#source-search-status');
       if (currentView === 'sources' && status) status.textContent = `Could not check source-search status: ${error.message}`;
+      if (!sourceSearchPollErrorShown && !$('#alert-modal')?.open) {
+        sourceSearchPollErrorShown = true;
+        showAlert(`Could not check source-search status: ${error.message}`, 'Source search status unavailable', { searchCompletion: true });
+      }
     } finally {
       sourceSearchPollTimer = null;
       monitorSourceSearches();
@@ -2572,15 +2578,15 @@ async function viewSources() {
     const cutoff = $('#src-cutoff')?.value || new Date().toISOString().slice(0, 10);
     const latestDocuments = $('#src-latest-documents')?.checked ?? true;
     if (selectedCompanyIds.length === 0) {
-      showAlert('Select at least one company to search.', 'Company selection');
+      showAlert('Select at least one company to search.', 'Company selection', { searchCompletion: true });
       return;
     }
     if (selectedTypes.length === 0) {
-      showAlert('Select at least one source type per search.', 'Source type selection');
+      showAlert('Select at least one source type per search.', 'Source type selection', { searchCompletion: true });
       return;
     }
     if (selectedTypes.filter(type => type !== 'other').length > maxSourceTypes) {
-      showAlert(`Choose up to ${maxSourceTypes} source types per search.`, 'Source type selection');
+      showAlert(`Choose up to ${maxSourceTypes} source types per search.`, 'Source type selection', { searchCompletion: true });
       return;
     }
     sourceSearchStarting = true;
@@ -2611,6 +2617,7 @@ async function viewSources() {
     monitorSourceSearches();
     } catch (error) {
       if (currentView === 'sources') $('#source-search-status').textContent = `Could not start search: ${error.message}`;
+      showAlert(`Could not start source search: ${error.message}`, 'Source search failed', { searchCompletion: true });
     } finally {
       sourceSearchStarting = false;
       if (currentView === 'sources') updateSourceSearchLock();
@@ -2632,6 +2639,7 @@ async function viewSources() {
       if (currentView === 'sources') {
         $('#source-search-status').textContent = `Could not stop source search: ${error.message}`;
       }
+      showAlert(`Could not stop source search: ${error.message}`, 'Source search could not stop', { searchCompletion: true });
       button.disabled = false;
     }
   });
@@ -3139,21 +3147,22 @@ window.selectCompanyForUpload = function(companyId, sourceType) {
 window.populatePortfolioFinancials = async function(portfolioId) {
   const button = document.getElementById('btn-populate-financials');
   if (button) button.disabled = true;
+  showLoading('Reading source documents and reconciling financial values…');
+  clearNotice();
   try {
-    await run(async () => {
-      const result = await api('financials/populate', { portfolio_id: portfolioId }, { timeoutMs: 10 * 60 * 1000 });
-      await refresh();
-      if (currentView === 'sources') await viewSources();
-      const messages = [`Financial values updated for ${result.updated} companies.`];
-      if (result.unresolved) messages.push(`No supported financial figures found for ${result.unresolved} of the companies.`);
-      if (result.failed) messages.push(`Lookup failed for ${result.failed} companies.`);
-      const errors = [...new Set(Object.values(result.results || {}).map(item => item.error).filter(Boolean))];
-      messages.push(...errors);
-      notice(messages.join(' '), result.failed || result.unresolved ? 'warning' : 'success');
-    }, 'Reading source documents and reconciling financial values…');
+    const result = await api('financials/populate', { portfolio_id: portfolioId }, { timeoutMs: 10 * 60 * 1000 });
+    await refresh();
+    if (currentView === 'sources') await viewSources();
+    const messages = [`Financial values updated for ${result.updated} companies.`];
+    if (result.unresolved) messages.push(`No supported financial figures found for ${result.unresolved} of the companies.`);
+    if (result.failed) messages.push(`Lookup failed for ${result.failed} companies.`);
+    const errors = [...new Set(Object.values(result.results || {}).map(item => item.error).filter(Boolean))];
+    messages.push(...errors);
+    showAlert(messages.join(' '), 'Financial lookup finished', { searchCompletion: true });
   } catch (error) {
-    showAlert(`Could not populate financial data: ${error.message}`, 'Financial data search');
+    showAlert(`Could not populate financial data: ${error.message}`, 'Financial lookup failed', { searchCompletion: true });
   } finally {
+    hideLoading();
     if (button) button.disabled = false;
   }
 };
