@@ -18,7 +18,6 @@ import re
 import zipfile
 import engine
 import financials
-import financial_research
 import gemini_fallback
 import supabase_store
 import source_cache
@@ -350,51 +349,9 @@ def source_delete(d):
 
 
 def populate_company_financials(d):
-    """Use the dedicated financial AI key to reconcile source-backed figures."""
-    portfolio_id = d.get('portfolio_id')
-    if not os.environ.get('FINANCIALS_LLM_API_KEY', '').strip():
-        raise ValueError('Configure FINANCIALS_LLM_API_KEY before populating financial data')
-    if not portfolio_id:
-        raise ValueError('Select a portfolio before populating financial data')
-    portfolio = get('portfolio_imports', portfolio_id)
-    company_ids = list(dict.fromkeys(row['company_id'] for row in portfolio.get('rows', [])
-                                    if row.get('company_id') and row['company_id'] != 'CASH' and not row.get('excluded')))
-    companies = {company['id']: company for company in all_records('companies')}
-    selected = [companies[company_id] for company_id in company_ids if company_id in companies]
-    if not selected:
-        raise ValueError('The portfolio has no matched companies')
-
-    # Redis holds newly discovered URLs; Supabase retains uploaded-document text.
-    persistent = {source['id']: source for source in store.all_records('sources')}
-    for session_source in source_link_records():
-        previous = persistent.get(session_source['id'], {})
-        persistent[session_source['id']] = {**previous, **session_source}
-    sources_by_company = {company['id']: [] for company in selected}
-    for source in persistent.values():
-        if source.get('company_id') in sources_by_company:
-            sources_by_company[source['company_id']].append(source)
-
-    results = financial_research.populate(selected, sources_by_company)
-    updated, failed, unresolved = 0, 0, 0
-    for company in selected:
-        result = results.get(company['id'], {})
-        if result.get('error'):
-            failed += 1
-            continue
-        market_cap, revenue = result.get('market_cap'), result.get('net_revenue')
-        if not market_cap and not revenue:
-            unresolved += 1
-            continue
-        company['market_cap'] = market_cap['value'] if market_cap else None
-        company['net_revenue'] = revenue['value'] if revenue else None
-        company['market_cap_citation'] = (f"{market_cap['supporting_sources']} / {market_cap['evaluated_sources']} sources · {market_cap['year']}"
-                                          if market_cap else 'No sourced market capitalisation')
-        company['net_revenue_citation'] = (f"{revenue['supporting_sources']} / {revenue['evaluated_sources']} sources · {revenue['year']}"
-                                           if revenue else 'No sourced net revenue')
-        company['financials_updated_at'] = now()
-        store.put('companies', company)
-        updated += 1
-    return {'updated': updated, 'failed': failed, 'unresolved': unresolved, 'results': results}
+    import financial_jobs
+    import sys
+    return financial_jobs.start(sys.modules[__name__], d)
 
 
 def evidence_for(company_id, theme_id):

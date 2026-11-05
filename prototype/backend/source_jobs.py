@@ -48,8 +48,15 @@ class Queue:
 
     def enqueue(self, run, companies):
         with self.connect() as db:
+            if run.get('job_type') == 'financials':
+                db.execute('BEGIN IMMEDIATE')
+                for row in db.execute("SELECT payload FROM jobs WHERE state IN ('queued','running')"):
+                    existing = json.loads(row[0])
+                    if existing.get('job_type') == 'financials' and existing.get('portfolio_id') == run['portfolio_id']:
+                        return existing
             db.execute('INSERT INTO jobs (id, payload, companies, state) VALUES (?, ?, ?, ?)',
                        (run['id'], json.dumps(run), json.dumps(companies), 'queued'))
+        return run
 
     def records(self):
         with self.connect() as db:
@@ -75,7 +82,7 @@ class Queue:
 
     @staticmethod
     def queue_notifications(db, run):
-        if run.get('search_mode') in ('short', 'long'):
+        if run.get('job_type') == 'financials' or run.get('search_mode') in ('short', 'long'):
             db.execute("INSERT OR IGNORE INTO completion_notifications VALUES (?, 'telegram', 'pending')",
                        (run['id'],))
 
@@ -276,8 +283,17 @@ def execute(job_id):
             def acknowledge_sources(self, records):
                 queue.acknowledge_sources(job_id, records)
 
-        import source_discovery
-        source_discovery.worker(WorkerApp(), run, companies)
+        if run.get('job_type') == 'financials':
+            import financial_jobs
+            try:
+                financial_jobs.worker(WorkerApp(), run, companies)
+            finally:
+                # Use the current formatter even if an older supervisor survived deployment.
+                while queue.deliver_next_notification():
+                    pass
+        else:
+            import source_discovery
+            source_discovery.worker(WorkerApp(), run, companies)
 
 
 if __name__ == '__main__':

@@ -188,16 +188,19 @@ def research_company(company, sources, timeout=90):
 
 
 def populate(companies, sources_by_company):
-    results = {}
+    return dict(iter_results(companies, sources_by_company))
+
+
+def iter_results(companies, sources_by_company):
+    """Yield completed companies so a background job can checkpoint each result."""
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(research_company, company, sources_by_company.get(company['id'], [])): company for company in companies}
         for future in as_completed(futures):
             company = futures[future]
             try:
-                results[company['id']] = future.result()
+                result = future.result()
             except gemini_fallback.ModelsExhausted as error:
-                results[company['id']] = {'error': str(error), 'http_status': error.code,
-                                          'model_attempts': error.attempts}
+                result = {'error': str(error), 'http_status': error.code, 'model_attempts': error.attempts}
             except HTTPError as error:
                 message = {
                     400: 'Financial AI rejected the request (HTTP 400). Check the model and endpoint configuration.',
@@ -205,9 +208,9 @@ def populate(companies, sources_by_company):
                     403: 'Financial AI access was denied (HTTP 403). Check the API key permissions.',
                     429: 'Financial AI quota or rate limit exceeded (HTTP 429). Check the financial-data key quota before retrying.',
                 }.get(error.code, f'Financial AI request failed (HTTP {error.code}). Try again later.')
-                results[company['id']] = {'error': message, 'http_status': error.code}
+                result = {'error': message, 'http_status': error.code}
             except (URLError, TimeoutError):
-                results[company['id']] = {'error': 'Could not connect to financial AI. Try again later.'}
+                result = {'error': 'Could not connect to financial AI. Try again later.'}
             except Exception as error:
-                results[company['id']] = {'error': type(error).__name__}
-    return results
+                result = {'error': type(error).__name__}
+            yield company['id'], result

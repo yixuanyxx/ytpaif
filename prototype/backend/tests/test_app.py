@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 from urllib.error import HTTPError
 from test_fixtures import MemoryStore, demo
@@ -25,29 +25,22 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(self.app.all_records('model_calls')[0]['model'], 'gemini-3.7-flash')
         self.assertEqual(send.call_count, 2)
 
-    def test_financial_populate_counts_supported_results_and_preserves_unresolved_values(self):
+    def test_financial_populate_enqueues_without_running_ai_in_the_request(self):
         portfolio = {'id': 'financial-test', 'rows': [
             {'company_id': 'DEMO_A'}, {'company_id': 'DEMO_B'}, {'company_id': 'DEMO_MIXED'},
         ]}
         self.app.put('portfolio_imports', portfolio)
-        company = self.app.get('companies', 'DEMO_B')
-        company['net_revenue'] = 'USD 10 million'
-        self.app.put('companies', company)
-        results = {
-            'DEMO_A': {'market_cap': None, 'net_revenue': {
-                'value': 'USD 20 million', 'year': '2026', 'supporting_sources': 1, 'evaluated_sources': 2,
-            }},
-            'DEMO_B': {'market_cap': None, 'net_revenue': None, 'source_count': 2},
-            'DEMO_MIXED': {'error': 'Financial AI quota or rate limit exceeded (HTTP 429).', 'http_status': 429},
-        }
+        queue = Mock()
+        queue.enqueue.side_effect = lambda run, companies: run
         with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'test'}), \
-                patch.object(self.app, 'source_link_records', return_value=[]), \
-                patch.object(self.app.financial_research, 'populate', return_value=results):
+                patch('source_jobs.Queue', return_value=queue), patch('source_jobs.ensure_worker') as start, \
+                patch('financial_research.iter_results') as research:
             result = self.app.populate_company_financials({'portfolio_id': portfolio['id']})
-        self.assertEqual((result['updated'], result['failed'], result['unresolved']), (1, 1, 1))
-        self.assertEqual(result['results']['DEMO_MIXED']['http_status'], 429)
-        self.assertEqual(self.app.get('companies', 'DEMO_A')['net_revenue'], 'USD 20 million')
-        self.assertEqual(self.app.get('companies', 'DEMO_B')['net_revenue'], 'USD 10 million')
+        self.assertEqual(result['financial_run']['job_type'], 'financials')
+        self.assertEqual(result['financial_run']['phase'], 'queued')
+        self.assertEqual(len(result['financial_run']['company_ids']), 3)
+        start.assert_called_once()
+        research.assert_not_called()
 
     def test_editing_link_only_source_requires_a_verified_document_url(self):
         source = self.app.all_records('sources')[0]

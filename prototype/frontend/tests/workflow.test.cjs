@@ -625,19 +625,22 @@ test('Financials use evidence and keep missing values unknown',()=>{
   assert.equal(run(`getCompanyFinancials({id:'a'}, {}, [{filename:'report.txt',financial_facts:[{metric:'revenue',display:'USD 100 million',page:2}]}], []).rev`),'USD 100 million');
 });
 
-test('Financial populate shows quota failures and unresolved companies in a modal',async()=>{
-  const {run,node} = setup();
+test('Background financial completion shows quota failures and unresolved companies in a modal',async()=>{
+  const {run,node,context} = setup();
+  context.setTimeout = () => 1;
+  node('#loading-overlay').hidden = true;
   const dialog = node('#alert-modal');
   dialog.showModal = () => { dialog.open = true; };
   dialog.close = () => { dialog.open = false; };
   node('#alert-modal-ok').focus = () => {};
   dialog.classList.toggle = (name, enabled) => { dialog.dataset[name] = enabled; };
   run(`currentView = 'dashboard';
-    api = async () => ({updated:0,failed:2,unresolved:1,results:{
+    const completed = {id:'financial-job',job_type:'financials',portfolio_id:'p',status:'incomplete',updated:0,failed:2,unresolved:1,results:{
       a:{error:'Financial AI quota or rate limit exceeded (HTTP 429).'},
       b:{error:'Financial AI quota or rate limit exceeded (HTTP 429).'}
-    }});
-    refresh = async () => {};`);
+    }};
+    api = async () => ({financial_run:{...completed,status:'running'}});
+    refresh = async () => {state.search_runs=[completed];};`);
   await run("window.populatePortfolioFinancials('p')");
   const message = node('#alert-modal-message').textContent;
   assert.match(message,/Lookup failed for 2 companies/);
@@ -656,6 +659,7 @@ test('Financial populate shows quota failures and unresolved companies in a moda
 test('Financial request errors reach the modal through the normal button handler',async()=>{
   const {run,node} = setup();
   const dialog = node('#alert-modal');
+  node('#loading-overlay').hidden = true;
   dialog.showModal = () => { dialog.open = true; };
   node('#alert-modal-ok').focus = () => {};
   run(`api = async () => { throw new Error('Service unavailable (HTTP 503)'); };`);
@@ -666,6 +670,23 @@ test('Financial request errors reach the modal through the normal button handler
   assert.equal(node('#notice-area').innerHTML,'');
   assert.equal(node('#loading-overlay').hidden,true);
   assert.equal(node('#btn-populate-financials').disabled,false);
+});
+
+test('Financial lookup queues without a blocking overlay and survives returning to the page',async()=>{
+  const {run,node,context} = setup();
+  context.setTimeout = () => 1;
+  node('#loading-overlay').hidden = true;
+  run(`selectedSourcePortfolioId='p';
+    api = async () => ({financial_run:{id:'financial-job',job_type:'financials',portfolio_id:'p',
+      status:'running',phase:'queued',company_ids:['a','b'],companies_completed:[]}});
+    refresh = async () => {};`);
+  await run("window.populatePortfolioFinancials('p')");
+  assert.equal(node('#loading-overlay').hidden,true);
+  assert.equal(node('#btn-populate-financials').disabled,true);
+  assert.match(node('#financial-search-status').textContent,/You can leave or log out.*Telegram/);
+  assert.equal(run('activeSourceSearch()'),undefined);
+  run('trackedSourceSearches.clear(); monitorSourceSearches()');
+  assert.equal(run("trackedSourceSearches.has('financial-job')"),true);
 });
 
 test('Short and long search submission errors open the completion modal',async()=>{

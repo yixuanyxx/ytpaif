@@ -37,10 +37,16 @@ def send(channel, run):
     if not re.fullmatch(r'\d+:[A-Za-z0-9_-]+', token):
         raise ValueError('Invalid Telegram bot token format')
 
-    mode = run['search_mode'].capitalize()
     status = run['status']
-    count = run.get('results_count', 0)
-    summary = f'{mode} AI Search {status}. {count} document(s) saved. Open Source Documents to review.'
+    if run.get('job_type') == 'financials':
+        summary = (f'Market Cap & Revenue lookup {status} for {run.get("portfolio_name") or "your portfolio"}. '
+                   f'{len(run.get("companies_completed", []))} of {len(run.get("company_ids", []))} companies processed. '
+                   f'{run.get("updated", 0)} updated, {run.get("failed", 0)} failed, '
+                   f'{run.get("unresolved", 0)} without supported figures. Open Source Documents to review.')
+    else:
+        mode = run['search_mode'].capitalize()
+        count = run.get('results_count', 0)
+        summary = f'{mode} AI Search {status}. {count} document(s) saved. Open Source Documents to review.'
     opener = build_opener(NoRedirect())
     failures = 0
     for recipient in recipients:

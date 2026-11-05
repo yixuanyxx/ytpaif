@@ -20,7 +20,35 @@ let displayedSourceSearchId = '';
 const trackedSourceSearches = new Set();
 const loadedSourceCompanyIds = new Set();
 function activeSourceSearch() {
-  return (state.search_runs || []).findLast(search => ['running', 'cancelling'].includes(search.status));
+  return (state.search_runs || []).findLast(search => search.job_type !== 'financials' && ['running', 'cancelling'].includes(search.status));
+}
+function financialLookupRun(portfolioId, activeOnly = false) {
+  return (state.search_runs || []).findLast(search => search.job_type === 'financials'
+    && search.portfolio_id === portfolioId && (!activeOnly || search.status === 'running'));
+}
+function financialLookupSummary(search) {
+  const messages = [`Financial lookup ${search.status}. ${search.companies_completed?.length || 0} of ${search.company_ids?.length || 0} companies processed.`,
+    `Financial values updated for ${search.updated || 0} companies.`];
+  if (search.unresolved) messages.push(`No supported financial figures found for ${search.unresolved} of the companies.`);
+  if (search.failed) messages.push(`Lookup failed for ${search.failed} companies.`);
+  const errors = [...Object.values(search.results || {}).map(result => result.error), ...(search.errors || []).map(error => error.reason)];
+  messages.push(...new Set(errors.filter(Boolean)));
+  return messages.join(' ');
+}
+function financialLookupStatusText(search) {
+  if (!search) return '';
+  if (search.status !== 'running') return financialLookupSummary(search);
+  return `${search.phase === 'queued' ? 'Financial lookup queued.' : 'Financial lookup running.'} ${search.companies_completed?.length || 0} of ${search.company_ids?.length || 0} companies processed. You can leave or log out. Completion will be sent to Telegram.`;
+}
+function updateFinancialLookupStatus() {
+  const button = $('#btn-populate-financials');
+  const status = $('#financial-search-status');
+  if (!button || !status) return;
+  const search = financialLookupRun(selectedSourcePortfolioId);
+  const running = search?.status === 'running';
+  button.disabled = running;
+  button.textContent = running ? 'Populating financial values…' : '✦ Populate Market Cap & Revenue';
+  status.textContent = financialLookupStatusText(search);
 }
 function displayedSourceSearch(portfolio) {
   const search = activeSourceSearch() || (state.search_runs || []).find(run => run.id === displayedSourceSearchId);
@@ -78,6 +106,10 @@ function notifyFinishedSourceSearches() {
   for (const search of state.search_runs || []) {
     if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed', 'cancelled'].includes(search.status)) continue;
     trackedSourceSearches.delete(search.id);
+    if (search.job_type === 'financials') {
+      showAlert(financialLookupSummary(search), 'Financial lookup finished', { searchCompletion: true });
+      return;
+    }
     const count = search.results_count || 0;
     if (search.status === 'failed') {
       showAlert(sourceSearchFailureSummary(search), 'Source search failed', { searchCompletion: true });
@@ -102,16 +134,19 @@ function monitorSourceSearches() {
       const running = [...trackedSourceSearches];
       if (!running.length) return;
       const previousSummaries = state.source_summaries || [];
+      const previousCompanies = state.companies || [];
       await refresh();
       sourceSearchPollErrorShown = false;
       if (currentView === 'sources') {
         updateSourceSearchLock();
-        await updateSourceLibraryProgress(previousSummaries);
+        await updateSourceLibraryProgress(previousSummaries, previousCompanies);
+        updateFinancialLookupStatus();
       }
       notifyFinishedSourceSearches();
-      const pending = (state.search_runs || []).some(r => running.includes(r.id) && ['running', 'cancelling'].includes(r.status));
-      const cancelling = (state.search_runs || []).some(r => running.includes(r.id) && r.status === 'cancelling');
-      if (currentView === 'sources') {
+      const sourceRuns = (state.search_runs || []).filter(r => running.includes(r.id) && r.job_type !== 'financials');
+      const pending = sourceRuns.some(r => ['running', 'cancelling'].includes(r.status));
+      const cancelling = sourceRuns.some(r => r.status === 'cancelling');
+      if (currentView === 'sources' && sourceRuns.length) {
         const status = $('#source-search-status');
         if (status) status.innerHTML = pending
           ? `<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:16px;height:16px;vertical-align:middle;margin-right:8px"></span> ${cancelling ? 'Stopping source search…' : 'Searching for source documents in the background… You can continue browsing.'}`
@@ -363,6 +398,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await refresh();
     restoreDashboardSelection();
     render();
+    monitorSourceSearches();
   }, 'Loading workspace…');
 
   // Sidebar nav
@@ -2820,13 +2856,14 @@ function sourceCoverageBadge(summary) {
     }).join('')}</div></div>`;
 }
 
-async function updateSourceLibraryProgress(previousSummaries) {
+async function updateSourceLibraryProgress(previousSummaries, previousCompanies = []) {
   const portfolio = (state.portfolio_imports || []).find(p => p.id === selectedSourcePortfolioId);
   if (!portfolio) return;
   const companyIds = portfolioCompanyIds(portfolio);
   const summaries = (state.source_summaries || []).filter(s => companyIds.has(s.company_id));
   const summaryById = new Map(summaries.map(s => [s.company_id, s]));
   const previousById = new Map((previousSummaries || []).map(s => [s.company_id, s]));
+  const previousCompaniesById = new Map(previousCompanies.map(company => [company.id, company]));
   updateSourceCompanyCoverage(summaryById);
   const results = $('#source-search-results');
   if (results) {
@@ -2842,7 +2879,8 @@ async function updateSourceLibraryProgress(previousSummaries) {
     const badge = document.getElementById(`src-coverage-${company.id}`);
     if (badge) badge.innerHTML = sourceCoverageBadge(summary);
     const detail = document.getElementById(`src-detail-${company.id}`);
-    if (JSON.stringify(previousById.get(company.id)?.types || {}) === JSON.stringify(summary?.types || {})) continue;
+    if (JSON.stringify(previousById.get(company.id)?.types || {}) === JSON.stringify(summary?.types || {})
+        && previousCompaniesById.get(company.id)?.financials_updated_at === company.financials_updated_at) continue;
     const isOpen = detail && detail.style.display !== 'none';
     if (isOpen) await loadCompanySources(company.id);
     if (currentView !== 'sources') continue;
@@ -2898,6 +2936,8 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
     };
   });
 
+  const financialSearch = financialLookupRun(portfolio.id);
+  const financialSearchRunning = financialSearch?.status === 'running';
   return `
     <div style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <div style="flex:1;min-width:260px">
@@ -2908,10 +2948,11 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
       <button class="btn btn-sm btn-secondary" onclick="toggleAllSourceRows()" id="btn-toggle-all-sources">
         Expand all companies
       </button>
-      <button class="btn btn-sm btn-primary" onclick="populatePortfolioFinancials('${esc(portfolio.id)}')" id="btn-populate-financials">
-        ✦ Populate Market Cap &amp; Revenue
+      <button class="btn btn-sm btn-primary" onclick="populatePortfolioFinancials('${esc(portfolio.id)}')" id="btn-populate-financials" ${financialSearchRunning ? 'disabled' : ''}>
+        ${financialSearchRunning ? 'Populating financial values…' : '✦ Populate Market Cap &amp; Revenue'}
       </button>
     </div>
+    <div id="financial-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-bottom:12px">${esc(financialLookupStatusText(financialSearch))}</div>
 
     <div class="table-wrap" style="background:#ffffff;border:1px solid var(--slate-200);border-radius:8px;overflow:hidden">
       <table style="width:100%;border-collapse:collapse;margin:0">
@@ -3147,23 +3188,22 @@ window.selectCompanyForUpload = function(companyId, sourceType) {
 window.populatePortfolioFinancials = async function(portfolioId) {
   const button = document.getElementById('btn-populate-financials');
   if (button) button.disabled = true;
-  showLoading('Reading source documents and reconciling financial values…');
   clearNotice();
   try {
-    const result = await api('financials/populate', { portfolio_id: portfolioId }, { timeoutMs: 10 * 60 * 1000 });
+    const result = await api('financials/populate', { portfolio_id: portfolioId });
+    const search = result.financial_run;
+    if (!search?.id) throw new Error('The financial lookup could not be queued.');
+    trackedSourceSearches.add(search.id);
+    state.search_runs = [...(state.search_runs || []).filter(run => run.id !== search.id), search];
+    monitorSourceSearches();
     await refresh();
     if (currentView === 'sources') await viewSources();
-    const messages = [`Financial values updated for ${result.updated} companies.`];
-    if (result.unresolved) messages.push(`No supported financial figures found for ${result.unresolved} of the companies.`);
-    if (result.failed) messages.push(`Lookup failed for ${result.failed} companies.`);
-    const errors = [...new Set(Object.values(result.results || {}).map(item => item.error).filter(Boolean))];
-    messages.push(...errors);
-    showAlert(messages.join(' '), 'Financial lookup finished', { searchCompletion: true });
+    updateFinancialLookupStatus();
+    notifyFinishedSourceSearches();
   } catch (error) {
     showAlert(`Could not populate financial data: ${error.message}`, 'Financial lookup failed', { searchCompletion: true });
   } finally {
-    hideLoading();
-    if (button) button.disabled = false;
+    if (button) button.disabled = Boolean(financialLookupRun(portfolioId, true));
   }
 };
 
