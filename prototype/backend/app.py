@@ -374,13 +374,16 @@ def populate_company_financials(d):
             sources_by_company[source['company_id']].append(source)
 
     results = financial_research.populate(selected, sources_by_company)
-    updated, failed = 0, 0
+    updated, failed, unresolved = 0, 0, 0
     for company in selected:
         result = results.get(company['id'], {})
         if result.get('error'):
             failed += 1
             continue
         market_cap, revenue = result.get('market_cap'), result.get('net_revenue')
+        if not market_cap and not revenue:
+            unresolved += 1
+            continue
         company['market_cap'] = market_cap['value'] if market_cap else None
         company['net_revenue'] = revenue['value'] if revenue else None
         company['market_cap_citation'] = (f"{market_cap['supporting_sources']} / {market_cap['evaluated_sources']} sources · {market_cap['year']}"
@@ -390,7 +393,7 @@ def populate_company_financials(d):
         company['financials_updated_at'] = now()
         store.put('companies', company)
         updated += 1
-    return {'updated': updated, 'failed': failed, 'results': results}
+    return {'updated': updated, 'failed': failed, 'unresolved': unresolved, 'results': results}
 
 
 def evidence_for(company_id, theme_id):

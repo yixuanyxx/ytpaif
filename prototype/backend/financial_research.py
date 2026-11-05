@@ -4,7 +4,12 @@ import os
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+
+DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions'
 
 
 def _json(text):
@@ -46,7 +51,13 @@ def research_company(company, sources, timeout=90):
     if not key:
         raise ValueError('Configure FINANCIALS_LLM_API_KEY to populate market cap and revenue')
     model = os.environ.get('FINANCIALS_LLM_MODEL', 'gemini-3.8-flash')
-    endpoint = os.environ.get('FINANCIALS_LLM_ENDPOINT', 'https://generativelanguage.googleapis.com/v1beta/interactions')
+    endpoint = os.environ.get('FINANCIALS_LLM_ENDPOINT', '').strip() or DEFAULT_ENDPOINT
+    parsed_endpoint = urlparse(endpoint)
+    # Older installations configured the chat endpoint. Grounded financial
+    # research uses the Interactions request and response format.
+    if (parsed_endpoint.hostname == 'generativelanguage.googleapis.com'
+            and parsed_endpoint.path.rstrip('/') == '/v1beta/openai/chat/completions'):
+        endpoint = DEFAULT_ENDPOINT
     allowed_ids = {source.get('id') for source in sources if source.get('id')}
     if not allowed_ids:
         return {'market_cap': None, 'net_revenue': None, 'source_count': 0}
@@ -91,6 +102,16 @@ def populate(companies, sources_by_company):
             company = futures[future]
             try:
                 results[company['id']] = future.result()
+            except HTTPError as error:
+                message = {
+                    400: 'Financial AI rejected the request (HTTP 400). Check the model and endpoint configuration.',
+                    401: 'Financial AI authentication failed (HTTP 401). Check the financial-data API key.',
+                    403: 'Financial AI access was denied (HTTP 403). Check the API key permissions.',
+                    429: 'Financial AI quota or rate limit exceeded (HTTP 429). Check the financial-data key quota before retrying.',
+                }.get(error.code, f'Financial AI request failed (HTTP {error.code}). Try again later.')
+                results[company['id']] = {'error': message, 'http_status': error.code}
+            except (URLError, TimeoutError):
+                results[company['id']] = {'error': 'Could not connect to financial AI. Try again later.'}
             except Exception as error:
                 results[company['id']] = {'error': type(error).__name__}
     return results

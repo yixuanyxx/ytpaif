@@ -624,6 +624,25 @@ test('Financials use evidence and keep missing values unknown',()=>{
   assert.equal(run(`getCompanyFinancials({id:'a',bloomberg_ticker:'2330 TT'}, {}, [], []).mcap`),'—');
   assert.equal(run(`getCompanyFinancials({id:'a'}, {}, [{filename:'report.txt',financial_facts:[{metric:'revenue',display:'USD 100 million',page:2}]}], []).rev`),'USD 100 million');
 });
+
+test('Financial populate shows quota failures and unresolved companies',async()=>{
+  const {run,node} = setup();
+  run(`currentView = 'dashboard';
+    api = async () => ({updated:0,failed:2,unresolved:1,results:{
+      a:{error:'Financial AI quota or rate limit exceeded (HTTP 429).'},
+      b:{error:'Financial AI quota or rate limit exceeded (HTTP 429).'}
+    }});
+    refresh = async () => {};
+    run = async fn => fn();
+    notice = (message, level) => { window.financialNotice = {message, level}; };`);
+  await run("window.populatePortfolioFinancials('p')");
+  assert.match(run('window.financialNotice.message'),/Lookup failed for 2 companies/);
+  assert.match(run('window.financialNotice.message'),/No supported financial figures found for 1 of the companies/);
+  assert.match(run('window.financialNotice.message'),/quota.*HTTP 429/);
+  assert.equal(run('window.financialNotice.message').match(/HTTP 429/g).length,1);
+  assert.equal(run('window.financialNotice.level'),'warning');
+  assert.equal(node('#btn-populate-financials').disabled,false);
+});
 test('Financial citations count documents separately from source categories',()=>{
   const {run} = setup();
   const html = run(`sourceLibrary([], [{

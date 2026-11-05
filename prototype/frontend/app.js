@@ -3144,7 +3144,12 @@ window.populatePortfolioFinancials = async function(portfolioId) {
       const result = await api('financials/populate', { portfolio_id: portfolioId }, { timeoutMs: 10 * 60 * 1000 });
       await refresh();
       if (currentView === 'sources') await viewSources();
-      notice(`Financial values updated for ${result.updated} companies${result.failed ? `; ${result.failed} could not be reconciled` : ''}.`, result.failed ? 'warning' : 'success');
+      const messages = [`Financial values updated for ${result.updated} companies.`];
+      if (result.unresolved) messages.push(`No supported financial figures found for ${result.unresolved} of the companies.`);
+      if (result.failed) messages.push(`Lookup failed for ${result.failed} companies.`);
+      const errors = [...new Set(Object.values(result.results || {}).map(item => item.error).filter(Boolean))];
+      messages.push(...errors);
+      notice(messages.join(' '), result.failed || result.unresolved ? 'warning' : 'success');
     }, 'Reading source documents and reconciling financial values…');
   } catch (error) {
     showAlert(`Could not populate financial data: ${error.message}`, 'Financial data search');
