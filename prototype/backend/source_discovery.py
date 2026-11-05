@@ -766,7 +766,7 @@ def direct_grounded_url(url, domains, timeout):
 def search_other_sources(company, terms, period, cutoff, excluded_urls, timeout, general=False):
     """Find dated articles with scraped evidence of issuer and taxonomy relevance."""
     from scrapy import Selector
-    from approved_collector import company_matches, explicit_dates
+    from approved_collector import collect, company_matches, explicit_dates
     from exchange_filings import domains as exchange_domains, read
     from web_source_index import discover
 
@@ -784,54 +784,45 @@ def search_other_sources(company, terms, period, cutoff, excluded_urls, timeout,
         diagnostics['rejections'].append({'url': url[:1000], 'stage': stage, 'reason': reason})
 
     def batches():
-        if not general:
-            for offset in range(0, len(terms), 3):
-                remaining = deadline - time.monotonic()
-                # Keep time for grounding and subsequent link checks.
-                if remaining <= 18 or len(rows) >= DOCUMENTS_PER_TYPE:
-                    break
-                urls = discover(company, ['other'], period, hosts, min(remaining - 18, 4), reject=reject,
-                                theme_terms=terms[offset:offset + 3])
-                yield urls, False
+        query_terms = ['news', 'analysis'] if general else terms
+        for offset in range(0, len(query_terms), 3):
+            remaining = deadline - time.monotonic()
+            if remaining <= 2 or len(rows) >= DOCUMENTS_PER_TYPE:
+                return
+            urls = discover(company, ['other'], period, hosts, min(remaining, 4), reject=reject,
+                            theme_terms=query_terms[offset:offset + 3])
+            yield urls
         remaining = deadline - time.monotonic()
         if rows or remaining <= 2:
             return
         try:
-            citations = legacy_grounded_search(company, ['other'], period, cutoff, False,
-                                                min(remaining - 1, 12), excluded_urls,
-                                                other_terms=[] if general else terms, domains=hosts)
+            candidates, incomplete = collect(company, hosts, public_url, min(remaining - 1, 8),
+                                             reject=reject, max_pages=8)
         except (OSError, ValueError) as error:
             diagnostics['collection_incomplete'] = True
-            diagnostics['provider_error'] = str(error) if isinstance(error, ProviderError) else type(error).__name__
+            diagnostics['collection_error'] = type(error).__name__
             return
-        diagnostics['google_search_calls'] = citations.diagnostics['google_search_calls']
-        yield [row['url'] for row in citations], True
+        diagnostics['collection_incomplete'] = diagnostics['collection_incomplete'] or incomplete
+        yield [row['url'] for row in candidates]
 
     inspected = set()
-    for urls, grounded in batches():
+    for urls in batches():
         remaining = deadline - time.monotonic()
         if remaining <= 1 or len(rows) >= DOCUMENTS_PER_TYPE:
             break
         for url in urls:
-            if grounded:
-                url = direct_grounded_url(url, hosts, min(4, max(.1, deadline - time.monotonic())))
-                if not url:
-                    continue
             identity = normalized_url(url)
-            if identity in excluded or (identity, grounded) in inspected or not specific_document_url(url):
+            if identity in excluded or identity in inspected or not specific_document_url(url):
                 reject(url, 'theme evidence', 'Already seen or URL is not a specific article')
                 continue
-            inspected.add((identity, grounded))
+            inspected.add(identity)
             remaining = deadline - time.monotonic()
             if remaining <= 1:
                 diagnostics['collection_incomplete'] = True
                 reject(url, 'theme evidence', 'Search time limit reached')
                 break
-            if not grounded and remaining <= 18:
-                diagnostics['collection_incomplete'] = True
-                break
             try:
-                article = Selector(text=read(url, public_url, min(remaining if grounded else remaining - 18, 4)))
+                article = Selector(text=read(url, public_url, min(remaining, 4)))
             except (OSError, ValueError) as error:
                 diagnostics['collection_incomplete'] = True
                 reason = f'Website returned HTTP {error.code}' if isinstance(error, HTTPError) else 'Could not read article within the site access rules'
@@ -853,7 +844,7 @@ def search_other_sources(company, terms, period, cutoff, excluded_urls, timeout,
             for schema in article.css('script[type="application/ld+json"]::text').getall():
                 date_values.extend(re.findall(r'"datePublished"\s*:\s*"(20\d{2}-\d{2}-\d{2})', schema))
             dates = sorted({date for value in date_values for date in explicit_dates(value[:10])})
-            if not title or not evidence or (not grounded and not matched):
+            if not title or not evidence or (not general and not matched):
                 reject(url, 'theme evidence', 'Article does not connect the selected issuer to a taxonomy term')
                 continue
             if len(dates) != 1 or dates[0] > cutoff or dates[0][:4] != str(period):
@@ -861,9 +852,9 @@ def search_other_sources(company, terms, period, cutoff, excluded_urls, timeout,
                 continue
             rows.append({'url': url, 'title': title[:300], 'source_type': 'other', 'period': str(period),
                          'publication_date': dates[0], 'publication_date_source_url': url,
-                         'ai_confidence': 85, 'ai_confidence_basis': ('issuer and taxonomy evidence' if matched else 'grounded issuer article'),
+                         'ai_confidence': 85, 'ai_confidence_basis': ('issuer and taxonomy evidence' if matched else 'issuer article evidence'),
                          'ai_confidence_reason': (f'Article text connects the issuer to {matched}.' if matched else
-                                                  'Gemini cited this article and its text identifies the issuer.'),
+                                                  'Article text identifies the selected issuer.'),
                          'matched_theme_term': matched})
             if len(rows) >= DOCUMENTS_PER_TYPE:
                 break

@@ -14,10 +14,15 @@ class GeminiFallbackTest(unittest.TestCase):
         self.blocked_patch = patch.dict(gemini_fallback._blocked, {}, clear=True)
         self.blocked_patch.start()
         self.addCleanup(self.blocked_patch.stop)
+        rejected = patch.dict(gemini_fallback._auth_blocked, {}, clear=True)
+        rejected.start()
+        self.addCleanup(rejected.stop)
         self.env_patch = patch.dict(os.environ)
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         os.environ.pop('GEMINI_MODEL_FALLBACKS', None)
+        for name in ('FINANCIALS_LLM_API_KEY', 'GEMINI_API_KEY', 'LLM_API_KEY'):
+            os.environ[name] = ''
 
     def request(self, key='key-a', grounded=True):
         body = {'model': 'gemini-3.8-flash', 'input': 'Read only the supplied evidence.', 'store': False}
@@ -76,9 +81,34 @@ class GeminiFallbackTest(unittest.TestCase):
             with self.subTest(status=status):
                 send = Mock(side_effect=HTTPError('https://provider', status, 'Rejected', {}, None))
                 with self.assertRaises(HTTPError) as raised:
-                    gemini_fallback.request_json(self.request(), 30, open_request=send)
+                    gemini_fallback.request_json(self.request(key=f'key-{status}'), 30, open_request=send)
                 self.assertEqual(raised.exception.code, status)
                 self.assertEqual(send.call_count, 1)
+
+    def test_rejected_key_uses_other_configured_key_and_remembers_rejection(self):
+        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'working-key', 'LLM_API_KEY': 'rejected-key'}):
+            request = self.request(key='rejected-key')
+            send = Mock(side_effect=[HTTPError(request.full_url, 401, 'Rejected', {}, None), io.BytesIO(b'{}')])
+            _, info = gemini_fallback.request_json(request, 30, open_request=send)
+            self.assertTrue(info['key_fallback_used'])
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual(send.call_args_list[0].args[0].get_header('X-goog-api-key'), 'rejected-key')
+            self.assertEqual(send.call_args_list[1].args[0].get_header('X-goog-api-key'), 'working-key')
+            send = Mock(return_value=io.BytesIO(b'{}'))
+            gemini_fallback.request_json(request, 30, open_request=send)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(send.call_args.args[0].get_header('X-goog-api-key'), 'working-key')
+
+    def test_authentication_fallback_replaces_the_bearer_key(self):
+        request = self.request(key='rejected-key')
+        request.remove_header('X-goog-api-key')
+        request.add_header('Authorization', 'Bearer rejected-key')
+        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'working-key'}):
+            send = Mock(side_effect=[HTTPError(request.full_url, 401, 'Rejected', {}, None), io.BytesIO(b'{}')])
+            _, info = gemini_fallback.request_json(request, 30, open_request=send)
+        self.assertTrue(info['key_fallback_used'])
+        self.assertEqual(send.call_args.args[0].get_header('Authorization'), 'Bearer working-key')
+        self.assertIsNone(send.call_args.args[0].get_header('X-goog-api-key'))
 
     def test_unavailable_model_falls_back_and_success_stops_the_chain(self):
         send = Mock(side_effect=[HTTPError('https://provider', 404, 'Unavailable', {}, None), io.BytesIO(b'{}')])

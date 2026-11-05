@@ -1,4 +1,4 @@
-"""Bounded Gemini model fallback, keeping the original key and capabilities."""
+"""Bounded Gemini model and authentication fallback with the original capabilities."""
 import hashlib
 import json
 import os
@@ -20,6 +20,7 @@ DEFAULT_MODELS = (
 )
 RETRYABLE_STATUSES = (404, 429, 500, 502, 503, 504)
 _blocked = {}
+_auth_blocked = {}
 _lock = threading.Lock()
 
 
@@ -47,6 +48,44 @@ class ModelsExhausted(HTTPError):
 
 
 def request_json(request, timeout, *, open_request):
+    """Keep the selected key unless authentication fails, then use another configured key."""
+    if urlparse(request.full_url).hostname != 'generativelanguage.googleapis.com':
+        return _request_models(request, timeout, open_request=open_request)
+    primary = (request.get_header('X-goog-api-key') or request.get_header('Authorization') or '').removeprefix('Bearer ')
+    configured = [os.environ.get(name, '').strip()
+                  for name in ('FINANCIALS_LLM_API_KEY', 'GEMINI_API_KEY', 'LLM_API_KEY')]
+    credentials = list(dict.fromkeys(key for key in [primary, *configured] if key))
+    deadline = time.monotonic() + timeout
+    for credential in credentials:
+        key_id = hashlib.sha256(credential.encode()).hexdigest()
+        with _lock:
+            rejected_until = _auth_blocked.get(key_id, 0)
+        if rejected_until > time.monotonic():
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Gemini request deadline reached while checking configured credentials')
+        headers = dict(request.header_items())
+        headers.pop('Authorization', None)
+        headers.pop('X-goog-api-key', None)
+        if request.get_header('Authorization') and not request.get_header('X-goog-api-key'):
+            headers['Authorization'] = 'Bearer ' + credential
+        else:
+            headers['X-goog-api-key'] = credential
+        candidate = Request(request.full_url, data=request.data, headers=headers, method=request.get_method())
+        try:
+            output, info = _request_models(candidate, remaining, open_request=open_request)
+            return output, {**info, 'key_fallback_used': credential != primary}
+        except HTTPError as error:
+            if error.code != 401:
+                raise
+            with _lock:
+                _auth_blocked[key_id] = time.monotonic() + 3600
+            error.close()
+    raise HTTPError(request.full_url, 401, 'All configured Gemini API keys failed authentication. Configure a valid key.', {}, None)
+
+
+def _request_models(request, timeout, *, open_request):
     """Try each eligible model within one deadline, preserving request content."""
     body = json.loads(request.data)
     primary = body['model']

@@ -34,6 +34,26 @@ class DiscoveryTest(unittest.TestCase):
         blocked = patch.dict(discovery.gemini_fallback._blocked, {}, clear=True)
         blocked.start()
         self.addCleanup(blocked.stop)
+        web_index = patch.dict(discovery.os.environ, {'TAVILY_API_KEY': ''})
+        web_index.start()
+        self.addCleanup(web_index.stop)
+
+    def test_other_articles_use_observed_links_without_gemini_search(self):
+        article_url = 'https://issuer.test/news/ai-chips-2026.html'
+        html = ('<html><head><title>Example Industries launches AI chips</title>'
+                '<meta property="article:published_time" content="2026-04-01"></head>'
+                '<body><article><p>Example Industries develops AI chips for customers.</p></article></body></html>')
+        with patch.object(discovery, 'resolve_issuer_website', return_value=('https://issuer.test', 'saved issuer website')), \
+                patch('web_source_index.discover', return_value=[]), \
+                patch('approved_collector.collect', return_value=([{'url': article_url}], False)), \
+                patch('exchange_filings.read', return_value=html), \
+                patch.object(discovery, 'legacy_grounded_search') as managed_search:
+            rows = discovery.search_other_sources({'name': 'Example Industries'}, ['AI chips'], '2026',
+                                                  '2026-11-05', [], 20)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['url'], article_url)
+        self.assertEqual(rows[0]['matched_theme_term'], 'AI chips')
+        managed_search.assert_not_called()
 
     def test_busy_model_falls_back_without_enabling_grounding(self):
         import approved_collector
