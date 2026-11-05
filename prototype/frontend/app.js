@@ -3059,13 +3059,13 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
                               <div style="font-weight:600;color:var(--teal-900);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(primaryDoc.title || primaryDoc.filename)}">
                                 ${esc(primaryDoc.title || primaryDoc.filename)}
                               </div>
-                              <div style="display:flex;gap:8px;font-size:10.5px;color:var(--teal-700);margin-top:3px">
+                              <div style="display:flex;flex-wrap:wrap;gap:8px;font-size:10.5px;color:var(--teal-700);margin-top:3px">
                                 <span>Period: <strong>${esc(primaryDoc.period || 'FY2025')}</strong></span>
                                 <span>Date: ${esc(primaryDoc.publication_date)}</span>
                                 <span>${primaryDoc.evidence?.length || 0} passages</span>
                               </div>
                             </div>
-                            <div style="display:flex;gap:6px;margin-top:8px">
+                            <div class="source-card-actions">
                               <button class="btn btn-sm btn-primary" onclick="openDocModal('${esc(primaryDoc.id)}')" style="font-size:11px;padding:3px 8px">
                                 🔍 Full Reader
                               </button>
@@ -3081,7 +3081,7 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
                             <div style="font-size:11px;color:var(--slate-500);line-height:1.4;margin:6px 0;padding:6px 8px;background:var(--slate-50);border-radius:5px;border:1px dashed var(--slate-200)">
                               ${st.type === 'other' ? 'Theme-related sources will appear here.' : 'Expected from regional registry or IR platform.'}
                             </div>
-                            <div style="display:flex;gap:6px;margin-top:8px">
+                            <div class="source-card-actions">
                               <button class="btn btn-sm btn-ghost" onclick="selectCompanyForUpload('${esc(comp.id)}', '${esc(st.type)}')" style="font-size:11px;padding:3px 8px;color:var(--teal-700)">
                                 + Upload filing
                               </button>

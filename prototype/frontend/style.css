@@ -456,6 +456,18 @@ input[type="file"] {
 
 /* ===== TABLES ===== */
 .table-wrap { overflow-x: auto; }
+.source-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.source-card-actions .btn {
+  max-width: 100%;
+  justify-content: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th {
   text-align: left;
