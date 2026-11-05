@@ -619,6 +619,38 @@ test('Step 3 renders six source categories even before uploads, and counts disti
   assert.match(html,/1 \/ 6/); assert.doesNotMatch(html,/2 \/ 6/);
   for(const label of ['Annual Report','Earnings Call Transcript','Investor Presentation','Sustainability / ESG Report','Company Website / IR Page','Regulatory Filing']) assert.ok(html.includes(label));
 });
+test('Expanding all companies still displays returned document links when one company request fails', async()=>{
+  const {context,run,node} = setup();
+  const masters = [
+    {id:'src-master-a', style:{display:''}},
+    {id:'src-master-b', style:{display:''}}
+  ];
+  const detailA = node('#src-detail-a');
+  const detailB = node('#src-detail-b');
+  detailA.style.display = 'none';
+  detailB.style.display = 'none';
+  const chevronA = node('#src-chev-a');
+  const chevronB = node('#src-chev-b');
+  const button = node('#btn-toggle-all-sources');
+  context.document.querySelectorAll = selector => {
+    if (selector === '.source-master-row') return masters;
+    if (selector === '.source-detail-row') return [detailA, detailB];
+    if (selector === '.src-chevron') return [chevronA, chevronB];
+    return [];
+  };
+  run(`state.sources=[];
+    api=async (path, data) => data.company_id === 'a'
+      ? {sources:[{id:'doc-a',company_id:'a',source_type:'annual_report',title:'TSMC annual report',url:'https://example.test/a'}]}
+      : Promise.reject(new Error('Source service unavailable'));
+    viewSources=async()=>{};`);
+  await run('window.toggleAllSourceRows()');
+  assert.equal(run('state.sources[0].id'), 'doc-a');
+  assert.equal(detailA.style.display, 'table-row');
+  assert.equal(detailB.style.display, 'table-row');
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, 'Collapse all companies');
+  assert.match(node('#notice-area').innerHTML, /Links for the other companies are shown/);
+});
 test('Financials use evidence and keep missing values unknown',()=>{
   const {run} = setup();
   assert.equal(run(`getCompanyFinancials({id:'a',bloomberg_ticker:'2330 TT'}, {}, [], []).mcap`),'—');

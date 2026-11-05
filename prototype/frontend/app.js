@@ -3157,15 +3157,27 @@ window.toggleAllSourceRows = async function() {
     return;
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Loading sources…'; }
+  const results = await Promise.allSettled(
+    masters.map(row => loadCompanySources(row.id.replace('src-master-', '')))
+  );
+  const failed = results.filter(result => result.status === 'rejected');
   try {
-    await Promise.all(masters.map(row => loadCompanySources(row.id.replace('src-master-', ''))));
+    // Do not make every company's links depend on every other company's
+    // request.  A timeout or an unavailable source for one issuer should not
+    // hide the documents successfully returned for the rest of the table.
     await viewSources();
     document.querySelectorAll('.source-detail-row').forEach(d => d.style.display = 'table-row');
     document.querySelectorAll('.src-chevron').forEach(c => c.style.transform = 'rotate(90deg)');
     const refreshedButton = document.getElementById('btn-toggle-all-sources');
-    if (refreshedButton) refreshedButton.textContent = 'Collapse all companies';
+    if (refreshedButton) {
+      refreshedButton.disabled = false;
+      refreshedButton.textContent = 'Collapse all companies';
+    }
+    if (failed.length) {
+      notice(`${failed.length} ${failed.length === 1 ? 'company source library could' : 'company source libraries could'} not be loaded. Links for the other companies are shown.`, 'warning');
+    }
   } catch (error) {
-    notice(`Could not load all source documents: ${error.message}`, 'error');
+    notice(`Could not display source documents: ${error.message}`, 'error');
     if (btn) { btn.disabled = false; btn.textContent = 'Expand all companies'; }
   }
 };
