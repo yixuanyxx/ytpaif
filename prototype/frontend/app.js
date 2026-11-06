@@ -4370,7 +4370,7 @@ async function viewDashboard() {
     <div class="metric-grid dashboard-summary-metrics">
       ${metricTile('Benchmark exposure', pct(s.benchmark.point), '', '')}
       ${metricTile('Active exposure', pct(s.active.point, true), '', 'accent')}
-      ${metricTile('Coverage', pct(s.benchmark.point == null || s.active.point == null
+      ${metricTile('Delta', pct(s.benchmark.point == null || s.active.point == null
         ? null : s.benchmark.point - s.active.point), 'Benchmark exposure − active exposure', '')}
     </div>
 
