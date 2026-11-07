@@ -449,7 +449,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(res['analysed_count'], 1)
         self.assertEqual({e['company_id'] for e in res['errors']}, {'READY_B', 'TOO_LONG'})
 
-        self.app.put('portfolio_imports', {'id': 'scoped', 'theme_id': self.theme['id'],
+        self.app.put('portfolio_imports', {'id': 'scoped', 'theme_id': 'unrelated-theme',
                                           'rows': [{'company_id': 'READY_A'},
                                                    {'company_id': 'READY_B', 'excluded': True}]})
         with patch.object(self.app, 'analyze', return_value={'id': 'case_ready'}) as mocked:
@@ -540,6 +540,7 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertIn('import', res)
         self.assertIn('snapshot', res)
+        self.assertNotIn('theme_id', res['import'])
         self.assertEqual(res['companies_matched'], 2)
         # Verify snapshot exists and feeds dashboard
         snapshot_id = res['snapshot']['id']
