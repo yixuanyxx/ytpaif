@@ -890,7 +890,7 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   assert.doesNotMatch(node('#page-content').innerHTML,/analysis-company-search|Search company name/);
   assert.doesNotMatch(node('#page-content').innerHTML,/max-height:480px;overflow-y:auto/);
   assert.match(node('#page-content').innerHTML,/case-detail-panel/);
-  assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Asia Core<\/h2>/);
+  assert.match(node('#page-content').innerHTML,/<option value="core" selected>Asia Core<\/option>/);
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.match(node('#page-content').innerHTML,/3 docs/);
   assert.match(node('#page-content').innerHTML,/AI theme/);
@@ -905,7 +905,7 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   assert.doesNotMatch(sidebar,/data-view="review"/);
   run("selectedDashboardPortfolioId='korea'; saveDashboardSelection()");
   await run('viewAnalysis()');
-  assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Korea Growth<\/h2>/);
+  assert.match(node('#page-content').innerHTML,/<option value="korea" selected>Korea Growth<\/option>/);
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
 });
@@ -939,7 +939,7 @@ test('Calculate Exposure theme and portfolio selectors update the analysis scope
   node('#analysis-portfolio-select').change({target:{value:'portfolio-b1'}});
   assert.equal(run('selectedDashboardPortfolioId'),'portfolio-b1');
   assert.equal(run('selectedSourcePortfolioId'),'portfolio-b1');
-  assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Wind Portfolio<\/h2>/);
+  assert.match(node('#page-content').innerHTML,/<option value="portfolio-b1" selected>Wind Portfolio<\/option>/);
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
   assert.equal(JSON.parse(storage.get('theme-lab-dashboard-selection')).themeId,'theme-b');
