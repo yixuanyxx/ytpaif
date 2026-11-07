@@ -830,8 +830,6 @@ def analyze_all(d):
     companies = all_records('companies')
     if d.get('portfolio_id'):
         portfolio = get('portfolio_imports', d['portfolio_id'])
-        if portfolio.get('theme_id') != theme_id:
-            raise ValueError('Selected portfolio does not belong to the analysis theme')
         company_ids = {row['company_id'] for row in portfolio.get('rows', [])
                        if not row.get('excluded') and row.get('company_id') not in (None, '', 'CASH')}
         companies = [company for company in companies if company['id'] in company_ids]
@@ -1099,9 +1097,6 @@ def snapshot_create(d, known_company_ids=None):
     })
 
 def portfolio_import(d):
-    theme_id = d.get('theme_id')
-    if theme_id:
-        get('themes', theme_id)
     """Import portfolio holdings, match/create companies, and build snapshot (YTP-23, YTP-16)."""
     import_name = d.get('name')
     if not isinstance(import_name, str) or not import_name.strip():
@@ -1293,7 +1288,6 @@ def portfolio_import(d):
     }, known_company_ids=import_companies)
 
     import_record = {
-        'theme_id': theme_id,
         'id': ident('import'),
         'name': import_name,
         'uploaded_at': now(),

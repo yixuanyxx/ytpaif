@@ -67,7 +67,7 @@ test('Portfolio import reports an HTML proxy error clearly', async()=>{
   await assert.rejects(run("api('portfolio/import', {}, {timeoutMs: 50})"),
     /Portfolio import could not be completed by the server \(HTTP 502\)/);
 });
-test('Dashboard selection survives reload and rejects a mismatched portfolio',()=>{
+test('Dashboard selection survives reload with independently selected theme and portfolio',()=>{
   const first=setup();
   first.run("selectedDashboardThemeId='t1'; selectedDashboardPortfolioId='p1'; saveDashboardSelection()");
   const next=setup();
@@ -76,7 +76,7 @@ test('Dashboard selection survives reload and rejects a mismatched portfolio',()
   assert.equal(next.run('selectedDashboardThemeId'),'t1');
   assert.equal(next.run('selectedDashboardPortfolioId'),'p1');
   next.run("state.portfolio_imports[0].theme_id='other'; restoreDashboardSelection()");
-  assert.equal(next.run('selectedDashboardPortfolioId'),'');
+  assert.equal(next.run('selectedDashboardPortfolioId'),'p1');
 });
 
 test('AI source completion notifies on other pages only once',()=>{
@@ -104,18 +104,23 @@ test('AI source completion explains when the five-minute limit is reached',()=>{
   assert.match(node('#alert-modal-message').textContent,/reached its 5-minute limit.*3 documents saved.*1 company/);
 });
 
-test('Source search settings lock during submission, running and cancelling and unlock after completion', async()=>{
+test('Source search shows portfolios independently of theme and locks during an active search', async()=>{
   const {context,run,node}=setup();
   context.setTimeout = () => 1;
   context.document.querySelectorAll = selector =>
     selector === 'input[name="company_ids"]:checked' ? [{value:'a'}] :
       selector === 'input[name="source_types"]:checked' ? [{value:'earnings_call'}] : [];
   await run(`currentView='sources'; selectedDashboardThemeId='t';
-    state.portfolio_imports=[{id:'p',theme_id:'t',name:'Portfolio',rows:[{company_id:'a'}]}];
+    state.portfolio_imports=[
+      {id:'p',theme_id:'unrelated-theme',name:'Portfolio',rows:[{company_id:'a'}]},
+      {id:'p2',theme_id:'t',name:'Another Portfolio',rows:[{company_id:'a'}]}
+    ];
     let finishSubmission;
     api=()=>new Promise(resolve=>{finishSubmission=resolve;});
     refresh=async()=>{};
     viewSources();`);
+  assert.match(node('#page-content').innerHTML,/Another Portfolio/);
+  assert.match(node('#page-content').innerHTML,/Portfolio/);
   const request = node('#btn-run-search').onclick();
   assert.equal(node('#source-search-settings').disabled,true);
   assert.equal(node('#source-portfolio-select').disabled,true);
@@ -194,16 +199,16 @@ test('Portfolio Exposure Dashboard replaces Overview as the landing page',async(
   assert.doesNotMatch(sidebar,/Local workspace|Revenue exposure research|ai-status-label/);
   assert.equal((sidebar.match(/data-view="dashboard"/g)||[]).length,1);
 });
-test('Portfolio and Source Documents require dashboard selections',async()=>{
+test('Portfolio Import and Source Documents can be opened independently of theme selection',async()=>{
   const {run,node}=setup();
   await run('viewPortfolio()');
-  assert.match(node('#page-content').innerHTML,/Select a theme in Portfolio Exposure Dashboard/);
+  assert.match(node('#page-content').innerHTML,/Import portfolio Excel/);
   await run('viewSources()');
-  assert.match(node('#page-content').innerHTML,/Select a theme in Portfolio Exposure Dashboard and import a portfolio/);
+  assert.match(node('#page-content').innerHTML,/Import a portfolio to view its source documents/);
   assert.doesNotMatch(node('#page-content').innerHTML,/source-portfolio-select|source-form/);
 });
 
-test('Dashboard selectors load theme and portfolio choices and refresh the selected snapshot',async()=>{
+test('Dashboard theme and portfolio selectors are independent and refresh the selected snapshot',async()=>{
   const {run,node} = setup();
   run(`state = {
     themes: [
@@ -230,20 +235,20 @@ test('Dashboard selectors load theme and portfolio choices and refresh the selec
   await run('viewDashboard()');
   assert.match(node('#page-content').innerHTML,/AI Infrastructure/);
   assert.match(node('#page-content').innerHTML,/Clean Energy/);
-  assert.doesNotMatch(node('#page-content').innerHTML,/Core|Growth/);
+  assert.match(node('#page-content').innerHTML,/value="portfolio-1"/);
+  assert.match(node('#page-content').innerHTML,/value="portfolio-2"/);
   assert.equal(run('dashboardCalls.length'),0);
   node('#dashboard-theme-select').change({target:{value:'theme-2'}});
   await run('new Promise(resolve=>setTimeout(resolve,0))');
   assert.match(node('#page-content').innerHTML,/Growth/);
-  assert.doesNotMatch(node('#page-content').innerHTML,/Core/);
-  assert.doesNotMatch(node('#page-content').innerHTML,/No portfolio for this theme/);
+  assert.match(node('#page-content').innerHTML,/Core/);
   assert.equal(run('dashboardCalls[0].theme_id'),'theme-2');
   assert.equal(run('dashboardCalls[0].snapshot_id'),'snapshot-2');
 
   node('#dashboard-theme-select').change({target:{value:'theme-1'}});
   await run('new Promise(resolve=>setTimeout(resolve,0))');
   assert.equal(run('dashboardCalls.at(-1).theme_id'),'theme-1');
-  assert.equal(run('dashboardCalls.at(-1).snapshot_id'),'snapshot-1');
+  assert.equal(run('dashboardCalls.at(-1).snapshot_id'),'snapshot-2');
 
   node('#dashboard-portfolio-select').change({target:{value:'portfolio-1'}});
   await run('new Promise(resolve=>setTimeout(resolve,0))');
@@ -311,7 +316,7 @@ test('Dashboard charts top ten active contributions and filters the Tier-2 pie b
   });`);
   await run('viewDashboard()');
   const html = node('#page-content').innerHTML;
-  assert.match(html,/<div class="label">Coverage<\/div>\s*<div class="value">15\.0%<\/div>\s*<div class="meta">Benchmark exposure − active exposure<\/div>/);
+  assert.match(html,/<div class="label">Delta<\/div>\s*<div class="value">15\.0%<\/div>\s*<div class="meta">Benchmark exposure − active exposure<\/div>/);
   assert.match(html,/Top 10 of 12/);
   assert.match(html,/Portfolio exposure contribution \(%\)/);
   assert.match(html,/TSMC/);
@@ -461,17 +466,20 @@ test('Selecting a saved theme or New theme clears the top banner',async()=>{
   assert.equal(node('#notice-area').innerHTML,'');
   assert.match(node('#page-content').innerHTML,/New theme scope/);
 });
-test('Portfolio Import defaults to Excel import, lists saved portfolios, and opens holdings',async()=>{
+test('Portfolio Import lists all saved portfolios regardless of selected theme',async()=>{
   const {run,node,portfolioCards,deletePortfolioButtons} = setup();
   run(`state = {
     companies:[{id:'company-1',name:'TSMC',bloomberg_ticker:'2330 TT',sedol:'6889106'}],
     sources:[],
     portfolio_imports:[{
-      id:'portfolio-1',theme_id:'theme-1',name:'Asia Core',holdings_date:'2026-10-01',file_name:'asia-core.xlsx',
+      id:'portfolio-1',theme_id:'other-theme',name:'Asia Core',holdings_date:'2026-10-01',file_name:'asia-core.xlsx',
       benchmark_name:'MSCI Asia ex Japan',snapshot_id:'snapshot-1',
       rows:[{company_id:'company-1',company_name:'TSMC',bloomberg_ticker:'2330 TT',
         sedol:'6889106',country:'Taiwan',sector:'Semiconductors',
         portfolio_weight:0.2,reference_weight:0.1,active_weight:0.1}]
+    }, {
+      id:'portfolio-2',theme_id:'theme-2',name:'Other Portfolio',holdings_date:'2026-10-02',
+      benchmark_name:'MSCI Asia ex Japan',snapshot_id:'snapshot-2',rows:[]
     }]
   }; selectedDashboardThemeId='theme-1'; selectedDashboardPortfolioId='portfolio-1';`);
   portfolioCards.push({
@@ -482,8 +490,9 @@ test('Portfolio Import defaults to Excel import, lists saved portfolios, and ope
   assert.equal(node('#page-actions').innerHTML,'');
   assert.match(node('#page-content').innerHTML,/Import portfolio Excel/);
   assert.match(node('#page-content').innerHTML,/Existing portfolios/);
-  assert.match(node('#page-content').innerHTML,/Existing portfolios <span class="badge badge-neutral">1<\/span>/);
+  assert.match(node('#page-content').innerHTML,/Existing portfolios <span class="badge badge-neutral">2<\/span>/);
   assert.match(node('#page-content').innerHTML,/Asia Core/);
+  assert.match(node('#page-content').innerHTML,/Other Portfolio/);
   assert.match(node('#page-content').innerHTML,/asia-core\.xlsx/);
   assert.doesNotMatch(node('#page-content').innerHTML,/btn-add-row|\+ Add row/);
   assert.match(node('#page-content').innerHTML,/data-open-portfolio="portfolio-1"/);
@@ -865,7 +874,7 @@ test('Financial citations count documents separately from source categories',()=
 });
 test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   const {run,node} = setup();
-  run(`state.themes=[{id:'theme-a',approved:true}];
+  run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
     state.portfolio_imports=[
       {id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b',excluded:true}]},
       {id:'korea',theme_id:'theme-a',name:'Korea Growth',rows:[{company_id:'b'}]}
@@ -875,6 +884,8 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
     selectedSourcePortfolioId='core';`);
   await run('viewAnalysis()');
   assert.equal(node('#page-title').textContent,'Calculate Exposure');
+  assert.match(node('#page-content').innerHTML,/id="analysis-theme-select"/);
+  assert.match(node('#page-content').innerHTML,/id="analysis-portfolio-select"/);
   assert.match(node('#page-content').innerHTML,/Company-level Exposure/);
   assert.doesNotMatch(node('#page-content').innerHTML,/analysis-company-search|Search company name/);
   assert.doesNotMatch(node('#page-content').innerHTML,/max-height:480px;overflow-y:auto/);
@@ -882,6 +893,9 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Asia Core<\/h2>/);
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.match(node('#page-content').innerHTML,/3 docs/);
+  assert.match(node('#page-content').innerHTML,/AI theme/);
+  assert.match(node('#page-content').innerHTML,/Asia Core/);
+  assert.match(node('#page-content').innerHTML,/Korea Growth/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Targeted passage analysis|Create manual case|btn-open-manual/);
   assert.match(node('#page-content').innerHTML,/Analyse all ready companies/);
@@ -889,11 +903,47 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   const sidebar = fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');
   assert.match(sidebar,/<strong>Calculate Exposure<\/strong>/);
   assert.doesNotMatch(sidebar,/data-view="review"/);
-  run("renderPortfolioDetails(state.portfolio_imports[1])");
+  run("selectedDashboardPortfolioId='korea'; saveDashboardSelection()");
   await run('viewAnalysis()');
   assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Korea Growth<\/h2>/);
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
+});
+test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
+  const {run,node,storage} = setup();
+  run(`state.themes=[
+      {id:'theme-a',theme_name:'AI theme',approved:true},
+      {id:'theme-b',theme_name:'Energy theme',approved:true}
+    ];
+    state.portfolio_imports=[
+      {id:'portfolio-a',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'}]},
+      {id:'portfolio-b1',theme_id:'theme-b',name:'Wind Portfolio',rows:[{company_id:'b'}]},
+      {id:'portfolio-b2',theme_id:'theme-b',name:'Solar Portfolio',rows:[{company_id:'a'}]}
+    ];
+    selectedDashboardThemeId='theme-a';
+    selectedDashboardPortfolioId='portfolio-a';
+    selectedSourcePortfolioId='portfolio-a';`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-content').innerHTML,/AI theme/);
+  assert.match(node('#page-content').innerHTML,/Asia Core/);
+
+  node('#analysis-theme-select').change({target:{value:'theme-b'}});
+  assert.equal(run('selectedDashboardThemeId'),'theme-b');
+  assert.equal(run('selectedDashboardPortfolioId'),'portfolio-a');
+  assert.match(node('#page-content').innerHTML,/value="theme-b" selected/);
+  assert.match(node('#page-content').innerHTML,/Solar Portfolio/);
+  assert.match(node('#page-content').innerHTML,/Wind Portfolio/);
+  assert.match(node('#page-content').innerHTML,/Asia Core/);
+  assert.match(node('#page-content').innerHTML,/TSMC/);
+
+  node('#analysis-portfolio-select').change({target:{value:'portfolio-b1'}});
+  assert.equal(run('selectedDashboardPortfolioId'),'portfolio-b1');
+  assert.equal(run('selectedSourcePortfolioId'),'portfolio-b1');
+  assert.match(node('#page-content').innerHTML,/<h2 id="analysis-portfolio-name">Wind Portfolio<\/h2>/);
+  assert.match(node('#page-content').innerHTML,/Samsung/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
+  assert.equal(JSON.parse(storage.get('theme-lab-dashboard-selection')).themeId,'theme-b');
+  assert.equal(JSON.parse(storage.get('theme-lab-dashboard-selection')).portfolioId,'portfolio-b1');
 });
 test('Queue Upload opens manual upload with the clicked company selected',async()=>{
   const {run,node} = setup();

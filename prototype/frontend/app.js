@@ -187,7 +187,7 @@ function restoreDashboardSelection() {
   try {
     const saved = JSON.parse(localStorage.getItem(SELECTION_STORAGE_KEY) || '{}');
     selectedDashboardThemeId = (state.themes || []).some(t => t.approved && t.id === saved.themeId) ? saved.themeId : '';
-    selectedDashboardPortfolioId = (state.portfolio_imports || []).some(p => p.id === saved.portfolioId && p.theme_id === selectedDashboardThemeId) ? saved.portfolioId : '';
+    selectedDashboardPortfolioId = (state.portfolio_imports || []).some(p => p.id === saved.portfolioId) ? saved.portfolioId : '';
   } catch {
     selectedDashboardThemeId = '';
     selectedDashboardPortfolioId = '';
@@ -1598,10 +1598,6 @@ let _stagingFile = null;   // file name for display
 let _stagingFileObject = null;
 
 async function viewPortfolio() {
-  if (!selectedDashboardThemeId) {
-    $('#page-content').innerHTML = '<div class="panel">Select a theme in Portfolio Exposure Dashboard before importing a portfolio.</div>';
-    return;
-  }
   setPageHeader('STEP 2', 'Portfolio Import',
     'Upload holdings and match companies');
 
@@ -2169,7 +2165,6 @@ function bindEditTable(rows) {
       const clean = rows.filter(r => !r.excluded && !r.error && !r.conflict);
       if (clean.length === 0) throw new Error('No valid rows to import.');
       const res = await api('portfolio/import', {
-        theme_id: selectedDashboardThemeId,
         name: name,
         benchmark_name: 'MSCI Asia ex Japan',
         rows: clean,
@@ -2292,7 +2287,7 @@ function renderPortfolioDetails(portfolio) {
 }
 
 function renderExistingPortfolioCards() {
-  const portfolios = (state.portfolio_imports || []).filter(p => p.theme_id === selectedDashboardThemeId);
+  const portfolios = state.portfolio_imports || [];
   return portfolios.length ? `
     <div class="panel">
       <div class="panel-title">Existing portfolios <span class="badge badge-neutral">${portfolios.length}</span></div>
@@ -2316,7 +2311,7 @@ function renderExistingPortfolioCards() {
 // VIEW: SOURCE DOCUMENTS  (YTP-17, YTP-18)
 // ══════════════════════════════════════════════════════
 function sourcePortfolios() {
-  return (state.portfolio_imports || []).filter(p => p.theme_id === selectedDashboardThemeId);
+  return state.portfolio_imports || [];
 }
 
 function activeSourcePortfolio(eligiblePortfolios = sourcePortfolios(), runningPortfolioId) {
@@ -2348,7 +2343,7 @@ async function viewSources() {
   const portfolio = activeSourcePortfolio(eligiblePortfolios, activeSearch?.portfolio_id);
   if (!portfolio) {
     $('#page-actions').innerHTML = '';
-    $('#page-content').innerHTML = '<div class="panel">Select a theme in Portfolio Exposure Dashboard and import a portfolio to view source documents.</div>';
+    $('#page-content').innerHTML = '<div class="panel">Import a portfolio to view its source documents.</div>';
     return;
   }
   const companyIds = portfolioCompanyIds(portfolio);
@@ -2944,7 +2939,7 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
 
   const companyGroups = companies.map((c, idx) => {
     const compSources = sources.filter(s => s.company_id === c.id
-      && (s.source_type !== 'other' || !s.theme_id || s.theme_id === portfolio.theme_id));
+      && (s.source_type !== 'other' || !s.theme_id || s.theme_id === selectedDashboardThemeId));
     const compSourceSummary = sourceSummaries.find(s => s.company_id === c.id);
     const row = rowMap.get(c.id) || {};
     const financials = getCompanyFinancials(c, row, compSources, cases, compSourceSummary?.count);
@@ -3308,9 +3303,17 @@ async function viewAnalysis() {
   setPageHeader('STEP 4', 'Calculate Exposure',
     'Extract revenue facts, audit classifications with Claude Sonnet 5, and review cases');
 
-  const portfolio = activeSourcePortfolio();
+  const themes = (state.themes || []).filter(t => t.approved);
+  const theme = themes.find(t => t.id === selectedDashboardThemeId);
+  const eligiblePortfolios = state.portfolio_imports || [];
+  const portfolio = eligiblePortfolios.find(p => p.id === selectedDashboardPortfolioId)
+    || activeSourcePortfolio(eligiblePortfolios);
+  selectedDashboardThemeId = theme?.id || '';
+  selectedDashboardPortfolioId = portfolio?.id || '';
+  selectedSourcePortfolioId = portfolio?.id || '';
+  saveDashboardSelection();
+  saveSourcePortfolioSelection();
   const companyIds = portfolioCompanyIds(portfolio);
-  const theme = (state.themes || []).find(t => t.approved && t.id === portfolio?.theme_id);
   const companies = (state.companies || []).filter(c => companyIds.has(c.id));
   const counts = new Map((state.source_summaries || []).map(summary => [summary.company_id, summary.count]));
   const sources = state.sources || [];
@@ -3354,7 +3357,28 @@ async function viewAnalysis() {
   const selectedCaseId = cases.find(c => c.review_status === 'needs_review')?.id || cases.at(-1)?.id || null;
 
   $('#page-content').innerHTML = `
-    ${portfolio ? `<h2 id="analysis-portfolio-name">${esc(portfolio.name)}</h2>` : ''}
+    <div class="dashboard-selectors analysis-selectors">
+      <div class="dashboard-setup-header">
+        <div>
+          <div class="dashboard-setup-title">Analysis setup</div>
+          <div class="dashboard-setup-description">Choose a theme and portfolio for exposure analysis.</div>
+        </div>
+      </div>
+      <label class="dashboard-selector">
+        <span>Theme</span>
+        <select id="analysis-theme-select" ${themes.length ? '' : 'disabled'}>
+          <option value="">Select a theme</option>
+          ${themes.map(t => `<option value="${esc(t.id)}" ${t.id === theme?.id ? 'selected' : ''}>${esc(t.theme_name)}</option>`).join('')}
+        </select>
+      </label>
+      <label class="dashboard-selector">
+        <span>Portfolio</span>
+        <select id="analysis-portfolio-select">
+          ${eligiblePortfolios.length ? '' : '<option value="">No portfolios available</option>'}
+          ${eligiblePortfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolio?.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select>
+      </label>
+    </div>
     <div class="grid-1-2" style="align-items:start">
 
       <!-- Left Column: Queue & Cases -->
@@ -3450,6 +3474,19 @@ async function viewAnalysis() {
           </div>`}
       </div>
     </div>`;
+
+  $('#analysis-theme-select')?.addEventListener('change', event => {
+    selectedDashboardThemeId = event.target.value;
+    saveDashboardSelection();
+    viewAnalysis();
+  });
+  $('#analysis-portfolio-select')?.addEventListener('change', event => {
+    selectedDashboardPortfolioId = event.target.value;
+    selectedSourcePortfolioId = event.target.value;
+    saveDashboardSelection();
+    saveSourcePortfolioSelection();
+    viewAnalysis();
+  });
 
   // Filter helper for queue tabs
   window.filterAnalysisQueue = function(type, btn) {
@@ -3573,7 +3610,7 @@ window.openAnalysisPanel = async function(companyId) {
   const portfolio = activeSourcePortfolio();
   const companyIds = portfolioCompanyIds(portfolio);
   const companies = (state.companies || []).filter(company => companyIds.has(company.id));
-  const theme = (state.themes || []).find(t => t.approved && t.id === portfolio?.theme_id);
+  const theme = (state.themes || []).find(t => t.approved && t.id === selectedDashboardThemeId);
   const panel = $('#case-detail-panel') || $('#analysis-panel');
   if (!panel || (companyId && !companyIds.has(companyId))) return;
   try {
@@ -4163,7 +4200,7 @@ async function viewDashboard() {
   const snapshots = state.snapshots || [];
   const companies = demoMode ? demo.companies : (state.companies || []);
   const liveTheme = themes.find(t => t.id === selectedDashboardThemeId);
-  const eligiblePortfolios = demoMode ? [demo.portfolio] : portfolios.filter(p => liveTheme && p.theme_id === liveTheme.id);
+  const eligiblePortfolios = demoMode ? [demo.portfolio] : portfolios;
   const portfolioImport = eligiblePortfolios.find(p => p.id === selectedDashboardPortfolioId) || eligiblePortfolios.at(-1);
   const selectedTheme = demoMode ? demo.theme : liveTheme;
   if (!demoMode) {
@@ -4200,7 +4237,7 @@ async function viewDashboard() {
       <label class="dashboard-selector">
         <span>Portfolio</span>
         <select id="dashboard-portfolio-select" ${demoMode ? 'disabled' : ''}>
-          ${eligiblePortfolios.length ? '' : `<option value="">${liveTheme ? 'No portfolio for this theme' : 'Select a theme first'}</option>`}
+          ${eligiblePortfolios.length ? '' : '<option value="">No portfolios available</option>'}
           ${eligiblePortfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolioImport?.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
         </select>
       </label>
@@ -4220,26 +4257,12 @@ async function viewDashboard() {
     });
     $('#dashboard-theme-select')?.addEventListener('change', event => {
       selectedDashboardThemeId = event.target.value;
-      selectedDashboardPortfolioId = '';
       _activeThemeId = selectedDashboardThemeId || '';
       viewDashboard();
     });
     $('#dashboard-portfolio-select')?.addEventListener('change', event => {
-      if (!selectedDashboardThemeId) {
-        event.target.value = '';
-        clearNotice();
-        showAlert('Select a theme before selecting a portfolio.', 'Select a theme first');
-        return;
-      }
       selectedDashboardPortfolioId = event.target.value;
       viewDashboard();
-    });
-    $('#dashboard-portfolio-select')?.addEventListener('pointerdown', event => {
-      if (!selectedDashboardThemeId) {
-        event.preventDefault();
-        clearNotice();
-        showAlert('Select a theme before selecting a portfolio.', 'Select a theme first');
-      }
     });
   };
   $('#page-content').innerHTML = `${selectorsHtml}
@@ -4254,7 +4277,7 @@ async function viewDashboard() {
       <div class="empty-state">
         <div class="empty-icon">◫</div>
         <h3>Select a theme first</h3>
-        <p><a href="#" data-goto="theme">Define and approve a theme</a> to view portfolio exposure.</p>
+        <p><a href="#" data-goto="theme">Define and approve a theme</a> to view portfolio exposure for the selected portfolio.</p>
       </div>`);
     return;
   }
