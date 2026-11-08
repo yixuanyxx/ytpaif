@@ -1039,9 +1039,12 @@ def analyze(d):
 
 def unresolved_search_batch_limit():
     try:
-        return max(0, min(10, int(os.environ.get('UNRESOLVED_SEARCH_BATCH_LIMIT', '3'))))
+        # A portfolio-wide analysis should search every zero/unknown company by
+        # default. Operators may still lower this explicitly when their web
+        # index plan requires it; provider quota errors stop the durable worker.
+        return max(0, min(1000, int(os.environ.get('UNRESOLVED_SEARCH_BATCH_LIMIT', '1000'))))
     except ValueError:
-        return 3
+        return 1000
 
 
 def _recent_fallback_search(record, hours):
@@ -1088,6 +1091,22 @@ def _provider_quota_error(error):
             or 'quota exceeded' in message or 'rate limit' in message)
 
 
+def _fallback_outcome(case, metadata):
+    """Describe the numeric result after newly discovered evidence is analysed."""
+    point = case.get('estimate', {}).get('point')
+    if point is None:
+        status = 'still_unresolved'
+        message = ('New numeric sources were analysed, but a supported single exposure estimate '
+                   'remains unavailable; the range upper bound will be displayed.')
+    elif point == 0:
+        status = 'confirmed_zero'
+        message = 'New cited evidence was analysed and the supported exposure remains 0%.'
+    else:
+        status = 'resolved'
+        message = 'New cited evidence produced an exposure estimate.'
+    return {**metadata, 'status': status, 'message': message}
+
+
 def _analyse_found_web_sources(case, company, theme, metadata, analysis_job_id=None):
     import exposure_sources
     import sys
@@ -1109,23 +1128,66 @@ def _analyse_found_web_sources(case, company, theme, metadata, analysis_job_id=N
         # Keep the old unresolved case visible with the newly found documents.
         case['source_signature'] = analysis_library.source_signature(prepared)
         raise
-    resolved = revised.get('estimate', {}).get('point') is not None
-    metadata.update(
-        status='resolved' if resolved else 'still_unresolved',
-        message=('New cited evidence produced an exposure estimate.' if resolved else
-                 'New numeric sources were analysed, but a supported single exposure estimate remains unavailable.'),
-    )
+    metadata = _fallback_outcome(revised, metadata)
     revised['fallback_web_search'] = metadata
     put('cases', revised)
     return revised, metadata
 
 
+def _discover_numeric_web_sources(company, theme):
+    """Find and persist new approved, period-matched numeric theme evidence."""
+    import unresolved_web_search
+    import sys
+
+    existing_sources = company_source_records(company['id'])
+    attempted_at = now()
+    discovery = unresolved_web_search.discover(
+        sys.modules[__name__], company, theme, existing_sources=existing_sources)
+    if not isinstance(discovery, dict):
+        raise ValueError('Web evidence search returned an invalid result')
+    existing_ids = {source['id'] for source in existing_sources}
+    target = str(theme.get('reporting_period') or '').strip()
+    cutoff = theme.get('cutoff') or date.today().isoformat()
+    new_sources = []
+    for source in discovery.get('sources') or []:
+        if (not isinstance(source, dict) or not source.get('id') or source['id'] in existing_ids
+                or source.get('company_id') != company['id']
+                or source.get('theme_numeric_evidence') is not True
+                or source.get('link_status') != 'verified'
+                or not source.get('publication_date') or source['publication_date'] > cutoff
+                or not source.get('evidence')):
+            continue
+        source_period = str(source.get('period') or source.get('reporting_period') or '').strip()
+        if target and re.sub(r'[^a-z0-9]', '', source_period.lower()).removeprefix('fy') != re.sub(r'[^a-z0-9]', '', target.lower()).removeprefix('fy'):
+            continue
+        new_sources.append(source)
+        existing_ids.add(source['id'])
+        if len(new_sources) == 3:
+            break
+    metadata = {
+        'search_version': unresolved_web_search.SEARCH_VERSION,
+        'searched_at': attempted_at,
+        'queries': discovery.get('queries') or [],
+        'diagnostics': discovery.get('diagnostics') or {},
+        'source_ids': [source['id'] for source in new_sources],
+    }
+    if new_sources:
+        put_many('sources', new_sources)
+    return new_sources, metadata
+
+
 def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis_job_id=None):
-    """Search once for a missing theme share; analyse again only with new evidence."""
+    """Search once for a missing or zero theme share; reanalyse with new evidence."""
+    import unresolved_web_search
     estimate = case.get('estimate')
-    if (not isinstance(estimate, dict) or 'point' not in estimate
-            or estimate.get('calculation_status') not in ('partial', 'undetermined')
-            or estimate['point'] is not None):
+    if not isinstance(estimate, dict) or 'point' not in estimate:
+        return case, {'status': 'not_needed', 'message': ''}, False, False
+    point = estimate.get('point')
+    # ``None`` is the audited representation for an unknown point estimate.
+    # Search regardless of the calculation-status label so older/imported
+    # cases cannot bypass recovery merely because that optional label differs.
+    unresolved = point is None
+    if not unresolved and point != 0:
         return case, {'status': 'not_needed', 'message': ''}, False, False
 
     previous = case.get('fallback_web_search') or {}
@@ -1157,51 +1219,21 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis
             case['fallback_web_search'] = metadata
             put('cases', case)
             return case, metadata, False, False
-    if previous.get('status') in ('not_found', 'still_unresolved') and _recent_fallback_search(previous, 24):
+    current_search = str(previous.get('search_version') or '') == unresolved_web_search.SEARCH_VERSION
+    if (current_search and previous.get('status') in ('not_found', 'still_unresolved', 'confirmed_zero')
+            and _recent_fallback_search(previous, 24)):
         return case, {'status': 'already_searched',
                       'message': previous.get('message') or 'Recent web search found no supported exposure estimate.'}, False, False
-    if previous.get('status') == 'search_failed' and _recent_fallback_search(previous, 1):
+    if current_search and previous.get('status') == 'search_failed' and _recent_fallback_search(previous, 1):
         return case, {'status': 'already_searched',
                       'message': previous.get('message') or 'Recent web search failed; retry later.'}, False, False
     if not allow_search:
         return case, {'status': 'deferred',
                       'message': 'Web evidence search deferred by the batch search limit. Analyse this company individually to search now.'}, False, False
 
-    import unresolved_web_search
-    import sys
-
-    existing_sources = company_source_records(company['id'])
     attempted_at = now()
     try:
-        discovery = unresolved_web_search.discover(
-            sys.modules[__name__], company, theme, existing_sources=existing_sources)
-        if not isinstance(discovery, dict):
-            raise ValueError('Web evidence search returned an invalid result')
-        existing_ids = {source['id'] for source in existing_sources}
-        target = str(theme.get('reporting_period') or '').strip()
-        cutoff = theme.get('cutoff') or date.today().isoformat()
-        new_sources = []
-        for source in discovery.get('sources') or []:
-            if (not isinstance(source, dict) or not source.get('id') or source['id'] in existing_ids
-                    or source.get('company_id') != company['id']
-                    or source.get('theme_numeric_evidence') is not True
-                    or source.get('link_status') != 'verified'
-                    or not source.get('publication_date') or source['publication_date'] > cutoff
-                    or not source.get('evidence')):
-                continue
-            source_period = str(source.get('period') or source.get('reporting_period') or '').strip()
-            if target and re.sub(r'[^a-z0-9]', '', source_period.lower()).removeprefix('fy') != re.sub(r'[^a-z0-9]', '', target.lower()).removeprefix('fy'):
-                continue
-            new_sources.append(source)
-            existing_ids.add(source['id'])
-            if len(new_sources) == 3:
-                break
-        metadata = {
-            'searched_at': attempted_at,
-            'queries': discovery.get('queries') or [],
-            'diagnostics': discovery.get('diagnostics') or {},
-            'source_ids': [source['id'] for source in new_sources],
-        }
+        new_sources, metadata = _discover_numeric_web_sources(company, theme)
         if not new_sources:
             metadata.update(status='not_found',
                             message='No new, period-matched numeric theme revenue evidence was found in approved sources.')
@@ -1209,12 +1241,32 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis
             put('cases', case)
             return case, metadata, False, True
 
-        put_many('sources', new_sources)
         current_sources, _ = evidence_for(company['id'], theme['id'])
         case['source_signature'] = analysis_library.source_signature(current_sources)
         if all(source.get('theme_numeric_evidence_kind') == 'approximate_share' for source in new_sources):
+            import unresolved_web_search
+            passages = ' '.join(
+                str(evidence.get('passage') or '')
+                for source in new_sources for evidence in (source.get('evidence') or []))
+            bounds = unresolved_web_search.approximate_share_range(passages)
+            if bounds:
+                lower, upper = bounds
+                estimate = {**(case.get('estimate') or {})}
+                estimate.update(point=None, lower=lower, upper=upper,
+                                main_theme_revenue=None, calculation_status='partial')
+                estimate['issues'] = list(dict.fromkeys([
+                    *(estimate.get('issues') or []),
+                    'Exposure is bounded by an approved-source verbal revenue-share disclosure.',
+                ]))
+                case['estimate'] = estimate
+                case['exposure_percent'] = None
+                case['source_confidence_light'] = 'amber'
+                case['source_confidence_basis'] = (
+                    'Approved evidence reports an approximate theme-revenue share; '
+                    'the conservative upper bound is displayed.')
             metadata.update(status='still_unresolved',
-                            message='Found an approximate theme revenue share, but it does not support a single exact exposure estimate.')
+                            message=('Found an approved approximate theme-revenue share; '
+                                     'its supported range upper bound will be displayed.'))
             case['fallback_web_search'] = metadata
             put('cases', case)
             return case, metadata, False, True
@@ -1265,14 +1317,14 @@ def analyze_all(d):
     force_recalculate = d.get('force_recalculate') is True
     reusable = ({} if force_recalculate else
                 {case['company_id']: case for case in analysis_library.current_results(cases, [theme], sources)})
+    search_enabled = d.get('allow_unresolved_web_search') is not False
     ready_companies = [c for c in companies if 'company_ids' in d or c['id'] in reusable
-                       or any(s['company_id'] == c['id'] for s in sources)]
+                       or any(s['company_id'] == c['id'] for s in sources) or search_enabled]
 
     results = []
     errors = []
     fallback_searches = 0
     search_limit = unresolved_search_batch_limit()
-    search_enabled = d.get('allow_unresolved_web_search') is not False
     analysis_job_id = d.get('analysis_job_id')
     for comp in ready_companies:
         try:
@@ -1294,8 +1346,23 @@ def analyze_all(d):
                 continue
             comp_sources, valid_eids, read_errors = exposure_sources.prepare_sources(
                 sys.modules[__name__], comp['id'], theme_id)
+            presearch_metadata = None
+            presearch_attempted = False
+            if (not valid_eids and search_enabled and fallback_searches < search_limit):
+                # A source-less company used to fail before the fallback was
+                # reached. Search approved public documents first, then load
+                # the newly verified evidence through the normal reader.
+                fallback_searches += 1
+                presearch_attempted = True
+                new_sources, presearch_metadata = _discover_numeric_web_sources(comp, theme)
+                if new_sources:
+                    comp_sources, valid_eids, read_errors = exposure_sources.prepare_sources(
+                        sys.modules[__name__], comp['id'], theme_id)
             if not valid_eids:
-                raise ValueError('No readable evidence is available within the theme cutoff. Check saved document links or upload a report.')
+                suffix = (' Targeted approved-source web search found no period-matched numeric theme revenue evidence.'
+                          if presearch_attempted else '')
+                raise ValueError('No readable evidence is available within the theme cutoff. '
+                                 'Check saved document links or upload a report.' + suffix)
             selected, selection_notes = exposure_sources.select_evidence(comp_sources, theme)
             request = {
                 'theme_id': theme_id,
@@ -1307,10 +1374,17 @@ def analyze_all(d):
             if analysis_job_id:
                 request['analysis_job_id'] = analysis_job_id
             case = analyze(request)
-            case, fallback, _, searched = _search_unresolved_case(
-                case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit,
-                analysis_job_id=analysis_job_id)
-            fallback_searches += int(searched)
+            if presearch_attempted:
+                fallback = _fallback_outcome(case, presearch_metadata or {
+                    'searched_at': now(), 'queries': [], 'diagnostics': {}, 'source_ids': []})
+                case['fallback_web_search'] = fallback
+                put('cases', case)
+                searched = True
+            else:
+                case, fallback, _, searched = _search_unresolved_case(
+                    case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit,
+                    analysis_job_id=analysis_job_id)
+                fallback_searches += int(searched)
             results.append({'company_id': comp['id'], 'company_name': comp['name'], 'case_id': case['id'],
                             'status': 'success', 'reused': False, 'case': case,
                             'fallback_status': fallback['status'], 'fallback_message': fallback['message'],

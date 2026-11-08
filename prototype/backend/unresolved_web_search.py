@@ -25,9 +25,11 @@ from approved_collector import AGENT, allowed, explicit_dates, robots_permits
 from exchange_filings import domains as exchange_domains
 
 
-MAX_QUERIES = 2
 MAX_DOCUMENTS = 4
 CACHE_HOURS = 24
+QUERY_MAX_CHARS = 380
+QUERY_TERM_MAX_CHARS = 120
+SEARCH_VERSION = '3'
 _PERCENT = re.compile(r'\b\d+(?:\.\d+)?\s*(?:%|per\s*cent|percent(?:age)?)\b|'
                       r'\b(?:low|mid|high)[\s-]*(?:single|double|teens|twenties|thirties|forties)'
                       r'(?:[\s-]*digits)?\s*(?:%|per\s*cent|percent(?:age)?)\b', re.I)
@@ -78,40 +80,67 @@ def _issuer_brand(company):
 
 
 def _terms(theme):
-    """Select short query phrases from the nested taxonomy JSON."""
+    """Select bounded phrases from every node in the nested taxonomy JSON."""
     nodes = engine.flatten_taxonomy(theme.get('nodes') or [])
-    leaves = engine.taxonomy(theme['nodes']) if nodes else set()
-    terms = []
+    terms = [theme.get('theme_name')]
     for node in nodes:
-        if node.get('node_id') not in leaves:
-            continue
-        terms.extend([node.get('name'), *(node.get('keywords') or []), *(node.get('examples') or [])])
-    terms.append(theme.get('theme_name'))
+        terms.extend([
+            node.get('name'),
+            *(node.get('keywords') or []),
+            *(node.get('examples') or []),
+            node.get('definition'),
+        ])
     clean = []
+    seen = set()
     for term in terms:
         if not isinstance(term, str):
             continue
-        term = ' '.join(term.replace('"', ' ').split()).strip(' ,;:')[:60]
-        if len(term) < 3 or term.lower() in {value.lower() for value in clean}:
+        term = ' '.join(term.replace('"', ' ').split()).strip(' ,;:')[:QUERY_TERM_MAX_CHARS]
+        key = term.lower()
+        if len(term) < 3 or key in seen:
             continue
         clean.append(term)
+        seen.add(key)
     return clean
 
 
+def _query_term_groups(prefix, suffix, terms):
+    """Pack every taxonomy phrase into queries under the web-index limit."""
+    groups = []
+    current = []
+    for term in terms:
+        candidate = [*current, term]
+        clause = ' OR '.join(f'"{value}"' for value in candidate)
+        query = f'{prefix} ({clause}) {suffix}'.strip()
+        if current and len(query) > QUERY_MAX_CHARS:
+            groups.append(current)
+            current = [term]
+        else:
+            current = candidate
+    if current:
+        groups.append(current)
+    return groups
+
+
 def search_queries(company, theme, year):
-    """At most two focused searches; no full taxonomy JSON in the query."""
+    """Build bounded searches covering every taxonomy phrase at least once."""
     name = _search_name(company)
     ticker = _ticker(company)
     brand = _issuer_brand(company)
     terms = _terms(theme)
     if not name or not year or not terms:
-        raise ValueError('Company name, reporting year and named taxonomy leaves are required for unresolved web search')
+        raise ValueError('Company name, reporting year and named taxonomy nodes are required for unresolved web search')
     identity = f'"{name}" {ticker} {year}'.strip()
-    focused = ' '.join(f'"{term}"' for term in terms[:2])
+    suffix = 'revenue sales share percent'
+    groups = _query_term_groups(identity, suffix, terms)
+    focused = []
+    for group in groups:
+        clause = ' OR '.join('"' + term + '"' for term in group)
+        focused.append(f'{identity} ({clause}) {suffix}')
     theme_name = str(theme.get('theme_name') or terms[0]).strip()[:60]
     broad_identity = f'{name} {brand} {ticker} {year}'.strip()
-    return [f'{identity} {focused} revenue share percent',
-            f'{broad_identity} "{theme_name}" revenue earnings transcript'][:MAX_QUERIES]
+    broad = f'{broad_identity} "{theme_name}" revenue earnings transcript'
+    return [*focused, *([] if broad in focused else [broad])]
 
 
 def _indexed_date(value):
@@ -187,9 +216,10 @@ def _issuer_matches(company, title, text, official):
 def _thematic_pattern(theme):
     is_ai = bool(_GENERIC_AI.search(str(theme.get('theme_name') or '')))
     terms = [term for term in _terms(theme) if len(term) >= 3]
+    patterns = [r'(?<!\w)' + re.escape(term) + r'(?!\w)' for term in terms]
     if is_ai:
-        return _GENERIC_AI
-    return re.compile('|'.join(r'(?<!\w)' + re.escape(term) + r'(?!\w)' for term in terms[:12]), re.I)
+        patterns.append(r'(?:' + _GENERIC_AI.pattern + r')')
+    return re.compile('|'.join(patterns), re.I)
 
 
 def _theme_revenue_link(sentence, thematic):
@@ -268,10 +298,54 @@ def _evidence_kind(excerpt, theme):
     return 'approximate_share' if approximate else 'reported_amount'
 
 
+def approximate_share_range(text):
+    """Convert disclosed verbal percentage bands into conservative bounds."""
+    ranges = {
+        'single': (0, 9), 'double': (10, 99), 'teens': (10, 19),
+        'twenties': (20, 29), 'thirties': (30, 39), 'forties': (40, 49),
+    }
+    observed = []
+    pattern = re.compile(
+        r'\b(?:(low|mid|high)[\s-]*)?(single|double|teens|twenties|thirties|forties)'
+        r'(?:[\s-]*digits)?\s*(?:%|per\s*cent|percent(?:age)?)\b', re.I)
+    for match in pattern.finditer(str(text or '')):
+        modifier, band = (value.lower() if value else '' for value in match.groups())
+        lower, upper = ranges[band]
+        if modifier:
+            width = upper - lower + 1
+            third = max(1, width // 3)
+            if modifier == 'low':
+                upper = lower + third - 1
+            elif modifier == 'mid':
+                lower, upper = lower + third, upper - third
+            else:
+                lower = upper - third + 1
+        observed.append((lower / 100, upper / 100))
+    if not observed:
+        return None
+    return min(value[0] for value in observed), max(value[1] for value in observed)
+
+
+def _source_type(title, url, official, company):
+    label = f'{title} {unquote(urlparse(url).path)}'.lower()
+    if re.search(r'earnings call|conference call|transcript', label):
+        return 'earnings_call'
+    if re.search(r'sustainability|esg report', label):
+        return 'sustainability_report'
+    if re.search(r'investor presentation|results presentation|earnings presentation', label):
+        return 'investor_presentation'
+    if re.search(r'annual report|integrated report|form[\s-]*(?:10-k|20-f|40-f)', label):
+        return 'annual_report'
+    if (re.search(r'\bfiling|regulatory|results announcement|form[\s-]*(?:6-k|8-k)\b', label)
+            or any(allowed(url, [host]) for host in exchange_domains(company))):
+        return 'regulatory_filing'
+    return 'company_website' if official else 'other'
+
+
 def _cache_key(company, theme, year, cutoff):
     scope = analysis_library.scope_key(theme)
-    identity = json.dumps([company.get('id'), scope, year, cutoff], sort_keys=True)
-    return 'webfallback_' + hashlib.sha256(identity.encode()).hexdigest()[:40]
+    identity = json.dumps([SEARCH_VERSION, company.get('id'), scope, year, cutoff], sort_keys=True)
+    return f'webfallback_v{SEARCH_VERSION}_' + hashlib.sha256(identity.encode()).hexdigest()[:40]
 
 
 def _cached(app, key):
@@ -460,8 +534,7 @@ def discover(app, company, theme, existing_sources=(), *, timeout=50):
             rejections.append({'url': url, 'stage': 'theme evidence',
                                'reason': 'No AI-specific revenue amount or attributable revenue share found'})
             continue
-        source_type = ('earnings_call' if re.search(r'earnings call|transcript', title + ' ' + verified_url, re.I)
-                       else 'other')
+        source_type = _source_type(title, verified_url, official, company)
         evidence_kind = _evidence_kind(excerpt, theme)
         source_id = 'source_' + hashlib.sha256(
             json.dumps([company['id'], verified_url, year], sort_keys=True).encode()).hexdigest()[:32]
@@ -490,7 +563,7 @@ def discover(app, company, theme, existing_sources=(), *, timeout=50):
             'evidence_selection': 'Verified source excerpt with an explicit theme revenue amount or share',
             'extraction_status': 'not_requested', 'warnings': [],
         })
-        if len(sources) >= 2:
+        if len(sources) >= 3:
             break
     diagnostics = {'provider': 'tavily_web_index', 'queries_count': query_calls,
                    'candidate_count': len(hits), 'inspected_count': len(inspected),

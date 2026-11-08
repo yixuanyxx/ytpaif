@@ -441,13 +441,38 @@ function caseExposureValue(caseRecord) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   };
-  const point = numeric(caseRecord?.estimate?.point);
+  const boundedFraction = value => {
+    const parsed = numeric(value);
+    return parsed === null ? null : Math.max(0, Math.min(1, parsed));
+  };
+  const point = boundedFraction(caseRecord?.estimate?.point);
   if (point !== null) return {value: point, basis: 'point'};
-  const upper = numeric(caseRecord?.estimate?.upper);
+  const upper = boundedFraction(caseRecord?.estimate?.upper);
   if (upper !== null) return {value: upper, basis: 'upper'};
   const savedPercent = numeric(caseRecord?.exposure_percent);
-  if (savedPercent !== null) return {value: savedPercent / 100, basis: 'legacy_point'};
-  return {value: null, basis: 'missing'};
+  if (savedPercent !== null) {
+    return {value: Math.max(0, Math.min(100, savedPercent)) / 100, basis: 'legacy_point'};
+  }
+  // This is display policy only. It never writes an audited zero into the
+  // case, dashboard, or exports; Retry remains available for failed searches.
+  return {value: 0, basis: 'fallback_zero'};
+}
+
+function needsExposureWebFallback(caseRecord, nowMs = Date.now()) {
+  if (!caseRecord) return true;
+  const estimate = caseRecord.estimate;
+  if (!estimate || !Object.prototype.hasOwnProperty.call(estimate, 'point')) return false;
+  const point = estimate.point == null || estimate.point === '' ? null : Number(estimate.point);
+  if (point !== null && Number.isFinite(point) && point !== 0) return false;
+
+  const fallback = caseRecord.fallback_web_search || {};
+  const status = String(fallback.status || '');
+  const currentSearch = String(fallback.search_version || '') === '3';
+  const suppressHours = status === 'search_failed' ? 1
+    : ['not_found', 'still_unresolved', 'confirmed_zero'].includes(status) ? 24 : 0;
+  const searchedAt = Date.parse(fallback.searched_at || '');
+  return !(currentSearch && suppressHours && Number.isFinite(searchedAt)
+    && searchedAt > nowMs - suppressHours * 60 * 60 * 1000);
 }
 
 function badge(text, cls = 'neutral') {
@@ -3648,13 +3673,17 @@ async function viewAnalysis() {
     const analysisState = caseRec && !rawAnalysisState?.error ? null : rawAnalysisState;
     const retryable = ['Analysis failed', 'Analysis incomplete', 'Analysis cancelled'].includes(rawAnalysisState?.label)
       && !rawAnalysisState?.active;
-    // A failed or deferred calculation is ready again when source evidence is
-    // present, even if an older case is still visible for that company.
-    const readyForBulk = hasSrc && (retryable || (status === 'Ready to analyse' && !rawAnalysisState));
+    // Missing-source rows and saved zero/unknown cases are deliberately
+    // eligible: the backend can discover approved numeric web evidence before
+    // analysis. A recent completed fallback is suppressed until its retry
+    // window expires so the bulk button does not immediately requeue it.
+    const fallbackNeeded = needsExposureWebFallback(caseRec);
+    const readyForBulk = !rawAnalysisState?.active
+      && (retryable || fallbackNeeded || (status === 'Ready to analyse' && !rawAnalysisState));
     const companyAnalysisInProgress = rawAnalysisState?.active === true;
     return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState,
       companyAnalysisRun: latestCompanyRun,
-      retryable, readyForBulk, companyAnalysisInProgress };
+      retryable, fallbackNeeded, readyForBulk, companyAnalysisInProgress };
   });
 
   // Send new and retryable source-ready companies. An active job is never
@@ -3748,17 +3777,35 @@ async function viewAnalysis() {
                   // range, show its upper bound as the requested single
                   // exposure value. Legacy cases may only have a saved percent.
                   const exposure = caseExposureValue(caseRec);
-                  const pt = exposure.value != null ? pct(exposure.value) : (caseRec ? '—' : '');
+                  const pt = pct(exposure.value);
+                  const terminalAnalysis = isTerminalAnalysisRun(companyAnalysisRun);
+                  const fallbackSearch = caseRec?.fallback_web_search
+                    || analysisOutcomeForCompany(companyAnalysisRun, c.id);
+                  const fallbackWasSearched = Boolean(fallbackSearch?.searched_at
+                    || fallbackSearch?.fallback_status || fallbackSearch?.fallback_message);
                   const exposureTitle = exposure.basis === 'upper'
                     ? 'Upper bound used because a point estimate is unavailable.'
                     : exposure.basis === 'point' || exposure.basis === 'legacy_point'
-                      ? 'Calculated exposure point estimate.' : '';
+                      ? 'Calculated exposure point estimate.'
+                      : companyAnalysisInProgress
+                        ? '0% temporary display while exposure analysis is running.'
+                        : caseRec || terminalAnalysis
+                          ? `0% display fallback: no verified numeric theme-revenue exposure is available${fallbackWasSearched ? ' after targeted web search' : ' after analysis'}. Retry remains available.`
+                          : '0% display fallback until exposure analysis is completed.';
+                  const confidence = exposure.basis === 'fallback_zero'
+                    ? (companyAnalysisInProgress
+                        ? sourceConfidenceDot('', 'Exposure analysis is still running.')
+                        : caseRec || terminalAnalysis
+                          ? sourceConfidenceDot('red', exposureTitle)
+                          : sourceConfidenceDot('', 'Run the company analysis to calculate source confidence.'))
+                    : caseRec
+                      ? sourceConfidenceDot(caseRec.source_confidence_light, caseRec.source_confidence_basis)
+                      : sourceConfidenceDot('', 'Run the company analysis to calculate source confidence.');
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
                   const readyClass = readyForBulk && rowClass !== 'ready-row' ? ' ready-row' : '';
 
                   return `
-                    <tr class="queue-row ${rowClass}${readyClass}" style="cursor:${!hasSrc ? 'pointer' : 'default'};border-bottom:1px solid var(--slate-100)"
-                      onclick="${!hasSrc ? `setView('sources')` : ''}">
+                    <tr class="queue-row ${rowClass}${readyClass}" style="cursor:default;border-bottom:1px solid var(--slate-100)">
                       <td class="td-company">
                         <div style="font-weight:650;color:var(--slate-900)">${esc(c.name)}</div>
                         <div class="ticker" style="font-size:10.5px">${esc(c.bloomberg_ticker || c.id)}</div>
@@ -3769,15 +3816,14 @@ async function viewAnalysis() {
                         </span>
                         ${analysisState ? `<div style="margin-top:4px;font-size:10.5px">${statusDot(analysisState.color, analysisState.error ? `${analysisState.label}: ${analysisState.error}` : analysisState.label)}</div>` : ''}
                       </td>
-                      <td class="td-num" style="font-weight:700"${exposureTitle ? ` title="${exposureTitle}"` : ''}>
-                        ${pt || '<span class="text-muted text-small">—</span>'}
+                      <td class="td-num" style="font-weight:700" data-exposure-basis="${exposure.basis}" title="${exposureTitle}">
+                        ${pt}
                       </td>
                       <td>
-                        ${caseRec ? sourceConfidenceDot(caseRec.source_confidence_light, caseRec.source_confidence_basis) : sourceConfidenceDot('', '')}
+                        ${confidence}
                       </td>
                       <td style="text-align:right" onclick="event.stopPropagation()">
-                        ${hasSrc ? `
-                          ${companyAnalysisInProgress ? `
+                        ${companyAnalysisInProgress ? `
                             <button class="btn btn-sm btn-danger"
                               data-analysis-run-id="${esc(companyAnalysisRun.id)}"
                               onclick="cancelAnalysisRun('${esc(companyAnalysisRun.id)}', this)"
@@ -3790,10 +3836,8 @@ async function viewAnalysis() {
                               onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme ? 'disabled' : ''}>
                               ${analysisState?.error ? '↻ Retry' : (caseRec ? '↻ Re-run' : '✧ Analyse')}
                             </button>
+                            ${!hasSrc ? `<button class="btn btn-sm" onclick="openManualUploadForCompany('${esc(c.id)}')">Upload</button>` : ''}
                           `}
-                        ` : `
-                          <button class="btn btn-sm" onclick="event.stopPropagation(); openManualUploadForCompany('${esc(c.id)}')">Upload</button>
-                        `}
                       </td>
                     </tr>`;
                 }).join('')}

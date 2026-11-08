@@ -55,7 +55,7 @@ class UnresolvedWebSearchTest(unittest.TestCase):
             result = search.discover(self.app, self.company, self.theme)
             cached = search.discover(self.app, self.company, self.theme)
         gemini_grounding.assert_not_called()
-        self.assertEqual(index.call_count, 2, 'Only two bounded ordinary web queries should run')
+        self.assertEqual(index.call_count, len(result['queries']))
         self.assertEqual(read.call_count, 1, 'Duplicate URLs should be read only once')
         self.assertEqual(len(result['sources']), 1)
         self.assertEqual(result['diagnostics']['gemini_search_calls'], 0)
@@ -67,9 +67,61 @@ class UnresolvedWebSearchTest(unittest.TestCase):
         self.assertTrue(cached['diagnostics']['cache_hit'])
         self.assertEqual(cached['sources'][0]['id'], result['sources'][0]['id'])
         queries = ' '.join(result['queries'])
-        for fragment in ('Taiwan Semiconductor Manufacturing', '2330', '2025', 'AI accelerators'):
+        for fragment in ('Taiwan Semiconductor Manufacturing', '2330', '2025',
+                         'AI computing', 'Computing for AI', 'AI accelerators',
+                         'Specialized AI chips', 'GPU', 'AI chips'):
             self.assertIn(fragment, queries)
+        self.assertTrue(all(len(query) <= search.QUERY_MAX_CHARS for query in result['queries']))
         self.assertTrue(all(call.kwargs['max_results'] <= 5 for call in index.call_args_list))
+
+    def test_queries_cover_every_node_phrase_across_bounded_chunks(self):
+        nodes = []
+        expected = [self.theme['theme_name']]
+        for index in range(8):
+            name = f'Node {index} specialised infrastructure'
+            keyword = f'keyword-{index}'
+            example = f'example product {index}'
+            definition = f'Definition {index} describing specialised qualifying revenue activity'
+            nodes.append({'node_id': f'node-{index}', 'name': name, 'keywords': [keyword],
+                          'examples': [example], 'definition': definition, 'children': []})
+            expected.extend([name, keyword, example, definition])
+        theme = {**self.theme, 'nodes': nodes}
+        queries = search.search_queries(self.company, theme, '2025')
+        combined = ' '.join(queries)
+        self.assertGreater(len(queries), 2, 'Long taxonomies should be split across multiple searches')
+        self.assertTrue(all(len(query) <= search.QUERY_MAX_CHARS for query in queries))
+        for phrase in expected:
+            self.assertIn(phrase, combined)
+
+    def test_ai_theme_document_matching_includes_later_node_specific_terms(self):
+        theme = {**self.theme, 'nodes': [
+            *self.theme['nodes'],
+            {'node_id': 'cooling', 'name': 'Liquid cooling',
+             'definition': 'Cooling systems for high density data centres',
+             'keywords': ['immersion cooling'], 'examples': ['coolant distribution units'],
+             'children': []},
+        ]}
+        document = ('Liquid cooling revenue represented 12 percent of consolidated revenue '
+                    'for FY2025.')
+        excerpt = search._revenue_excerpt(document, theme)
+        self.assertIn('12 percent', excerpt)
+        self.assertEqual(search._evidence_kind(excerpt, theme), 'reported_share')
+
+    def test_fallback_cache_key_is_versioned_for_broader_taxonomy_search(self):
+        key = search._cache_key(self.company, self.theme, '2025', self.theme['cutoff'])
+        self.assertTrue(key.startswith(f'webfallback_v{search.SEARCH_VERSION}_'))
+
+    def test_verbal_share_bounds_and_trusted_document_types_are_preserved(self):
+        self.assertEqual(search.approximate_share_range('AI revenue was a high teens percent of revenue.'),
+                         (.17, .19))
+        self.assertEqual(search._source_type(
+            'TSMC 2025 Annual Report',
+            'https://investor.tsmc.com/reports/2025-annual-report.pdf', True, self.company),
+            'annual_report')
+        with patch.object(search, 'exchange_domains', return_value=['sec.gov']):
+            self.assertEqual(search._source_type(
+                'Form 6-K results', 'https://www.sec.gov/Archives/report.htm', False, self.company),
+                'regulatory_filing')
 
     def test_growth_only_or_missing_year_is_not_revenue_evidence(self):
         for document, hits in (

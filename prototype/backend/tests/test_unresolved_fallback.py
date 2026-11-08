@@ -152,6 +152,81 @@ class UnresolvedFallbackTest(unittest.TestCase):
         model.assert_not_called()
         discover.assert_not_called()
 
+    def test_exact_zero_triggers_approved_web_search_before_it_is_reused(self):
+        import unresolved_web_search
+        sources = self.app.company_source_records('ACME')
+        zero = {
+            'id': 'zero-case', 'company_id': 'ACME', 'theme_id': self.theme['id'],
+            'analysis_scope_key': self.app.analysis_library.scope_key(self.theme),
+            'source_signature': self.app.analysis_library.source_signature(sources),
+            'review_status': 'needs_review', 'created_at': self.app.now(),
+            'case': {'period': 'FY2025'}, 'exposure_percent': 0,
+            'estimate': {'point': 0, 'lower': 0, 'upper': 0, 'calculation_status': 'complete',
+                         'calculation_version': self.app.engine.VERSION},
+        }
+        self.app.put('cases', zero)
+        with patch.object(unresolved_web_search, 'discover', return_value={
+                'sources': [], 'queries': ['all taxonomy nodes'], 'diagnostics': {}}) as discover, \
+                patch.object(self.app, 'llm') as model:
+            result = self.app.analyze_all(self._request())
+        discover.assert_called_once()
+        model.assert_not_called()
+        row = result['results'][0]
+        self.assertEqual(row['fallback_status'], 'not_found')
+        self.assertTrue(row['fallback_search_attempted'])
+        self.assertEqual(row['case']['estimate']['point'], 0)
+
+    def test_source_less_company_searches_before_analysis_failure(self):
+        import unresolved_web_search
+        company = self.app.company_create({'id': 'NOSRC', 'name': 'No Source Semiconductor',
+                                           'bloomberg_ticker': 'NOSRC SP Equity'})
+        portfolio = self.app.get('portfolio_imports', 'portfolio-one')
+        portfolio['rows'].append({'company_id': company['id']})
+        self.app.put('portfolio_imports', portfolio)
+        quote = 'Dedicated AI chip revenue USD 100 million.'
+        web_source = {
+            'id': 'web-presearch', 'company_id': company['id'], 'source_type': 'annual_report',
+            'title': 'No Source FY2025 annual report', 'url': 'https://nosource.example/report-2025',
+            'publication_date': '2026-02-01', 'period': 'FY2025', 'sha256': 'web-presearch-hash',
+            'link_status': 'verified', 'theme_numeric_evidence': True,
+            'theme_numeric_evidence_kind': 'reported_amount', 'search_provider': 'tavily_web_index',
+            'evidence': [{'evidence_id': 'web-presearch-evidence', 'source_id': 'web-presearch',
+                          'page': 1, 'passage': 'Consolidated external FY2025 revenue USD 100 million. ' + quote}],
+        }
+        facts = {
+            'total_revenue': 100, 'denominator_evidence_ids': ['web-presearch-evidence'],
+            'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [],
+            'units': [{'unit_id': 'ai', 'activity': 'Dedicated AI chips', 'revenue': 100,
+                       'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'external': True,
+                       'evidence_ids': ['web-presearch-evidence'], 'overlap_group': None}],
+        }
+        classification = {
+            'classifications': [{'unit_id': 'ai', 'node_ids': ['chips'], 'relationship_type': 'direct',
+                                 'rationale': 'Dedicated AI revenue is disclosed', 'scope_check': '',
+                                 'evidence_ids': ['web-presearch-evidence'], 'unresolved_questions': [],
+                                 'whole_unit_supported': True, 'revenue_attribution_quote': quote}],
+            'confidence_band': 'high', 'confidence_basis': 'Direct cited revenue',
+        }
+        with patch.object(unresolved_web_search, 'discover', return_value={
+                'sources': [web_source], 'queries': ['all taxonomy nodes'], 'diagnostics': {}}) as discover, \
+                patch.object(self.app, 'llm', side_effect=[facts, classification]) as model:
+            result = self.app.analyze_all({
+                'theme_id': self.theme['id'], 'portfolio_id': 'portfolio-one',
+                'company_ids': [company['id']],
+            })
+        discover.assert_called_once()
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(result['errors'], [])
+        row = result['results'][0]
+        self.assertTrue(row['fallback_search_attempted'])
+        self.assertEqual(row['fallback_status'], 'resolved')
+        self.assertEqual(row['case']['estimate']['point'], 1)
+        self.assertEqual(self.app.get('sources', web_source['id'])['search_provider'], 'tavily_web_index')
+
+    def test_default_search_budget_covers_a_large_portfolio(self):
+        with patch.dict(os.environ, {'UNRESOLVED_SEARCH_BATCH_LIMIT': 'invalid'}):
+            self.assertGreaterEqual(self.app.unresolved_search_batch_limit(), 80)
+
     def test_approximate_share_is_saved_without_another_gemini_call_or_exact_point(self):
         import unresolved_web_search
         facts, classification = self._initial_outputs()
@@ -172,7 +247,41 @@ class UnresolvedFallbackTest(unittest.TestCase):
         model.assert_not_called()
         self.assertEqual(result['results'][0]['fallback_status'], 'still_unresolved')
         self.assertIsNone(result['results'][0]['case']['estimate']['point'])
+        self.assertAlmostEqual(result['results'][0]['case']['estimate']['lower'], .17)
+        self.assertAlmostEqual(result['results'][0]['case']['estimate']['upper'], .19)
+        self.assertEqual(result['results'][0]['case']['source_confidence_light'], 'amber')
         self.assertEqual(self.app.get('sources', 'web-approx')['theme_numeric_evidence_kind'], 'approximate_share')
+
+    def test_approximate_share_replaces_stale_exact_zero_with_supported_range(self):
+        import unresolved_web_search
+        sources = self.app.company_source_records('ACME')
+        self.app.put('cases', {
+            'id': 'stale-zero', 'company_id': 'ACME', 'theme_id': self.theme['id'],
+            'analysis_scope_key': self.app.analysis_library.scope_key(self.theme),
+            'source_signature': self.app.analysis_library.source_signature(sources),
+            'review_status': 'needs_review', 'created_at': self.app.now(),
+            'case': {'period': 'FY2025'}, 'exposure_percent': 0,
+            'estimate': {'point': 0, 'lower': 0, 'upper': 0, 'calculation_status': 'complete',
+                         'calculation_version': self.app.engine.VERSION},
+        })
+        approximate = {
+            'id': 'web-high-teens', 'company_id': 'ACME', 'source_type': 'earnings_call',
+            'title': 'FY2025 call', 'url': 'https://acme.example/high-teens',
+            'publication_date': '2026-02-01', 'period': 'FY2025', 'link_status': 'verified',
+            'theme_numeric_evidence': True, 'theme_numeric_evidence_kind': 'approximate_share',
+            'evidence': [{'evidence_id': 'high-teens-evidence', 'source_id': 'web-high-teens',
+                          'passage': 'AI accelerator revenue was a high teens percent of FY2025 revenue.'}],
+        }
+        with patch.object(unresolved_web_search, 'discover', return_value={
+                'sources': [approximate], 'queries': ['all nodes'], 'diagnostics': {}}), \
+                patch.object(self.app, 'llm') as model:
+            result = self.app.analyze_all(self._request())
+        model.assert_not_called()
+        case = result['results'][0]['case']
+        self.assertIsNone(case['estimate']['point'])
+        self.assertAlmostEqual(case['estimate']['lower'], .17)
+        self.assertAlmostEqual(case['estimate']['upper'], .19)
+        self.assertIsNone(case['exposure_percent'])
 
     def test_saved_web_evidence_retries_after_provider_quota_without_searching_again(self):
         import unresolved_web_search

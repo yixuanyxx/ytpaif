@@ -971,7 +971,7 @@ test('Per-stock Analyse queues a fresh theme exposure and confidence calculation
   assert.match(node('#page-actions').innerHTML,/Analysis queued.*0 of 1 companies processed/);
   assert.match(node('#page-content').innerHTML,/Analysis queued/);
 });
-test('Bulk analysis queues only ready companies rather than every holding',async()=>{
+test('Bulk analysis queues source-ready and source-less companies that need exposure',async()=>{
   const {run,node,context} = setup();
   context.setTimeout=()=>1;
   run(`state.companies=[
@@ -990,9 +990,9 @@ test('Bulk analysis queues only ready companies rather than every holding',async
   await node('#btn-analyze-all').onclick();
   assert.equal(run('bulkRequest.path'),'analysis/start');
   assert.deepEqual(JSON.parse(run('JSON.stringify(bulkRequest.data)')),
-    {theme_id:'theme-a',portfolio_id:'core',company_ids:['a','c']});
-  assert.match(node('#page-actions').innerHTML,/Analysis queued.*0 of 2 companies processed/);
-  assert.doesNotMatch(run('JSON.stringify(bulkRequest.data)'),/"b"|"d"/);
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['a','c','d']});
+  assert.match(node('#page-actions').innerHTML,/Analysis queued.*0 of 3 companies processed/);
+  assert.doesNotMatch(run('JSON.stringify(bulkRequest.data)'),/"b"/);
 });
 test('Bulk analysis includes source-ready failures and deferred companies for retry',async()=>{
   const {run,node,context}=setup();
@@ -1024,13 +1024,41 @@ test('Bulk analysis includes source-ready failures and deferred companies for re
         theme_id:'theme-a',portfolio_id:'core',company_ids:data.company_ids,companies_completed:[]}};
     };`);
   await run('viewAnalysis()');
-  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(3\)/);
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(4\)/);
   assert.match(node('#page-content').innerHTML,/queue-row pending-row ready-row[\s\S]*Failed rerun/);
   await node('#btn-analyze-all').onclick();
   assert.equal(run('retryBulkRequest.path'),'analysis/start');
   assert.deepEqual(JSON.parse(run('JSON.stringify(retryBulkRequest.data)')),
-    {theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b','d'],force_recalculate:true});
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b','d','e'],force_recalculate:true});
   assert.match(node('#page-actions').innerHTML,/id="btn-analyze-all" disabled/);
+});
+test('Bulk analysis retries saved zero and unknown cases but suppresses recent completed fallback searches',async()=>{
+  const {run,node,context}=setup();
+  context.setTimeout=()=>1;
+  run(`state.companies=[
+      {id:'zero',name:'Saved zero'}, {id:'unknown',name:'Saved unknown'},
+      {id:'recent',name:'Recently checked zero'}, {id:'positive',name:'Resolved positive'}
+    ];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[
+      {company_id:'zero'},{company_id:'unknown'},{company_id:'recent'},{company_id:'positive'}]}];
+    state.cases=[
+      {id:'zero-case',theme_id:'theme-a',company_id:'zero',review_status:'needs_review',estimate:{point:0,upper:0}},
+      {id:'unknown-case',theme_id:'theme-a',company_id:'unknown',review_status:'needs_review',estimate:{point:null,upper:.5}},
+      {id:'recent-case',theme_id:'theme-a',company_id:'recent',review_status:'needs_review',estimate:{point:0,upper:0},
+       fallback_web_search:{search_version:'3',status:'confirmed_zero',searched_at:'2999-01-01T00:00:00Z'}},
+      {id:'positive-case',theme_id:'theme-a',company_id:'positive',review_status:'needs_review',estimate:{point:.2,upper:.2}}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core'; currentView='analysis';
+    let fallbackBulkRequest; api=async(path,data)=>{
+      fallbackBulkRequest={path,data};
+      return {analysis_run:{id:'fallback-bulk',job_type:'analysis',status:'running',phase:'queued',
+        theme_id:'theme-a',portfolio_id:'core',company_ids:data.company_ids,companies_completed:[]}};
+    };`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(2\)/);
+  await node('#btn-analyze-all').onclick();
+  assert.deepEqual(JSON.parse(run('JSON.stringify(fallbackBulkRequest.data)')),
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['zero','unknown']});
 });
 test('Active batch locks only its companies and lets an unrelated failed stock retry',async()=>{
   const {run,node,context}=setup();
@@ -1237,9 +1265,52 @@ test('Calculate Exposure uses the range upper bound when no point estimate exist
   assert.match(row('Exact zero'),/0\.0%/);
   assert.doesNotMatch(row('Exact zero'),/80\.0%/);
   assert.match(row('Legacy point'),/50\.0%/);
-  assert.match(row('Missing estimate'),/—/);
+  assert.match(row('Missing estimate'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
+  assert.match(row('Missing estimate'),/0% display fallback: no verified numeric theme-revenue exposure is available after analysis/);
+  assert.match(row('Missing estimate'),/dot-red[\s\S]*AI confidence: red/);
+  assert.doesNotMatch(row('Missing estimate'),/—/);
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,upper:.5666},exposure_percent:null}))")),
     {value:.5666,basis:'upper'});
+});
+test('Calculate Exposure shows bounded fallback zeroes without turning them into audited cases',async()=>{
+  const {run,node}=setup();
+  run(`state.companies=[
+      {id:'failed',name:'Failed search'}, {id:'active',name:'Active search'},
+      {id:'new',name:'Not analysed'}
+    ];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[
+      {company_id:'failed'},{company_id:'active'},{company_id:'new'}]}];
+    state.source_summaries=[
+      {company_id:'failed',count:2},{company_id:'active',count:2},{company_id:'new',count:2}];
+    state.search_runs=[
+      {id:'failed-run',job_type:'analysis',status:'failed',phase:'finished',theme_id:'theme-a',portfolio_id:'core',
+       company_ids:['failed'],companies_completed:['failed'],outcomes:{failed:'failed'},
+       results:{failed:{company_id:'failed',status:'failed',error:'No readable evidence',
+         fallback_status:'not_found',fallback_message:'No approved numeric document found.'}}},
+      {id:'active-run',job_type:'analysis',status:'running',phase:'analysing',theme_id:'theme-a',portfolio_id:'core',
+       company_ids:['active'],companies_completed:[],outcomes:{},results:{}}
+    ]; state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
+  assert.match(row('Failed search'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
+  assert.match(row('Failed search'),/after targeted web search/);
+  assert.match(row('Failed search'),/dot-red[\s\S]*AI confidence: red/);
+  assert.match(row('Failed search'),/↻ Retry/);
+  assert.match(row('Active search'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
+  assert.match(row('Active search'),/0% temporary display while exposure analysis is running/);
+  assert.match(row('Active search'),/dot-grey[\s\S]*AI confidence: not calculated/);
+  assert.match(row('Not analysed'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
+  assert.match(row('Not analysed'),/0% display fallback until exposure analysis is completed/);
+  assert.match(row('Not analysed'),/dot-grey[\s\S]*AI confidence: not calculated/);
+  assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue(null))')),
+    {value:0,basis:'fallback_zero'});
+  assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:3,upper:4}}))')),
+    {value:1,basis:'point'});
+  assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:null,upper:-.5}}))')),
+    {value:0,basis:'upper'});
+  assert.equal(run('state.cases.length'),0);
 });
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
   const {run,node,storage} = setup();

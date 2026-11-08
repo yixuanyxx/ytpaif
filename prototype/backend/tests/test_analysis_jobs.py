@@ -127,7 +127,7 @@ class AnalysisJobsTest(unittest.TestCase):
         self.assertNotEqual(run['id'], financial['id'])
         self.assertEqual(len(self.queue.records()), 2)
 
-    def test_omitted_company_ids_skip_portfolio_holdings_without_sources_or_current_cases(self):
+    def test_omitted_company_ids_include_source_less_holdings_for_web_discovery(self):
         self.store.put('companies', {'id': 'no-source', 'name': 'No source'})
         portfolio = self.store.get('portfolio_imports', 'portfolio')
         portfolio['rows'].append({'company_id': 'no-source'})
@@ -137,7 +137,17 @@ class AnalysisJobsTest(unittest.TestCase):
             run = analysis_jobs.start(self.app, {
                 'theme_id': 'theme', 'portfolio_id': 'portfolio',
             })['analysis_run']
-        self.assertEqual(run['company_ids'], ['a', 'b'])
+        self.assertEqual(run['company_ids'], ['a', 'b', 'no-source'])
+
+        disabled_queue = source_jobs.Queue(Path(self.temp.name) / 'disabled.sqlite3')
+        with self._configured_provider(), \
+                patch.object(analysis_jobs.source_jobs, 'Queue', return_value=disabled_queue), \
+                patch.object(analysis_jobs.source_jobs, 'ensure_worker'):
+            disabled = analysis_jobs.start(self.app, {
+                'theme_id': 'theme', 'portfolio_id': 'portfolio',
+                'allow_unresolved_web_search': False,
+            })['analysis_run']
+        self.assertEqual(disabled['company_ids'], ['a', 'b'])
 
     def test_start_rejects_missing_analysis_provider_configuration_before_queueing(self):
         with patch.dict(os.environ, {

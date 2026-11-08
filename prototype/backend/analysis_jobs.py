@@ -39,16 +39,21 @@ def _selected_companies(app, data):
         company_ids = requested
     else:
         # Match ``analyze_all``'s normal bulk behavior: a portfolio-wide run
-        # should not turn every source-less holding into an avoidable failure.
-        source_loader = getattr(app, 'source_link_records', None)
-        sources = source_loader() if callable(source_loader) else app.all_records('sources')
-        reusable = {
-            case.get('company_id')
-            for case in analysis_library.current_results(app.all_records('cases'), [theme], sources)
-        }
-        sourced = {source.get('company_id') for source in sources if source.get('company_id')}
-        company_ids = [company_id for company_id in portfolio_ids
-                       if company_id in reusable or company_id in sourced]
+        # can now recover source-less holdings through approved web discovery.
+        # Preserve the old source-ready filter only when callers explicitly
+        # disable unresolved-company web search.
+        if data.get('allow_unresolved_web_search') is not False:
+            company_ids = portfolio_ids
+        else:
+            source_loader = getattr(app, 'source_link_records', None)
+            sources = source_loader() if callable(source_loader) else app.all_records('sources')
+            reusable = {
+                case.get('company_id')
+                for case in analysis_library.current_results(app.all_records('cases'), [theme], sources)
+            }
+            sourced = {source.get('company_id') for source in sources if source.get('company_id')}
+            company_ids = [company_id for company_id in portfolio_ids
+                           if company_id in reusable or company_id in sourced]
 
     companies = {company.get('id'): company for company in app.all_records('companies')}
     selected = [companies[company_id] for company_id in company_ids if company_id in companies]
@@ -231,9 +236,9 @@ def worker(app, run, companies):
         run['fallback_searches'] = 0
     limit_getter = getattr(app, 'unresolved_search_batch_limit', None)
     try:
-        fallback_search_limit = max(0, int(limit_getter() if callable(limit_getter) else 3))
+        fallback_search_limit = max(0, int(limit_getter() if callable(limit_getter) else 1000))
     except (TypeError, ValueError):
-        fallback_search_limit = 3
+        fallback_search_limit = 1000
     run['fallback_search_limit'] = fallback_search_limit
     run['phase'] = 'analysing'
 
