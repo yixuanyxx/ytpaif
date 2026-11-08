@@ -948,7 +948,38 @@ test('Analysis view omits manual AI analysis and stage pipeline cards',async()=>
   const html = node('#page-content').innerHTML;
   assert.doesNotMatch(html,/Run AI analysis|Evidence passages|Stage pipeline|Fact<br>Extraction|Awaiting<br>Review/);
   assert.match(node('#page-actions').innerHTML,/Analyse all ready companies/);
-  assert.match(html,/Ready/);
+  assert.match(html,/✧ Analyse/);
+});
+test('Per-stock Analyse forces a fresh theme exposure and confidence calculation',async()=>{
+  const {run,node} = setup();
+  run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:3}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-content').innerHTML,/onclick="rerunCompanyAnalysis\('a', this\)"[\s\S]*✧ Analyse/);
+  run(`let rerunRequest; api=async(path,data)=>{
+    rerunRequest={path,data};
+    return {results:[{company_id:'a',case_id:'fresh-case'}],errors:[]};
+  }; refresh=async()=>{}; render=async()=>{};`);
+  await run("window.rerunCompanyAnalysis('a', {disabled:false,textContent:'✧ Analyse'})");
+  assert.equal(run('rerunRequest.path'),'analyze_all');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(rerunRequest.data)')),
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],force_recalculate:true});
+});
+test('Per-stock rerun uses the latest case result in the queue',async()=>{
+  const {run,node} = setup();
+  run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:3}]; state.ai_configured=true;
+    state.cases=[
+      {id:'old',theme_id:'theme-a',company_id:'a',created_at:'2026-01-01T00:00:00Z',review_status:'approved',classification_confidence:'low',estimate:{point:.2}},
+      {id:'new',theme_id:'theme-a',company_id:'a',created_at:'2026-01-02T00:00:00Z',review_status:'needs_review',classification_confidence:'high',estimate:{point:.9}}
+    ]; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  assert.match(html,/90\.0%[\s\S]*High · 92%[\s\S]*↻ Re-run/);
+  assert.doesNotMatch(html,/20\.0%/);
 });
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
   const {run,node,storage} = setup();
@@ -1011,7 +1042,7 @@ test('Calculate Exposure omits opened case-detail and review cards',async()=>{
     selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/Awaiting review/);
+  assert.match(html,/1 awaiting review/);
   assert.doesNotMatch(html,/case-detail-panel|Point estimate|Revenue units|Review decision|Save review decision/);
 });
 

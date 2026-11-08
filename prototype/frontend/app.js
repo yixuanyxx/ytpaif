@@ -3368,12 +3368,19 @@ async function viewAnalysis() {
   const cases = (state.cases || []).filter(c => companyIds.has(c.company_id) && c.theme_id === theme?.id);
   const approved  = cases.filter(c => c.review_status === 'approved');
   const pending   = cases.filter(c => c.review_status === 'needs_review');
+  const latestCasesByCompany = new Map();
+  for (const caseRecord of cases) {
+    const previous = latestCasesByCompany.get(caseRecord.company_id);
+    if (!previous || String(caseRecord.created_at || '') >= String(previous.created_at || '')) {
+      latestCasesByCompany.set(caseRecord.company_id, caseRecord);
+    }
+  }
 
   const companyProgress = companies.map(c => {
     const compSources = sources.filter(s => s.company_id === c.id);
     const sourceCount = counts.get(c.id) ?? compSources.length;
     const hasSrc = sourceCount > 0;
-    const caseRec     = cases.find(x => x.company_id === c.id);
+    const caseRec     = latestCasesByCompany.get(c.id);
     let status, color;
     if (caseRec?.review_status === 'approved')          { status = 'Approved';        color = 'green'; }
     else if (caseRec?.review_status === 'needs_review') { status = 'Awaiting review';  color = 'amber'; }
@@ -3481,13 +3488,14 @@ async function viewAnalysis() {
                         ${caseRec ? `<span class="badge ${confColor}" style="font-size:10.5px">${confDisplay}</span>` : statusDot(color, status)}
                       </td>
                       <td style="text-align:right" onclick="event.stopPropagation()">
-                        ${caseRec ? `
-                          ${reviewStatusBadge(caseRec.review_status)}
-                        ` : (hasSrc ? `
-                          <span class="badge badge-neutral">Ready</span>
+                        ${hasSrc ? `
+                          <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}"
+                            onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme ? 'disabled' : ''}>
+                            ${caseRec ? '↻ Re-run' : '✧ Analyse'}
+                          </button>
                         ` : `
                           <button class="btn btn-sm" onclick="event.stopPropagation(); openManualUploadForCompany('${esc(c.id)}')">Upload</button>
-                        `)}
+                        `}
                       </td>
                     </tr>`;
                 }).join('')}
@@ -3539,6 +3547,45 @@ async function viewAnalysis() {
     }, 'Batch analyzing…');
   }
 }
+
+window.rerunCompanyAnalysis = async function(companyId, button) {
+  const themeId = selectedDashboardThemeId;
+  const portfolioId = selectedDashboardPortfolioId;
+  const companyName = (state.companies || []).find(company => company.id === companyId)?.name || companyId;
+  if (!themeId || !portfolioId) {
+    return notice('Select a theme and portfolio before running analysis.', 'error');
+  }
+  const originalLabel = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Analysing…';
+  }
+  showLoading(`Recalculating exposure and AI confidence for ${companyName}…`);
+  try {
+    const result = await api('analyze_all', {
+      theme_id: themeId,
+      portfolio_id: portfolioId,
+      company_ids: [companyId],
+      force_recalculate: true
+    });
+    const outcome = (result.results || []).find(row => row.company_id === companyId);
+    if (!outcome) {
+      const failure = (result.errors || []).find(row => row.company_id === companyId);
+      throw new Error(failure?.error || 'The company analysis did not return a result.');
+    }
+    await refresh();
+    notice(`${companyName} exposure and AI confidence recalculated.`, 'success');
+    await render();
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel || '✧ Analyse';
+    }
+    showAlert(`Could not analyse ${companyName}: ${error.message}`, 'Company analysis failed', { searchCompletion: true });
+  } finally {
+    hideLoading();
+  }
+};
 
 window.openManualUploadForCompany = function(companyId) {
   pendingManualUploadCompanyId = companyId;

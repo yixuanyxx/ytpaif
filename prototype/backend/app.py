@@ -1231,7 +1231,11 @@ def analyze_all(d):
                if 'company_ids' in d else all_records('sources'))
     cases = all_records('cases')
 
-    reusable = {case['company_id']: case for case in analysis_library.current_results(cases, [theme], sources)}
+    # A per-company rerun intentionally bypasses saved current results so the
+    # model, exposure engine, and source-confidence assessment all run again.
+    force_recalculate = d.get('force_recalculate') is True
+    reusable = ({} if force_recalculate else
+                {case['company_id']: case for case in analysis_library.current_results(cases, [theme], sources)})
     ready_companies = [c for c in companies if 'company_ids' in d or c['id'] in reusable
                        or any(s['company_id'] == c['id'] for s in sources)]
 

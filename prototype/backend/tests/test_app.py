@@ -656,6 +656,30 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(reused['results'][0]['case']['exposure_percent'], 50)
         self.assertEqual(reused['results'][0]['case']['confidence_percent'], 87)
 
+    def test_batch_force_recalculate_bypasses_saved_company_result(self):
+        self.app.put('portfolio_imports', {'id': 'force-rerun', 'theme_id': self.theme['id'],
+                                           'rows': [{'company_id': 'DEMO_A'}]})
+        new_case = {'id': 'fresh-case', 'estimate': {'point': 0.25}}
+        with patch.object(self.app.analysis_library, 'current_results',
+                          side_effect=AssertionError('Forced rerun must not reuse a saved case')), \
+                patch('exposure_sources.prepare_sources', return_value=([{'id': 'source'}], ['evidence'], [])) as prepare, \
+                patch('exposure_sources.select_evidence', return_value=(['evidence'], ['Automatic selection'])) as select, \
+                patch.object(self.app, 'analyze', return_value=new_case) as analyze, \
+                patch.object(self.app, '_search_unresolved_case',
+                             return_value=(new_case, {'status': 'not_needed', 'message': ''}, False, False)):
+            result = self.app.analyze_all({'theme_id': self.theme['id'], 'portfolio_id': 'force-rerun',
+                                           'company_ids': ['DEMO_A'], 'force_recalculate': True})
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(result['calculated_count'], 1)
+        self.assertEqual(result['reused_count'], 0)
+        self.assertEqual(result['results'][0]['case']['id'], 'fresh-case')
+        prepare.assert_called_once()
+        select.assert_called_once()
+        analyze.assert_called_once_with({
+            'theme_id': self.theme['id'], 'company_id': 'DEMO_A', 'evidence_ids': ['evidence'],
+            'evidence_selection_notes': ['Automatic selection'], 'source_read_errors': []
+        })
+
     def test_batch_reads_link_only_sources_with_missing_or_null_evidence_before_calculating(self):
         self.app.company_create({'id': 'LINKED', 'name': 'Linked company', 'bloomberg_ticker': 'LINKED SP'})
         source = {'id': 'linked_report', 'company_id': 'LINKED', 'publication_date': '2026-01-01',
