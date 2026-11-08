@@ -40,10 +40,14 @@ def source_signature(sources):
     return hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()
 
 
-def is_current(case, theme, sources=None):
+def is_compatible(case, theme):
+    """Whether a saved result still describes the selected theme scope.
+
+    Compatibility deliberately ignores the calculation version. Dashboards
+    may display a compatible prior result while a newer methodology reruns it;
+    only ``is_current`` results are reusable by the analysis pipeline.
+    """
     if case.get('theme_id') != theme.get('id') or case.get('review_status') == 'rejected':
-        return False
-    if case.get('estimate', {}).get('calculation_version') != engine.VERSION:
         return False
     if case.get('analysis_scope_key'):
         if case['analysis_scope_key'] != scope_key(theme):
@@ -55,6 +59,15 @@ def is_current(case, theme, sources=None):
         normalise = lambda value: re.sub(r'[^a-z0-9]', '', str(value).lower()).removeprefix('fy')
         if normalise(case.get('case', {}).get('period', '')) != normalise(target):
             return False
+    return True
+
+
+def is_current(case, theme, sources=None):
+    if not is_compatible(case, theme):
+        return False
+    if case.get('estimate', {}).get('calculation_version') != engine.VERSION:
+        return False
+    target = str(theme.get('reporting_period') or '').strip()
     if sources is not None:
         cutoff = theme.get('cutoff') or date.today().isoformat()
         eligible = [source for source in sources if source.get('company_id') == case.get('company_id')
@@ -68,6 +81,21 @@ def is_current(case, theme, sources=None):
             if source_years and case_years and max(source_years) > max(case_years):
                 return False
     return True
+
+
+def display_results(cases, themes):
+    """Latest scope-compatible result per company, including stale versions."""
+    by_theme = {theme['id']: theme for theme in themes}
+    latest = {}
+    for case in sorted(cases, key=lambda row: row.get('created_at') or ''):
+        theme = by_theme.get(case.get('theme_id'))
+        if theme and is_compatible(case, theme):
+            latest[(case.get('company_id'), case.get('theme_id'))] = case
+    return [{**case,
+             **result_fields(case['estimate'], case.get('confidence_percent')),
+             'analysis_reusable': is_current(case, by_theme[case['theme_id']]),
+             'calculation_stale': case.get('estimate', {}).get('calculation_version') != engine.VERSION}
+            for case in latest.values()]
 
 
 def current_results(cases, themes, sources=None):

@@ -553,7 +553,9 @@ def review(d):
 def selected_estimates(theme_id):
     result = {}
     theme = get('themes', theme_id)
-    for c in analysis_library.current_results(all_records('cases'), [theme], source_link_records()):
+    # Keep the last compatible chart visible while cases are recalculated under
+    # a newer engine version. Stale cases remain non-reusable for analysis.
+    for c in analysis_library.display_results(all_records('cases'), [theme]):
         if c['review_status'] in ('approved', 'needs_review'):
             estimate = dict(c['estimate'])
             point_basis = 'point'
@@ -562,7 +564,7 @@ def selected_estimates(theme_id):
                 point_basis = 'upper'
             result[c['company_id']] = {
                 **estimate, 'review_status': c['review_status'], 'case_id': c['id'],
-                'point_basis': point_basis,
+                'point_basis': point_basis, 'calculation_stale': c['calculation_stale'],
             }
     return result
 

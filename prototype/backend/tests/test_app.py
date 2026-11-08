@@ -202,12 +202,14 @@ class AppFlowTest(unittest.TestCase):
         case['review_status'] = 'needs_review'
         case['estimate']['point'] = None
         case['estimate']['upper'] = 0.6
+        case['estimate']['calculation_version'] = '1.2.2'
         self.app.put('cases', case)
 
         selected = self.app.selected_estimates(self.theme['id'])
         self.assertEqual(selected[case['company_id']]['point'], 0.6)
         self.assertEqual(selected[case['company_id']]['point_basis'], 'upper')
         self.assertEqual(selected[case['company_id']]['review_status'], 'needs_review')
+        self.assertTrue(selected[case['company_id']]['calculation_stale'])
 
         dashboard = self.app.dashboard(self.theme['id'])
         row = next(row for row in dashboard['companies'] if row['company_id'] == case['company_id'])

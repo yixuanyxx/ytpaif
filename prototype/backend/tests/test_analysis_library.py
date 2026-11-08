@@ -28,6 +28,16 @@ class AnalysisLibraryTest(unittest.TestCase):
         old['estimate']['calculation_version'] = 'old'
         self.assertFalse(analysis_library.is_current(old, self.theme))
 
+    def test_stale_version_remains_displayable_but_is_not_reusable(self):
+        old = copy.deepcopy(self.case)
+        old['estimate']['calculation_version'] = '1.2.2'
+        displayed = analysis_library.display_results([old], [self.theme])
+        self.assertEqual(len(displayed), 1)
+        self.assertEqual(displayed[0]['exposure_percent'], 50)
+        self.assertTrue(displayed[0]['calculation_stale'])
+        self.assertFalse(displayed[0]['analysis_reusable'])
+        self.assertEqual(analysis_library.current_results([old], [self.theme]), [])
+
     def test_latest_rejected_case_does_not_restore_an_old_answer(self):
         rejected = {**self.case, 'id': 'newer', 'review_status': 'rejected', 'created_at': '2026-02-01'}
         self.assertEqual(analysis_library.current_results([rejected, self.case], [self.theme]), [])
