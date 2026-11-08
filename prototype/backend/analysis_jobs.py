@@ -75,21 +75,17 @@ def _request_key(theme_id, portfolio_id, companies, force_recalculate, allow_unr
 
 
 def _preflight_provider_configuration():
-    """Fail once at queue time instead of repeating a missing-key error 80 times."""
-    if not os.environ.get('FINANCIALS_LLM_API_KEY', '').strip():
-        raise ValueError('Configure FINANCIALS_LLM_API_KEY before starting exposure analysis')
-    provider = os.environ.get('EXPOSURE_CONFIDENCE_PROVIDER', 'claude').strip().lower()
-    if provider == 'claude':
-        names = ('CHECKER_LLM_API_KEY', 'CLAUDE_API_KEY', 'ANTHROPIC_API_KEY')
+    """Validate the one provider shared by extraction, classification and confidence."""
+    exposure_provider = os.environ.get('EXPOSURE_LLM_PROVIDER', 'claude').strip().lower()
+    if exposure_provider == 'claude':
+        names = ('EXPOSURE_LLM_API_KEY', 'CHECKER_LLM_API_KEY', 'CLAUDE_API_KEY', 'ANTHROPIC_API_KEY')
         if not any(os.environ.get(name, '').strip() for name in names):
-            raise ValueError('Configure CHECKER_LLM_API_KEY (Claude) before starting source-confidence analysis')
-    elif provider == 'gemini':
-        names = ('EXPOSURE_CONFIDENCE_GEMINI_API_KEY', 'GEMINI_API_KEY',
-                 'FINANCIALS_LLM_API_KEY', 'LLM_API_KEY')
-        if not any(os.environ.get(name, '').strip() for name in names):
-            raise ValueError('Configure GEMINI_API_KEY before testing source-confidence analysis')
+            raise ValueError('Configure EXPOSURE_LLM_API_KEY or CHECKER_LLM_API_KEY (Claude) before starting exposure analysis')
+    elif exposure_provider == 'gemini':
+        if not os.environ.get('FINANCIALS_LLM_API_KEY', '').strip():
+            raise ValueError('Configure FINANCIALS_LLM_API_KEY before starting Gemini exposure analysis')
     else:
-        raise ValueError('EXPOSURE_CONFIDENCE_PROVIDER must be claude or gemini')
+        raise ValueError('EXPOSURE_LLM_PROVIDER must be claude or gemini')
 
 
 def start(app, data):

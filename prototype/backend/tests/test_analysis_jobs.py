@@ -54,8 +54,8 @@ class AnalysisJobsTest(unittest.TestCase):
     def _configured_provider():
         # Gemini test mode intentionally uses the same key as extraction.
         return patch.dict(os.environ, {
+            'EXPOSURE_LLM_PROVIDER': 'gemini',
             'FINANCIALS_LLM_API_KEY': 'test-key',
-            'EXPOSURE_CONFIDENCE_PROVIDER': 'gemini',
             'GEMINI_API_KEY': 'test-key',
         }, clear=False)
 
@@ -151,11 +151,12 @@ class AnalysisJobsTest(unittest.TestCase):
 
     def test_start_rejects_missing_analysis_provider_configuration_before_queueing(self):
         with patch.dict(os.environ, {
+                'EXPOSURE_LLM_PROVIDER': 'claude', 'EXPOSURE_LLM_API_KEY': '',
                 'FINANCIALS_LLM_API_KEY': '', 'CHECKER_LLM_API_KEY': '',
                 'CLAUDE_API_KEY': '', 'ANTHROPIC_API_KEY': '',
                 'EXPOSURE_CONFIDENCE_PROVIDER': 'claude'}, clear=False), \
                 patch.object(analysis_jobs.source_jobs, 'ensure_worker') as ensure:
-            with self.assertRaisesRegex(ValueError, 'FINANCIALS_LLM_API_KEY'):
+            with self.assertRaisesRegex(ValueError, 'EXPOSURE_LLM_API_KEY'):
                 analysis_jobs.start(self.app, {'theme_id': 'theme', 'portfolio_id': 'portfolio'})
         ensure.assert_not_called()
 

@@ -67,6 +67,25 @@ class AppFlowTest(unittest.TestCase):
             self.assertNotIn('tools', body)
             self.assertEqual(request.get_header('Authorization'), 'Bearer gemini-test-key')
 
+    def test_exposure_analysis_uses_claude_sonnet_5(self):
+        output = json.dumps({'content': [{'type': 'text', 'text': '{"result":"ok"}'}],
+                             'usage': {'input_tokens': 10, 'output_tokens': 4}}).encode()
+        env = {'EXPOSURE_LLM_PROVIDER': 'claude', 'CHECKER_LLM_API_KEY': 'claude-test-key',
+               'CHECKER_LLM_ENDPOINT': 'https://api.anthropic.com/v1/messages',
+               'CHECKER_LLM_MODEL': 'claude-sonnet-5'}
+        with patch.dict(os.environ, env, clear=False), \
+                patch.object(self.app, 'urlopen', return_value=io.BytesIO(output)) as send:
+            result = self.app.llm('exposure calculation', {'company': 'Example'}, {'usage': []},
+                                  provider_kind='exposure')
+        self.assertEqual(result, {'result': 'ok'})
+        request = send.call_args.args[0]
+        body = json.loads(request.data)
+        self.assertEqual(body['model'], 'claude-sonnet-5')
+        self.assertEqual(body['messages'][0]['role'], 'user')
+        self.assertNotIn('response_format', body)
+        self.assertEqual(request.get_header('X-api-key'), 'claude-test-key')
+        self.assertEqual(request.get_header('Anthropic-version'), '2023-06-01')
+
     def test_source_search_prefers_redis_link_cache(self):
         source = self.app.all_records('sources')[0]
         company_id = source['company_id']
@@ -521,7 +540,10 @@ class AppFlowTest(unittest.TestCase):
     def test_failed_model_does_not_create_zero_case(self):
         evidence = self.app.all_records('sources')[0]['evidence'][0]['evidence_id']
         before = len(self.app.all_records('cases'))
-        with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': '', 'LLM_MODEL': ''}):
+        with patch.dict(os.environ, {'EXPOSURE_LLM_PROVIDER': 'claude', 'EXPOSURE_LLM_API_KEY': '',
+                                     'CHECKER_LLM_API_KEY': '', 'CLAUDE_API_KEY': '',
+                                     'ANTHROPIC_API_KEY': '', 'FINANCIALS_LLM_API_KEY': '',
+                                     'LLM_MODEL': ''}, clear=False):
             with self.assertRaises(ValueError):
                 self.app.analyze({'theme_id': self.theme['id'],
                                   'company_id': 'DEMO_A', 'evidence_ids': [evidence]})
@@ -776,7 +798,7 @@ class AppFlowTest(unittest.TestCase):
             self.assertEqual(url, source['url'])
             return text
 
-        def llm(task, payload, run):
+        def llm(task, payload, run, **kwargs):
             if 'total_revenue' not in payload.get('facts', {}):
                 evidence_id = next(passage['evidence_id'] for passage in payload['passages']
                                    if passage['source_id'] == 'linked_report')

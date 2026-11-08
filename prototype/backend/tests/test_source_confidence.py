@@ -134,7 +134,7 @@ class SourceConfidenceTest(unittest.TestCase):
             'light': 'green', 'basis': 'Three approved filings agree.',
             'agreeing_source_ids': ['filing', 'reuters', 'yahoo'],
             'divergent_source_ids': []})}}]}
-        with patch.dict(os.environ, {'EXPOSURE_CONFIDENCE_PROVIDER': 'gemini',
+        with patch.dict(os.environ, {'EXPOSURE_LLM_PROVIDER': 'gemini',
                                      'GEMINI_API_KEY': 'gemini-test-key',
                                      'EXPOSURE_CONFIDENCE_GEMINI_MODEL': 'gemini-test'}, clear=False), \
                 patch.object(source_confidence.gemini_fallback, 'request_json',
@@ -145,7 +145,7 @@ class SourceConfidenceTest(unittest.TestCase):
         self.assertEqual(json.loads(request.call_args.args[0].data)['model'], 'gemini-test')
 
     def test_invalid_provider_is_rejected(self):
-        with patch.dict(os.environ, {'EXPOSURE_CONFIDENCE_PROVIDER': 'unknown'}, clear=False):
+        with patch.dict(os.environ, {'EXPOSURE_LLM_PROVIDER': 'unknown'}, clear=False):
             with self.assertRaisesRegex(ValueError, 'must be claude or gemini'):
                 source_confidence.evaluate(self.sources, self.company, self.facts, self.passages)
 

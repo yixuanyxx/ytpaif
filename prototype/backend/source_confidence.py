@@ -258,12 +258,12 @@ def gemini_assess(payload):
 
 
 def assess(payload):
-    """Use Gemini only when the explicit test-only provider switch is enabled."""
-    provider = os.environ.get('EXPOSURE_CONFIDENCE_PROVIDER', 'claude').strip().lower()
+    """Use the same provider as the exposure extraction/classification pipeline."""
+    provider = os.environ.get('EXPOSURE_LLM_PROVIDER', 'claude').strip().lower()
     if provider == 'gemini':
         return gemini_assess(payload)
     if provider != 'claude':
-        raise ValueError('EXPOSURE_CONFIDENCE_PROVIDER must be claude or gemini')
+        raise ValueError('EXPOSURE_LLM_PROVIDER must be claude or gemini')
     return claude_assess(payload)
 
 
