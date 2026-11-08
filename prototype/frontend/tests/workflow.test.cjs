@@ -1221,6 +1221,21 @@ test('Cancelling a singleton stock run stops its spinner immediately',async()=>{
   assert.match(node('#page-actions').innerHTML,/Analysis cancelled/);
   assert.doesNotMatch(node('#notice-area').innerHTML,/remaining batch is still running/);
 });
+test('A cancelled rerun keeps the previous result and shows the cancellation status',async()=>{
+  const {run,node}=setup();
+  run(`state.companies=[{id:'a',name:'TSMC'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:3}];
+    state.cases=[{id:'previous',theme_id:'theme-a',company_id:'a',review_status:'needs_review',
+      source_confidence_light:'green',estimate:{point:.4}}];
+    state.search_runs=[{id:'rerun-cancelled',job_type:'analysis',status:'cancelled',phase:'finished',
+      theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],companies_completed:[],cancelled_company_ids:['a']}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  assert.match(html,/TSMC[\s\S]*Analysis cancelled[\s\S]*40\.0%[\s\S]*dot-green[\s\S]*Retry →/);
+});
 test('Analysis cancellation errors restore the clicked control',async()=>{
   const {run,node,context}=setup();
   node('#alert-modal').showModal=()=>{};
@@ -1285,9 +1300,40 @@ test('Per-stock rerun uses the latest case result in the queue',async()=>{
     ]; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
+  assert.match(html,/1 companies · 1 cases · 1 awaiting review/);
   assert.match(html,/90\.0%[\s\S]*dot-green[\s\S]*AI confidence: Green[\s\S]*Re-run →/);
   assert.doesNotMatch(html,/20\.0%/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%/);
+});
+test('Calculate Exposure queue filter survives polling rerenders',async()=>{
+  const {run,node}=setup();
+  run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'}]}];
+    state.source_summaries=[{company_id:'a',count:3},{company_id:'b',count:3}];
+    state.cases=[{id:'pending',theme_id:'theme-a',company_id:'a',created_at:'2026-01-02T00:00:00Z',
+      review_status:'needs_review',source_confidence_light:'green',estimate:{point:.4}}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  run("window.filterAnalysisQueue('pending')");
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  assert.equal(run('analysisQueueFilter'),'pending');
+  assert.match(html,/filter-tab active" data-analysis-filter="pending"/);
+  assert.doesNotMatch(html,/filter-tab active" data-analysis-filter="all"/);
+});
+test('Calculate Exposure confidence uses source provenance, not classification confidence',async()=>{
+  const {run,node}=setup();
+  run(`state.companies=[{id:'a',name:'Legacy result'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:3}];
+    state.cases=[{id:'legacy',theme_id:'theme-a',company_id:'a',review_status:'needs_review',
+      classification_confidence:'high',estimate:{point:.4}}];
+    selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  assert.match(html,/AI confidence is not available/);
+  assert.doesNotMatch(html,/dot-green|AI confidence: Green/);
 });
 test('Calculate Exposure shows a point percentage and colour-only AI confidence dots',async()=>{
   const {run,node} = setup();

@@ -12,6 +12,7 @@ let selectedDashboardThemeId = '';
 let selectedDashboardPortfolioId = '';
 let dashboardDemoEnabled = false;
 let analysisDemoEnabled = false;
+let analysisQueueFilter = 'all';
 let analysisDemoCases = [];
 let analysisDemoCompanies = [];
 let selectedSourcePortfolioId = '';
@@ -504,8 +505,9 @@ function sourceConfidenceDot(light, basis) {
 function confidencePill(caseRecord) {
   if (!caseRecord) return '<span title="AI confidence is not available">—</span>';
   const aliases = {green:'green', high:'green', yellow:'amber', amber:'amber', medium:'amber', red:'red', low:'red'};
-  const color = aliases[String(caseRecord.source_confidence_light
-    || caseRecord.classification_confidence || '').toLowerCase()];
+  // The Step 4 light represents source agreement/provenance only. Do not
+  // substitute classification confidence, which measures a different thing.
+  const color = aliases[String(caseRecord.source_confidence_light || '').toLowerCase()];
   if (!color) return '<span title="AI confidence is not available">—</span>';
   const label = color === 'green' ? 'Green' : color === 'amber' ? 'Amber' : 'Red';
   const title = caseRecord.source_confidence_basis || `${label} AI confidence`;
@@ -3671,8 +3673,6 @@ async function viewAnalysis() {
   const counts = new Map(demoMode ? demo.cases.map(c => [c.company_id,c.source_count]) : (state.source_summaries || []).map(summary => [summary.company_id, summary.count]));
   const sources = demoMode ? [] : (state.sources || []);
   const cases = demoMode ? demo.cases : (state.cases || []).filter(c => companyIds.has(c.company_id) && c.theme_id === theme?.id);
-  const approved  = cases.filter(c => c.review_status === 'approved');
-  const pending   = cases.filter(c => c.review_status === 'needs_review');
   const latestCasesByCompany = new Map();
   for (const caseRecord of cases) {
     const previous = latestCasesByCompany.get(caseRecord.company_id);
@@ -3680,6 +3680,9 @@ async function viewAnalysis() {
       latestCasesByCompany.set(caseRecord.company_id, caseRecord);
     }
   }
+  const latestCases = [...latestCasesByCompany.values()];
+  const approved = latestCases.filter(c => c.review_status === 'approved');
+  const pending = latestCases.filter(c => c.review_status === 'needs_review');
   const scopedAnalysisRun = demoMode ? null : latestAnalysisRunForScope(theme?.id, portfolio?.id);
   const analysisInProgress = isActiveAnalysisRun(scopedAnalysisRun);
 
@@ -3698,7 +3701,9 @@ async function viewAnalysis() {
     const rawAnalysisState = analysisCompanyProgress(latestCompanyRun, c.id);
     // Once a successful case has reached the workspace, its review state is
     // the useful per-company status. Keep terminal failures visible instead.
-    const analysisState = caseRec && !rawAnalysisState?.error ? null : rawAnalysisState;
+    const terminalStateStillRelevant = rawAnalysisState?.error
+      || ['Analysis cancelled', 'Analysis incomplete'].includes(rawAnalysisState?.label);
+    const analysisState = caseRec && !terminalStateStillRelevant ? null : rawAnalysisState;
     const retryable = ['Analysis failed', 'Analysis incomplete', 'Analysis cancelled'].includes(rawAnalysisState?.label)
       && !rawAnalysisState?.active;
     const calculationOutdated = Boolean(caseRec?.estimate?.calculation_version
@@ -3781,13 +3786,13 @@ async function viewAnalysis() {
           <div>
             <div class="panel-title">Company-level Exposure</div>
             <div class="panel-subtitle">
-              ${companies.length} companies · ${cases.length} cases · ${pending.length} awaiting review
+              ${companies.length} companies · ${latestCases.length} cases · ${pending.length} awaiting review
             </div>
           </div>
           <div style="display:flex;gap:4px">
-            <button class="btn btn-sm btn-ghost filter-tab active" onclick="filterAnalysisQueue('all', this)">All (${companies.length})</button>
-            <button class="btn btn-sm btn-ghost filter-tab" onclick="filterAnalysisQueue('pending', this)">Pending (${pending.length})</button>
-            <button class="btn btn-sm btn-ghost filter-tab" onclick="filterAnalysisQueue('ready', this)">Ready (${readyCount})</button>
+            <button class="btn btn-sm btn-ghost filter-tab ${analysisQueueFilter === 'all' ? 'active' : ''}" data-analysis-filter="all" onclick="filterAnalysisQueue('all')">All (${companies.length})</button>
+            <button class="btn btn-sm btn-ghost filter-tab ${analysisQueueFilter === 'pending' ? 'active' : ''}" data-analysis-filter="pending" onclick="filterAnalysisQueue('pending')">Pending (${pending.length})</button>
+            <button class="btn btn-sm btn-ghost filter-tab ${analysisQueueFilter === 'ready' ? 'active' : ''}" data-analysis-filter="ready" onclick="filterAnalysisQueue('ready')">Ready (${readyCount})</button>
           </div>
         </div>
 
@@ -3887,16 +3892,19 @@ async function viewAnalysis() {
 
   $('#analysis-demo-toggle')?.addEventListener('change', event => {
     analysisDemoEnabled = event.target.checked;
+    analysisQueueFilter = 'all';
     viewAnalysis();
   });
 
   $('#analysis-theme-select')?.addEventListener('change', event => {
     selectedDashboardThemeId = event.target.value;
+    analysisQueueFilter = 'all';
     saveDashboardSelection();
     viewAnalysis();
   });
   $('#analysis-portfolio-select')?.addEventListener('change', event => {
     selectedDashboardPortfolioId = event.target.value;
+    analysisQueueFilter = 'all';
     selectedSourcePortfolioId = event.target.value;
     saveDashboardSelection();
     saveSourcePortfolioSelection();
@@ -3904,16 +3912,18 @@ async function viewAnalysis() {
   });
 
   // Filter helper for queue tabs
-  window.filterAnalysisQueue = function(type, btn) {
-    $$('.filter-tab').forEach(b => b.classList.remove('active'));
-    if (btn) btn.classList.add('active');
+  window.filterAnalysisQueue = function(type) {
+    analysisQueueFilter = ['all', 'pending', 'ready'].includes(type) ? type : 'all';
+    $$('.filter-tab').forEach(button => {
+      button.classList.toggle('active', button.dataset.analysisFilter === analysisQueueFilter);
+    });
     $$('.queue-row').forEach(row => {
-      if (type === 'all') row.style.display = '';
-      else if (type === 'pending') row.style.display = row.classList.contains('pending-row') ? '' : 'none';
-      else if (type === 'approved') row.style.display = row.classList.contains('approved-row') ? '' : 'none';
-      else if (type === 'ready') row.style.display = row.classList.contains('ready-row') ? '' : 'none';
+      if (analysisQueueFilter === 'all') row.style.display = '';
+      else if (analysisQueueFilter === 'pending') row.style.display = row.classList.contains('pending-row') ? '' : 'none';
+      else if (analysisQueueFilter === 'ready') row.style.display = row.classList.contains('ready-row') ? '' : 'none';
     });
   };
+  window.filterAnalysisQueue(analysisQueueFilter);
 
   const btnAll = $('#btn-analyze-all');
   if (btnAll) {
