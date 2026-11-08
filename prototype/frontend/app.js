@@ -444,6 +444,7 @@ const pct = (v, signed = false, dec = 1) =>
   `${signed && v > 0 ? '+' : ''}${(v * 100).toFixed(dec)}%`;
 const pctRange = e => `${pct(e.lower)} – ${pct(e.upper)}`;
 function caseExposureValue(caseRecord) {
+  if (!caseRecord) return {value: null, basis: 'not_calculated'};
   const numeric = value => {
     if (value === null || value === undefined || value === '') return null;
     const parsed = Number(value);
@@ -464,9 +465,9 @@ function caseExposureValue(caseRecord) {
   if (savedPercent !== null) {
     return {value: Math.max(0, Math.min(100, savedPercent)) / 100, basis: 'legacy_point'};
   }
-  // This is display policy only. It never writes an audited zero into the
-  // case, dashboard, or exports; Retry remains available for failed searches.
-  return {value: 0, basis: 'fallback_zero'};
+  // Do not present a failed/cancelled calculation as an actual 0% result.
+  // A real zero is retained above when the saved point or lower evidence is 0.
+  return {value: null, basis: 'not_calculated'};
 }
 
 function needsExposureWebFallback(caseRecord, nowMs = Date.now()) {
@@ -3835,10 +3836,10 @@ async function viewAnalysis() {
                     : exposure.basis === 'point' || exposure.basis === 'legacy_point'
                       ? 'Calculated exposure point estimate.'
                       : companyAnalysisInProgress
-                        ? '0% temporary display while exposure analysis is running.'
+                        ? 'Exposure is being calculated.'
                         : caseRec || terminalAnalysis
-                          ? `0% display fallback: no verified numeric theme-revenue exposure is available${fallbackWasSearched ? ' after targeted web search' : ' after analysis'}. Retry remains available.`
-                          : '0% display fallback until exposure analysis is completed.';
+                          ? `No calculated exposure is available${fallbackWasSearched ? ' after targeted web search' : ' because the analysis did not complete'}. Retry remains available.`
+                          : 'Exposure has not been calculated yet.';
                   const confidence = confidencePill(caseRec);
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
                   const readyClass = readyForBulk && rowClass !== 'ready-row' ? ' ready-row' : '';

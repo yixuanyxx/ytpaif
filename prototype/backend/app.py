@@ -1047,21 +1047,44 @@ def analyze(d):
                 _validate_extracted_revenue(corrected_facts, theme['nodes'], selected)
                 facts = corrected_facts
             except ValueError as correction_error:
-                # Do not discard a supported denominator just because the repair
-                # response is malformed.  An empty set of revenue units yields a
-                # conservative 0% point (never the theoretical upper bound),
-                # preserves the audit trail, and makes this case eligible for the
-                # approved-source follow-up search below.
-                facts = {
-                    **rejected_facts,
-                    'units': [],
-                    'unresolved_questions': list(dict.fromkeys([
-                        *(rejected_facts.get('unresolved_questions') or []),
-                        'Revenue-unit extraction could not be reconciled from the supplied documents: '
-                        + str(correction_error),
-                    ])),
-                }
-                _validate_extracted_revenue(facts, theme['nodes'], selected)
+                # A repair occasionally returns a partial JSON envelope (for
+                # example, no ``units``).  Give the model one fresh extraction
+                # pass before concluding that no supported revenue unit exists.
+                # This is intentionally a new extraction rather than treating a
+                # range or a malformed reply as 100% exposure.
+                retried_facts = llm(
+                    'Re-extract the revenue facts from the supplied passages. The prior extraction repair was unusable. '
+                    'Return the COMPLETE facts object only: total_revenue, denominator_evidence_ids, period, currency, scale, units and unresolved_questions. '
+                    'Every unit must include unit_id, activity, revenue, period, currency, scale, external, evidence_ids and overlap_group. '
+                    'Use only supported consolidated external revenue and non-overlapping customer-revenue units. '
+                    'If a qualifying revenue share cannot be established, retain the unit as unresolved instead of inventing a share.',
+                    {'prior_validation_error': str(correction_error), 'company': company,
+                     'taxonomy': engine.nest_taxonomy(theme['nodes']),
+                     'reporting_period': theme.get('reporting_period'), 'passages': passages},
+                    run_rec, provider_kind='exposure')
+                put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
+                                       'stage': 'extraction_retry', 'output': retried_facts})
+                try:
+                    if not isinstance(retried_facts, dict) or not isinstance(retried_facts.get('units'), list):
+                        raise ValueError('Fresh extraction did not return revenue units')
+                    _validate_extracted_revenue(retried_facts, theme['nodes'], selected)
+                    facts = retried_facts
+                except ValueError as retry_error:
+                    # Do not discard a supported denominator just because all
+                    # extraction responses are malformed. An empty set of units
+                    # yields a conservative 0% point (never an uncertainty
+                    # ceiling) and makes this case eligible for approved-source
+                    # follow-up search below.
+                    facts = {
+                        **rejected_facts,
+                        'units': [],
+                        'unresolved_questions': list(dict.fromkeys([
+                            *(rejected_facts.get('unresolved_questions') or []),
+                            'Revenue-unit extraction could not be reconciled from the supplied documents: '
+                            + str(retry_error),
+                        ])),
+                    }
+                    _validate_extracted_revenue(facts, theme['nodes'], selected)
         run_rec['status'] = 'classifying'
         put('runs', run_rec)
         # A searchable node is any leaf, including a leaf that sits above the

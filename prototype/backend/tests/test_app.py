@@ -892,7 +892,7 @@ class AppFlowTest(unittest.TestCase):
         self.assertAlmostEqual(result['estimate']['point'], .5)
         self.assertTrue(any(row['stage'] == 'classification_repair' for row in self.app.all_records('model_outputs')))
 
-    def test_malformed_extraction_repair_saves_conservative_result(self):
+    def test_malformed_extraction_repair_retries_fresh_extraction(self):
         source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
         evidence = source['evidence'][0]['evidence_id']
         rejected = {'total_revenue': 100, 'denominator_evidence_ids': [evidence], 'period': 'FY2025',
@@ -901,17 +901,25 @@ class AppFlowTest(unittest.TestCase):
              'currency': 'USD', 'scale': 'millions', 'external': True, 'evidence_ids': [evidence],
              'overlap_group': None}]}
         malformed_repair = {'total_revenue': 100, 'period': 'FY2025'}
-        empty_classification = {
-            'classifications': [], 'confidence_band': 'medium', 'confidence_percent': None,
-            'confidence_basis': 'No qualifying revenue units could be supported from the supplied evidence.'}
-        with patch.object(self.app, 'llm', side_effect=[rejected, malformed_repair, empty_classification]):
+        retried = {'total_revenue': 100, 'denominator_evidence_ids': [evidence], 'period': 'FY2025',
+                   'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': [
+            {'unit_id': 'supported', 'activity': 'Supported AI hardware', 'revenue': 50, 'period': 'FY2025',
+             'currency': 'USD', 'scale': 'millions', 'external': True, 'evidence_ids': [evidence],
+             'overlap_group': None}]}
+        classification = {'classifications': [
+            {'unit_id': 'supported', 'node_ids': ['compute_fab'], 'relationship_type': 'direct',
+             'rationale': 'Supported hardware', 'scope_check': 'Within the approved theme',
+             'evidence_ids': [evidence], 'unresolved_questions': [], 'whole_unit_supported': True,
+             'revenue_attribution_quote': source['evidence'][0]['passage']}],
+            'confidence_band': 'medium', 'confidence_percent': None,
+            'confidence_basis': 'One cited document supports the revenue unit.'}
+        with patch.object(self.app, 'llm', side_effect=[rejected, malformed_repair, retried, classification]) as model:
             result = self.app.analyze({'theme_id': self.theme['id'], 'company_id': 'DEMO_A',
                                        'evidence_ids': [evidence]})
-        self.assertEqual(result['estimate']['point'], 0)
-        self.assertEqual(result['estimate']['point_basis'], 'conservative_evidence')
-        self.assertEqual(result['estimate']['calculation_status'], 'undetermined')
-        self.assertTrue(any('could not be reconciled' in q
-                            for q in result['case']['unresolved_questions']))
+        self.assertEqual(model.call_count, 4)
+        self.assertAlmostEqual(result['estimate']['point'], .5)
+        self.assertEqual(result['estimate']['calculation_status'], 'partial')
+        self.assertTrue(any(row['stage'] == 'extraction_retry' for row in self.app.all_records('model_outputs')))
 
     def test_extraction_validation_rejects_internal_sales_before_classification(self):
         source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')

@@ -1387,13 +1387,13 @@ test('Calculate Exposure uses the evidence floor when no point estimate exists',
   assert.match(row('Exact zero'),/0\.0%/);
   assert.doesNotMatch(row('Exact zero'),/80\.0%/);
   assert.match(row('Legacy point'),/50\.0%/);
-  assert.match(row('Missing estimate'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
-  assert.match(row('Missing estimate'),/0% display fallback: no verified numeric theme-revenue exposure is available after analysis/);
+  assert.match(row('Missing estimate'),/data-exposure-basis="not_calculated"[\s\S]*—/);
+  assert.match(row('Missing estimate'),/No calculated exposure is available because the analysis did not complete/);
   assert.match(row('Missing estimate'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,upper:.5666},exposure_percent:null}))")),
-    {value:0,basis:'fallback_zero'});
+    {value:null,basis:'not_calculated'});
 });
-test('Calculate Exposure shows bounded fallback zeroes without turning them into audited cases',async()=>{
+test('Calculate Exposure does not show failed or pending analyses as zero exposure',async()=>{
   const {run,node}=setup();
   run(`state.companies=[
       {id:'failed',name:'Failed search'}, {id:'active',name:'Active search'},
@@ -1415,22 +1415,22 @@ test('Calculate Exposure shows bounded fallback zeroes without turning them into
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
   const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
-  assert.match(row('Failed search'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
+  assert.match(row('Failed search'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Failed search'),/after targeted web search/);
   assert.match(row('Failed search'),/AI confidence is not available">—<\/span>/);
   assert.match(row('Failed search'),/Retry →/);
-  assert.match(row('Active search'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
-  assert.match(row('Active search'),/0% temporary display while exposure analysis is running/);
+  assert.match(row('Active search'),/data-exposure-basis="not_calculated"[\s\S]*—/);
+  assert.match(row('Active search'),/Exposure is being calculated/);
   assert.match(row('Active search'),/AI confidence is not available">—<\/span>/);
-  assert.match(row('Not analysed'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
-  assert.match(row('Not analysed'),/0% display fallback until exposure analysis is completed/);
+  assert.match(row('Not analysed'),/data-exposure-basis="not_calculated"[\s\S]*—/);
+  assert.match(row('Not analysed'),/Exposure has not been calculated yet/);
   assert.match(row('Not analysed'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue(null))')),
-    {value:0,basis:'fallback_zero'});
+    {value:null,basis:'not_calculated'});
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:3,upper:4}}))')),
     {value:1,basis:'point'});
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:null,upper:-.5}}))')),
-    {value:0,basis:'fallback_zero'});
+    {value:null,basis:'not_calculated'});
   assert.equal(run('state.cases.length'),0);
 });
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
