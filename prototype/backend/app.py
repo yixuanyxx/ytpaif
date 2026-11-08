@@ -1028,7 +1028,8 @@ def analyze(d):
         try:
             _validate_extracted_revenue(facts, theme['nodes'], selected)
         except ValueError as extraction_error:
-            facts = llm(
+            rejected_facts = facts
+            corrected_facts = llm(
                 'Correct the rejected extracted revenue facts using only the supplied source passages. '
                 'Return the complete facts object with total_revenue, denominator_evidence_ids, period, currency, scale, units and unresolved_questions. '
                 'Each unit requires unit_id, activity, revenue, period, currency, scale, external, evidence_ids and overlap_group. '
@@ -1036,13 +1037,31 @@ def analyze(d):
                 'A disaggregation of consolidated net customer revenue is external revenue; remove intersegment sales. '
                 'Use the same reporting period, currency and scale as the supported denominator. Do not invent amounts, shares, units or source evidence. '
                 'Only correct external flags when the cited consolidated-revenue evidence supports this. Leave unsupported facts unresolved.',
-                {'validation_error': str(extraction_error), 'rejected_facts': facts,
+                {'validation_error': str(extraction_error), 'rejected_facts': rejected_facts,
                  'company': company, 'passages': passages}, run_rec, provider_kind='exposure')
-            if not isinstance(facts.get('units'), list):
-                raise ValueError('Corrected extraction requires revenue units')
             put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
-                                   'stage': 'extraction_repair', 'output': facts})
-            _validate_extracted_revenue(facts, theme['nodes'], selected)
+                                   'stage': 'extraction_repair', 'output': corrected_facts})
+            try:
+                if not isinstance(corrected_facts, dict) or not isinstance(corrected_facts.get('units'), list):
+                    raise ValueError('Corrected extraction did not return revenue units')
+                _validate_extracted_revenue(corrected_facts, theme['nodes'], selected)
+                facts = corrected_facts
+            except ValueError as correction_error:
+                # Do not discard a supported denominator just because the repair
+                # response is malformed.  An empty set of revenue units yields a
+                # conservative 0% point (never the theoretical upper bound),
+                # preserves the audit trail, and makes this case eligible for the
+                # approved-source follow-up search below.
+                facts = {
+                    **rejected_facts,
+                    'units': [],
+                    'unresolved_questions': list(dict.fromkeys([
+                        *(rejected_facts.get('unresolved_questions') or []),
+                        'Revenue-unit extraction could not be reconciled from the supplied documents: '
+                        + str(correction_error),
+                    ])),
+                }
+                _validate_extracted_revenue(facts, theme['nodes'], selected)
         run_rec['status'] = 'classifying'
         put('runs', run_rec)
         # A searchable node is any leaf, including a leaf that sits above the
