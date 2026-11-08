@@ -26,6 +26,7 @@ let analysisPollTimer = null;
 let analysisPollErrorShown = false;
 const trackedAnalysisRuns = new Set();
 const cancellingAnalysisRuns = new Set();
+const cancellingCompanyAnalyses = new Set();
 const loadedSourceCompanyIds = new Set();
 function isAnalysisRun(run) {
   return run?.job_type === 'analysis';
@@ -297,6 +298,9 @@ function analysisRunProgressText(run) {
 }
 function analysisCompanyProgress(run, companyId) {
   if (!analysisRunIncludesCompany(run, companyId)) return null;
+  if ((run.cancelled_company_ids || []).includes(companyId)) {
+    return {label:'Analysis cancelled', color:'red', active:false};
+  }
   const outcome = analysisOutcomeForCompany(run, companyId);
   const error = outcome?.error || (['failed', 'error'].includes(String(outcome?.status || '').toLowerCase()) ? outcome?.reason : '');
   if (error) return {label: 'Analysis failed', color: 'red', error: String(error), active: false};
@@ -3797,7 +3801,7 @@ async function viewAnalysis() {
               </thead>
               <tbody id="analysis-queue-rows">
                 ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState,
-                  readyForBulk, companyAnalysisInProgress, companyAnalysisRun }) => {
+                  readyForBulk, retryable, companyAnalysisInProgress, companyAnalysisRun }) => {
                   // Prefer a calculated point. When evidence supports only a
                   // range, show its upper bound as the requested single
                   // exposure value. Legacy cases may only have a saved percent.
@@ -3843,15 +3847,16 @@ async function viewAnalysis() {
                         ${demoMode && caseRec ? `<button class="btn btn-sm btn-secondary" style="min-width:104px" onclick="openCase('${esc(caseRec.id)}')">Review →</button>` : companyAnalysisInProgress ? `
                             <button class="btn btn-sm btn-danger"
                               data-analysis-run-id="${esc(companyAnalysisRun.id)}"
-                              onclick="cancelAnalysisRun('${esc(companyAnalysisRun.id)}', this)"
-                              title="${(companyAnalysisRun.company_ids || []).length > 1 ? `Stops the entire ${(companyAnalysisRun.company_ids || []).length}-company analysis` : 'Stops this company analysis'}"
-                              aria-label="${(companyAnalysisRun.company_ids || []).length > 1 ? `Cancel the entire ${(companyAnalysisRun.company_ids || []).length}-company analysis` : `Cancel analysis for ${esc(c.name)}`}">
-                              ${(companyAnalysisRun.company_ids || []).length > 1 ? 'Cancel batch' : 'Cancel'}
+                              data-analysis-company-id="${esc(c.id)}"
+                              onclick="cancelCompanyAnalysis('${esc(companyAnalysisRun.id)}', '${esc(c.id)}', this)"
+                              title="Stops only this company's exposure calculation"
+                              aria-label="Cancel analysis for ${esc(c.name)}">
+                              Cancel
                             </button>
                           ` : `
                             <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}" style="min-width:104px"
                               onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme ? 'disabled' : ''}>
-                              ${analysisState?.error ? 'Retry →' : (caseRec ? 'Re-run →' : 'Analyse →')}
+                              ${retryable ? 'Retry →' : (caseRec ? 'Re-run →' : 'Analyse →')}
                             </button>
                             ${!hasSrc ? `<button class="btn btn-sm btn-secondary" style="min-width:104px" onclick="openManualUploadForCompany('${esc(c.id)}')">Upload →</button>` : ''}
                           `}
@@ -3983,6 +3988,37 @@ window.cancelAnalysisRun = async function(runId, button) {
     showAlert(`Could not cancel exposure analysis: ${error.message}`, 'Analysis cancellation failed', { searchCompletion: true });
   } finally {
     cancellingAnalysisRuns.delete(runId);
+  }
+};
+
+window.cancelCompanyAnalysis = async function(runId, companyId, button) {
+  const key = `${runId}:${companyId}`;
+  if (cancellingCompanyAnalyses.has(key)) return;
+  const analysisRun = (state.search_runs || []).find(run => run.id === runId && isAnalysisRun(run));
+  if (!analysisRun?.id || !isActiveAnalysisRun(analysisRun)) {
+    if (currentView === 'analysis') await viewAnalysis();
+    return notice('This company analysis is no longer running.', 'info');
+  }
+  const original = {disabled:button?.disabled, textContent:button?.textContent};
+  if (button) { button.disabled = true; button.textContent = 'Cancelling…'; }
+  cancellingCompanyAnalyses.add(key);
+  clearNotice();
+  try {
+    const response = await api('analysis/cancel', {id:runId, company_id:companyId});
+    const updatedRun = response?.analysis_run;
+    if (!updatedRun?.id || response?.cancelled_company_id !== companyId) {
+      throw new Error('The company analysis could not be cancelled.');
+    }
+    mergeAnalysisRun(updatedRun);
+    try { await refresh(); } catch {}
+    mergeAnalysisRun(updatedRun);
+    if (currentView === 'analysis') await viewAnalysis();
+    notice('This company exposure calculation was cancelled. The remaining batch is still running.', 'warning');
+  } catch (error) {
+    if (button) { button.disabled = original.disabled; button.textContent = original.textContent; }
+    showAlert(`Could not cancel this company analysis: ${error.message}`, 'Company cancellation failed', {searchCompletion:true});
+  } finally {
+    cancellingCompanyAnalyses.delete(key);
   }
 };
 

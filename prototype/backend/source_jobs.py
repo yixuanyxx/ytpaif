@@ -140,6 +140,27 @@ class Queue:
                 self.queue_notifications(db, run)
             return run
 
+    def cancel_company(self, job_id, company_id):
+        """Mark one company cancelled without terminating its shared batch job."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                raise ValueError('Analysis run not found')
+            run = json.loads(row[0])
+            if company_id not in run.get('company_ids', []):
+                raise ValueError('Company is not part of this analysis run')
+            if run.get('status') in ('completed', 'incomplete', 'failed', 'cancelled'):
+                return run
+            if company_id in run.get('companies_completed', []):
+                return run
+            run['cancelled_company_ids'] = list(dict.fromkeys([
+                *run.get('cancelled_company_ids', []), company_id,
+            ]))
+            db.execute("UPDATE jobs SET payload=? WHERE id=? AND state IN ('queued','running')",
+                       (json.dumps(run), job_id))
+            return run
+
     def merge(self, remote):
         rows = {record['id']: record for record in remote}
         rows.update({r['id']: r for r in self.records()})
@@ -303,6 +324,10 @@ def execute(job_id):
                     current, _ = queue.job(job_id)
                     if current.get('status') == 'cancelled' and record.get('status') != 'cancelled':
                         return current
+                    record['cancelled_company_ids'] = list(dict.fromkeys([
+                        *record.get('cancelled_company_ids', []),
+                        *current.get('cancelled_company_ids', []),
+                    ]))
                     queue.save(record)  # Durable before the remote mirror is attempted.
                     if record['status'] == 'running' and time.monotonic() - self.last_mirror < 10:
                         return record
@@ -319,6 +344,10 @@ def execute(job_id):
             def is_cancelled(self, run_id):
                 current, _ = queue.job(run_id)
                 return current.get('status') == 'cancelled'
+
+            def is_company_cancelled(self, run_id, company_id):
+                current, _ = queue.job(run_id)
+                return company_id in current.get('cancelled_company_ids', [])
 
             def put_many(self, kind, records):
                 import app

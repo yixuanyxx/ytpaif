@@ -313,6 +313,30 @@ class AnalysisJobsTest(unittest.TestCase):
         self.assertEqual(self.store.get('search_runs', run['id'])['status'], 'cancelled')
         self.assertIsNone(self.queue.next_job())
 
+    def test_row_cancel_marks_only_one_company_and_keeps_batch_running(self):
+        run = self._run()
+        self.queue.enqueue(run, [{'id': 'a'}, {'id': 'b'}])
+        with patch.object(analysis_jobs.source_jobs, 'Queue', return_value=self.queue):
+            response = analysis_jobs.cancel(self.app, {'id': run['id'], 'company_id': 'a'})
+        saved, _ = self.queue.job(run['id'])
+        self.assertEqual(response['cancelled_company_id'], 'a')
+        self.assertEqual(saved['status'], 'running')
+        self.assertEqual(saved['cancelled_company_ids'], ['a'])
+        self.assertNotIn('b', saved['cancelled_company_ids'])
+        self.assertIsNotNone(self.queue.next_job())
+
+    def test_worker_skips_cancelled_company_and_continues_remaining_batch(self):
+        run = self._run()
+        self.app.is_cancelled = Mock(return_value=False)
+        self.app.is_company_cancelled = Mock(side_effect=lambda _run_id, company_id: company_id == 'a')
+        self.app.analyze_all = Mock(return_value=self._success('b'))
+        analysis_jobs.worker(self.app, run, [{'id': 'a', 'name': 'Company A'},
+                                             {'id': 'b', 'name': 'Company B'}])
+        self.app.analyze_all.assert_called_once()
+        self.assertEqual(run['outcomes']['a']['status'], 'cancelled')
+        self.assertEqual(run['outcomes']['b']['status'], 'success')
+        self.assertEqual(run['status'], 'completed')
+
     def test_cancel_cannot_target_another_durable_job_type(self):
         financial = {
             'id': 'financial-running', 'job_type': 'financials',

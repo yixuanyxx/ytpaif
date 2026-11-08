@@ -170,6 +170,15 @@ def cancel(app, data):
         raise ValueError('Analysis run not found') from None
     if run.get('job_type') != 'analysis':
         raise ValueError('Analysis run not found')
+    company_id = str(data.get('company_id') or '').strip()
+    if company_id:
+        run = queue.cancel_company(run_id, company_id)
+        try:
+            app.put('search_runs', run)
+        except Exception:
+            pass
+        return {'analysis_run': run, 'cancelled_company_id': (
+            company_id if company_id in run.get('cancelled_company_ids', []) else None)}
     run = queue.cancel(run_id, 'Analysis cancelled by user.')
     # Keep the shared state mirror useful across deployments, while treating
     # the local queue transition above as authoritative. Cancellation must
@@ -246,6 +255,10 @@ def worker(app, run, companies):
         checker = getattr(app, 'is_cancelled', None)
         return bool(checker and checker(run['id']))
 
+    def company_cancelled(company_id):
+        checker = getattr(app, 'is_company_cancelled', None)
+        return bool(checker and checker(run['id'], company_id))
+
     def checkpoint():
         run['companies_completed'] = list(run['outcomes'])
         run['analysed_count'] = len(run['outcomes'])
@@ -268,6 +281,19 @@ def worker(app, run, companies):
             run.pop('inflight_company_id', None)
             run.pop('inflight_started_at', None)
 
+    def mark_company_cancelled(company):
+        company_id = company['id']
+        summary = {'company_id': company_id,
+                   'company_name': company.get('name', company_id),
+                   'status': 'cancelled'}
+        run.setdefault('cancelled_company_ids', [])
+        if company_id not in run['cancelled_company_ids']:
+            run['cancelled_company_ids'].append(company_id)
+        run['results'][company_id] = summary
+        run['outcomes'][company_id] = summary
+        clear_inflight(company_id)
+        checkpoint()
+
     try:
         checkpoint()
         for index, company in enumerate(companies):
@@ -276,6 +302,9 @@ def worker(app, run, companies):
                 run['status'] = 'cancelled'
                 break
             if company_id in run['outcomes']:
+                continue
+            if company_cancelled(company_id):
+                mark_company_cancelled(company)
                 continue
             recovered = _inflight_case(app, run, company)
             if recovered:
@@ -302,6 +331,16 @@ def worker(app, run, companies):
             }
             try:
                 response = app.analyze_all(payload)
+                if company_cancelled(company_id):
+                    for case in app.all_records('cases'):
+                        if (case.get('analysis_job_id') == run['id']
+                                and case.get('company_id') == company_id):
+                            try:
+                                app.store.delete('cases', case['id'])
+                            except Exception:
+                                pass
+                    mark_company_cancelled(company)
+                    continue
                 completed = next((row for row in response.get('results', [])
                                   if row.get('company_id') == company_id), None)
                 failure = next((row for row in response.get('errors', [])
