@@ -51,6 +51,8 @@ function updateFinancialLookupStatus() {
   if (spinner) spinner.hidden = !running;
   button.disabled = running;
   button.textContent = running ? 'Populating financial values…' : '✦ Populate Market Cap & Revenue';
+  const cancelButton = $('#btn-cancel-financials');
+  if (cancelButton) cancelButton.hidden = !running;
   status.textContent = financialLookupStatusText(search);
 }
 function displayedSourceSearch(portfolio) {
@@ -110,7 +112,9 @@ function notifyFinishedSourceSearches() {
     if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed', 'cancelled'].includes(search.status)) continue;
     trackedSourceSearches.delete(search.id);
     if (search.job_type === 'financials') {
-      showAlert(financialLookupSummary(search), 'Financial lookup finished', { searchCompletion: true });
+      showAlert(financialLookupSummary(search),
+        search.status === 'cancelled' ? 'Financial lookup cancelled' : 'Financial lookup finished',
+        { searchCompletion: true });
       return;
     }
     const count = search.results_count || 0;
@@ -2983,6 +2987,10 @@ function sourceLibrary(sources, sourceSummaries, companies, portfolio) {
         <button class="btn btn-sm btn-primary" onclick="populatePortfolioFinancials('${esc(portfolio.id)}')" id="btn-populate-financials" ${financialSearchRunning ? 'disabled' : ''}>
           ${financialSearchRunning ? 'Populating financial values…' : '✦ Populate Market Cap &amp; Revenue'}
         </button>
+        ${financialSearchRunning ? `
+          <button class="btn btn-sm btn-secondary" onclick="cancelPortfolioFinancials('${esc(portfolio.id)}')" id="btn-cancel-financials">
+            Cancel financial lookup
+          </button>` : ''}
       </span>
     </div>
     <div id="financial-search-status" role="status" aria-live="polite" class="text-muted text-small" style="margin-bottom:12px">${esc(financialLookupStatusText(financialSearch))}</div>
@@ -3254,6 +3262,33 @@ window.populatePortfolioFinancials = async function(portfolioId) {
     if (button) button.disabled = running;
     const currentSpinner = document.getElementById('financial-lookup-spinner');
     if (currentSpinner) currentSpinner.hidden = !running;
+  }
+};
+
+window.cancelPortfolioFinancials = async function(portfolioId) {
+  const search = financialLookupRun(portfolioId, true);
+  if (!search?.id) return;
+  const button = document.getElementById('btn-cancel-financials');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Cancelling…';
+  }
+  try {
+    const result = await api('financials/cancel', { id: search.id });
+    const cancelled = result.financial_run;
+    if (!cancelled?.id) throw new Error('The financial lookup could not be cancelled.');
+    state.search_runs = [...(state.search_runs || []).filter(run => run.id !== cancelled.id), cancelled];
+    trackedSourceSearches.add(cancelled.id);
+    await refresh();
+    if (currentView === 'sources') await viewSources();
+    updateFinancialLookupStatus();
+    notifyFinishedSourceSearches();
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Cancel financial lookup';
+    }
+    showAlert(`Could not cancel financial lookup: ${error.message}`, 'Financial lookup cancellation failed', { searchCompletion: true });
   }
 };
 

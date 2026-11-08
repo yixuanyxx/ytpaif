@@ -845,6 +845,23 @@ test('Financial lookup queues without a blocking overlay and survives returning 
   assert.equal(run("trackedSourceSearches.has('financial-job')"),true);
 });
 
+test('Financial lookup shows and uses its cancel control',async()=>{
+  const {run,node} = setup();
+  run(`selectedSourcePortfolioId='p'; state.search_runs=[{id:'financial-job',job_type:'financials',portfolio_id:'p',
+    status:'running',phase:'queued',company_ids:['a'],companies_completed:[]}];`);
+  const html = run(`sourceLibrary([], [], [{id:'a',name:'TSMC'}], {id:'p',rows:[{company_id:'a'}]})`);
+  assert.match(html,/id="btn-cancel-financials"[\s\S]*Cancel financial lookup/);
+  run(`let cancelRequest; api=async(path,data)=>{
+    cancelRequest={path,data};
+    return {financial_run:{...state.search_runs[0],status:'cancelled'}};
+  }; refresh=async()=>{};`);
+  await run("window.cancelPortfolioFinancials('p')");
+  assert.equal(run('cancelRequest.path'),'financials/cancel');
+  assert.equal(run('cancelRequest.data.id'),'financial-job');
+  assert.equal(run("state.search_runs[0].status"),'cancelled');
+  assert.equal(node('#btn-cancel-financials').disabled,true);
+});
+
 test('Short and long search submission errors open the completion modal',async()=>{
   for (const button of ['#btn-run-search','#btn-run-long-search']) {
     const {run,node,context} = setup();
