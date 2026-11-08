@@ -455,8 +455,11 @@ function caseExposureValue(caseRecord) {
   };
   const point = boundedFraction(caseRecord?.estimate?.point);
   if (point !== null) return {value: point, basis: 'point'};
-  const upper = boundedFraction(caseRecord?.estimate?.upper);
-  if (upper !== null) return {value: upper, basis: 'upper'};
+  // A range's upper bound represents uncertainty, not a calculated exposure.
+  // Legacy cases without a point therefore show their supported evidence
+  // amount rather than being inflated to the maximum possible value.
+  const lower = boundedFraction(caseRecord?.estimate?.lower);
+  if (lower !== null) return {value: lower, basis: 'conservative_evidence'};
   const savedPercent = numeric(caseRecord?.exposure_percent);
   if (savedPercent !== null) {
     return {value: Math.max(0, Math.min(100, savedPercent)) / 100, basis: 'legacy_point'};
@@ -3818,9 +3821,8 @@ async function viewAnalysis() {
               <tbody id="analysis-queue-rows">
                 ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState,
                   readyForBulk, retryable, companyAnalysisInProgress, companyAnalysisRun }) => {
-                  // Prefer a calculated point. When evidence supports only a
-                  // range, show its upper bound as the requested single
-                  // exposure value. Legacy cases may only have a saved percent.
+                  // Prefer the calculated point. Legacy partial cases use the
+                  // supported evidence amount, never the uncertainty ceiling.
                   const exposure = caseExposureValue(caseRec);
                   const pt = pct(exposure.value);
                   const terminalAnalysis = isTerminalAnalysisRun(companyAnalysisRun);
@@ -3828,8 +3830,8 @@ async function viewAnalysis() {
                     || analysisOutcomeForCompany(companyAnalysisRun, c.id);
                   const fallbackWasSearched = Boolean(fallbackSearch?.searched_at
                     || fallbackSearch?.fallback_status || fallbackSearch?.fallback_message);
-                  const exposureTitle = exposure.basis === 'upper'
-                    ? 'Upper bound used because a point estimate is unavailable.'
+                  const exposureTitle = exposure.basis === 'conservative_evidence'
+                    ? 'Conservative evidence-based exposure; unresolved revenue was not counted.'
                     : exposure.basis === 'point' || exposure.basis === 'legacy_point'
                       ? 'Calculated exposure point estimate.'
                       : companyAnalysisInProgress

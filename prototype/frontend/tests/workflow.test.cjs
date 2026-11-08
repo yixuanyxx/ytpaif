@@ -1359,7 +1359,7 @@ test('Calculate Exposure shows a point percentage and colour-only AI confidence 
   assert.doesNotMatch(html,/AI confidence[\s\S]*>\d+%<\/span>/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
-test('Calculate Exposure uses the range upper bound when no point estimate exists',async()=>{
+test('Calculate Exposure uses the evidence floor when no point estimate exists',async()=>{
   const {run,node}=setup();
   run(`state.companies=[
       {id:'range',name:'Range company'}, {id:'zero',name:'Exact zero'},
@@ -1383,7 +1383,7 @@ test('Calculate Exposure uses the range upper bound when no point estimate exist
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
   const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
-  assert.match(row('Range company'),/title="Upper bound used because a point estimate is unavailable\."[\s\S]*56\.7%/);
+  assert.match(row('Range company'),/title="Conservative evidence-based exposure; unresolved revenue was not counted\."[\s\S]*0\.0%/);
   assert.match(row('Exact zero'),/0\.0%/);
   assert.doesNotMatch(row('Exact zero'),/80\.0%/);
   assert.match(row('Legacy point'),/50\.0%/);
@@ -1391,7 +1391,7 @@ test('Calculate Exposure uses the range upper bound when no point estimate exist
   assert.match(row('Missing estimate'),/0% display fallback: no verified numeric theme-revenue exposure is available after analysis/);
   assert.match(row('Missing estimate'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,upper:.5666},exposure_percent:null}))")),
-    {value:.5666,basis:'upper'});
+    {value:0,basis:'fallback_zero'});
 });
 test('Calculate Exposure shows bounded fallback zeroes without turning them into audited cases',async()=>{
   const {run,node}=setup();
@@ -1430,7 +1430,7 @@ test('Calculate Exposure shows bounded fallback zeroes without turning them into
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:3,upper:4}}))')),
     {value:1,basis:'point'});
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:null,upper:-.5}}))')),
-    {value:0,basis:'upper'});
+    {value:0,basis:'fallback_zero'});
   assert.equal(run('state.cases.length'),0);
 });
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{

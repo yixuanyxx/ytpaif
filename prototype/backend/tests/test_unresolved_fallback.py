@@ -69,7 +69,7 @@ class UnresolvedFallbackTest(unittest.TestCase):
         row = first['results'][0]
         self.assertEqual(row['fallback_status'], 'not_found')
         self.assertTrue(row['fallback_search_attempted'])
-        self.assertIsNone(row['case']['estimate']['point'])
+        self.assertEqual(row['case']['estimate']['point'], 0)
         self.assertEqual(row['case']['fallback_web_search']['diagnostics']['gemini_search_calls'], 0)
         self.assertEqual(len([c for c in self.app.all_records('cases') if c['company_id'] == 'ACME']), 1)
 
@@ -90,7 +90,7 @@ class UnresolvedFallbackTest(unittest.TestCase):
             initial = self.app.analyze_all(self._request(allow_unresolved_web_search=False))
         self.assertEqual(initial['errors'], [])
         self.assertEqual(initial['results'][0]['fallback_status'], 'deferred')
-        self.assertIsNone(initial['results'][0]['case']['estimate']['point'])
+        self.assertEqual(initial['results'][0]['case']['estimate']['point'], 0)
 
         quote = 'Dedicated AI chip revenue USD 18 million.'
         web_source = {'id': 'web-numeric', 'company_id': 'ACME', 'source_type': 'earnings_call',
@@ -246,7 +246,7 @@ class UnresolvedFallbackTest(unittest.TestCase):
             result = self.app.analyze_all(self._request())
         model.assert_not_called()
         self.assertEqual(result['results'][0]['fallback_status'], 'still_unresolved')
-        self.assertIsNone(result['results'][0]['case']['estimate']['point'])
+        self.assertAlmostEqual(result['results'][0]['case']['estimate']['point'], .17)
         self.assertAlmostEqual(result['results'][0]['case']['estimate']['lower'], .17)
         self.assertAlmostEqual(result['results'][0]['case']['estimate']['upper'], .19)
         self.assertEqual(result['results'][0]['case']['source_confidence_light'], 'amber')
@@ -278,10 +278,10 @@ class UnresolvedFallbackTest(unittest.TestCase):
             result = self.app.analyze_all(self._request())
         model.assert_not_called()
         case = result['results'][0]['case']
-        self.assertIsNone(case['estimate']['point'])
+        self.assertAlmostEqual(case['estimate']['point'], .17)
         self.assertAlmostEqual(case['estimate']['lower'], .17)
         self.assertAlmostEqual(case['estimate']['upper'], .19)
-        self.assertIsNone(case['exposure_percent'])
+        self.assertAlmostEqual(case['exposure_percent'], 17)
 
     def test_saved_web_evidence_retries_after_provider_quota_without_searching_again(self):
         import unresolved_web_search

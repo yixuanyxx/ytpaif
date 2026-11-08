@@ -230,7 +230,7 @@ class AppFlowTest(unittest.TestCase):
             self.assertEqual(manifest['theme']['id'], self.theme['id'])
             self.assertEqual(len(manifest['reviews']), 3)
 
-    def test_dashboard_uses_pending_calculation_and_step_four_upper_bound(self):
+    def test_dashboard_uses_pending_calculation_without_promoting_upper_bound(self):
         case = self.app.all_records('cases')[0]
         case['review_status'] = 'needs_review'
         case['estimate']['point'] = None
@@ -239,8 +239,8 @@ class AppFlowTest(unittest.TestCase):
         self.app.put('cases', case)
 
         selected = self.app.selected_estimates(self.theme['id'])
-        self.assertEqual(selected[case['company_id']]['point'], 0.6)
-        self.assertEqual(selected[case['company_id']]['point_basis'], 'upper')
+        self.assertEqual(selected[case['company_id']]['point'], 0.5)
+        self.assertEqual(selected[case['company_id']]['point_basis'], 'conservative_evidence')
         self.assertEqual(selected[case['company_id']]['review_status'], 'needs_review')
         self.assertTrue(selected[case['company_id']]['calculation_stale'])
 
@@ -248,7 +248,7 @@ class AppFlowTest(unittest.TestCase):
         row = next(row for row in dashboard['companies'] if row['company_id'] == case['company_id'])
         self.assertTrue(row['assessed'])
         self.assertEqual(row['review_status'], 'needs_review')
-        self.assertEqual(row['exposure']['point'], 0.6)
+        self.assertEqual(row['exposure']['point'], 0.5)
 
     def test_evaluate_endpoint_is_removed(self):
         with self.assertRaisesRegex(ValueError, 'Unknown API endpoint'):
@@ -602,7 +602,7 @@ class AppFlowTest(unittest.TestCase):
         with patch.object(self.app, 'llm', side_effect=[facts, classification]):
             c = self.app.analyze({'theme_id': self.theme['id'],
                                   'company_id': 'DEMO_A', 'evidence_ids': [evidence]})
-        self.assertIsNone(c['estimate']['point'])
+        self.assertEqual(c['estimate']['point'], 0)
         self.assertEqual(c['review_status'], 'needs_review')
         self.assertEqual(c['classification_score'], 3)
         self.assertEqual(self.app.get('runs', c['run_id'])['status'], 'needs_review')
@@ -623,7 +623,7 @@ class AppFlowTest(unittest.TestCase):
         with patch.object(self.app, 'llm', side_effect=[facts, classified]) as model:
             saved = self.app.analyze({'theme_id': self.theme['id'], 'company_id': 'DEMO_A', 'evidence_ids': [eid]})
         self.assertEqual(model.call_count, 2)
-        self.assertIsNone(saved['estimate']['point'])
+        self.assertEqual(saved['estimate']['point'], 0)
         self.assertEqual(saved['estimate']['upper'], 1)
         self.assertEqual(saved['case']['units'][0]['relationship_type'], 'insufficient_evidence')
         self.assertEqual(saved['case']['units'][0]['original_relationship_type'], 'indirect')

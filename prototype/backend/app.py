@@ -601,10 +601,13 @@ def selected_estimates(theme_id):
     for c in analysis_library.display_results(all_records('cases'), [theme]):
         if c['review_status'] in ('approved', 'needs_review'):
             estimate = dict(c['estimate'])
-            point_basis = 'point'
-            if estimate.get('point') is None and isinstance(estimate.get('upper'), (int, float)):
-                estimate['point'] = max(0.0, min(1.0, estimate['upper']))
-                point_basis = 'upper'
+            point_basis = estimate.get('point_basis') or 'complete'
+            if estimate.get('point') is None:
+                # A saved range is audit information, not a display value.
+                # Its lower bound is the evidence-supported company exposure;
+                # never promote an unknown result to its theoretical maximum.
+                estimate['point'] = max(0.0, min(1.0, estimate.get('lower') or 0.0))
+                point_basis = 'conservative_evidence'
             result[c['company_id']] = {
                 **estimate, 'review_status': c['review_status'], 'case_id': c['id'],
                 'point_basis': point_basis, 'calculation_stale': c['calculation_stale'],
@@ -1234,10 +1237,10 @@ def _provider_quota_error(error):
 def _fallback_outcome(case, metadata):
     """Describe the numeric result after newly discovered evidence is analysed."""
     point = case.get('estimate', {}).get('point')
-    if point is None:
+    if point is None or case.get('estimate', {}).get('calculation_status') != 'complete':
         status = 'still_unresolved'
-        message = ('New numeric sources were analysed, but a supported single exposure estimate '
-                   'remains unavailable; the range upper bound will be displayed.')
+        message = ('New numeric sources were analysed, but only a conservative evidence-based '
+                   'exposure could be supported.')
     elif point == 0:
         status = 'confirmed_zero'
         message = 'New cited evidence was analysed and the supported exposure remains 0%.'
@@ -1326,7 +1329,7 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis
     # ``None`` is the audited representation for an unknown point estimate.
     # Search regardless of the calculation-status label so older/imported
     # cases cannot bypass recovery merely because that optional label differs.
-    unresolved = point is None
+    unresolved = point is None or estimate.get('calculation_status') in ('partial', 'undetermined')
     if not unresolved and point != 0:
         return case, {'status': 'not_needed', 'message': ''}, False, False
 
@@ -1392,21 +1395,21 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis
             if bounds:
                 lower, upper = bounds
                 estimate = {**(case.get('estimate') or {})}
-                estimate.update(point=None, lower=lower, upper=upper,
+                estimate.update(point=lower, point_basis='conservative_evidence', lower=lower, upper=upper,
                                 main_theme_revenue=None, calculation_status='partial')
                 estimate['issues'] = list(dict.fromkeys([
                     *(estimate.get('issues') or []),
                     'Exposure is bounded by an approved-source verbal revenue-share disclosure.',
                 ]))
                 case['estimate'] = estimate
-                case['exposure_percent'] = None
+                case['exposure_percent'] = lower * 100
                 case['source_confidence_light'] = 'amber'
                 case['source_confidence_basis'] = (
                     'Approved evidence reports an approximate theme-revenue share; '
-                    'the conservative upper bound is displayed.')
+                    'the conservative evidence-based value is displayed.')
             metadata.update(status='still_unresolved',
                             message=('Found an approved approximate theme-revenue share; '
-                                     'its supported range upper bound will be displayed.'))
+                                     'the conservative evidence-based value is displayed.'))
             case['fallback_web_search'] = metadata
             put('cases', case)
             return case, metadata, False, True

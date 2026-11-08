@@ -26,7 +26,12 @@ def result_fields(estimate, confidence_percent=None):
         confidence_percent = engine.number(confidence_percent, 'AI confidence percentage')
         if not 0 <= confidence_percent <= 100:
             raise ValueError('AI confidence percentage must be between 0 and 100')
+    # Older records may have an unknown point with only an uncertainty range.
+    # Do not expose that range's upper bound as a company exposure.  The
+    # evidence floor is the only defensible single value for those records.
     point = estimate.get('point')
+    if point is None:
+        point = estimate.get('lower')
     return {'exposure_percent': None if point is None else point * 100,
             'confidence_percent': confidence_percent}
 

@@ -88,6 +88,32 @@ def _issuer_roots(sources, company):
     return roots
 
 
+def _issuer_named_host(host, company):
+    """Recognise a verified document host whose name identifies the issuer.
+
+    Some issuer document CDNs (for example ``filecenter.deltaww.com``) are
+    separate from the public corporate homepage.  They should be treated as
+    issuer-hosted only when the hostname itself has a distinctive issuer-name
+    match; a generic verified filing host remains unapproved.
+    """
+    root = _site_root(host)
+    if root.endswith(('.test', '.example', '.invalid')):
+        return False
+    label = re.sub(r'[^a-z0-9]', '', root.split('.')[0].lower())
+    words = [re.sub(r'[^a-z0-9]', '', word.lower())
+             for word in str(company.get('name') or '').split()]
+    ignored = {'co', 'corp', 'corporation', 'ltd', 'limited', 'inc', 'the', 'group',
+               'holdings', 'holding', 'electronics', 'semiconductor', 'manufacturing',
+               'taiwan', 'china', 'korea', 'india', 'australia', 'bank'}
+    aliases = [word for word in words if len(word) >= 5 and word not in ignored]
+    compact = ''.join(word for word in words if word and word not in ignored)
+    return bool(label and (
+        label == compact
+        or (len(compact) >= 6 and compact.startswith(label) and len(label) >= 5)
+        or any(label == word or label.startswith(word) for word in aliases)
+    ))
+
+
 def _approved_by_source_search(url, company):
     """Whether this URL is on the canonical AI-search allowlist.
 
@@ -127,6 +153,10 @@ def provenance(source, company, issuer_roots=()):
     if (source.get('source_type') in FILING_TYPES
             and source.get('link_status') == 'verified'
             and any(_matches(host, root) for root in issuer_roots)):
+        return 'issuer_filing'
+    if (source.get('source_type') in FILING_TYPES
+            and source.get('link_status') == 'verified'
+            and _issuer_named_host(host, company)):
         return 'issuer_filing'
     # Discovery's broader website allowlist also includes research vendors.
     # Count a verified issuer document only when discovery recorded its issuer

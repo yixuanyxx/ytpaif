@@ -1,7 +1,7 @@
 """Deterministic, review-gated thematic revenue calculations."""
 import math
 
-VERSION = '1.3.1'
+VERSION = '1.4.0'
 
 def number(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -316,9 +316,17 @@ def estimate(case, nodes, evidence):
         share = sum(u.get('allocations', {}).values()) if u.get('allocations') else 1.0
         covered_lower += u['revenue'] * u['lower'] * share / total
         covered_upper += u['revenue'] * u['upper'] * share / total
-    final_point = point / total if has_point else None
+    # Step 4 presents one exposure percentage.  An unresolved segment must
+    # never turn into a 100% result simply because its theoretical upper bound
+    # is 100%.  For a partial analysis use the evidenced qualifying revenue
+    # (the lower bound) as the conservative single result.  Keep the bounds in
+    # the record for audit/review, but do not substitute the upper bound for a
+    # calculated company exposure.
+    final_point = point / total if has_point else lo
+    point_basis = 'complete' if has_point else 'conservative_evidence'
     return {'lower': lo, 'upper': hi, 'point': final_point,
-            'main_theme_revenue': point if has_point else None,
+            'point_basis': point_basis,
+            'main_theme_revenue': point if has_point else lower,
             'identified_theme_revenue': lower,
             'calculation_status': 'complete' if has_point else ('partial' if lower else 'undetermined'),
             'revenue_unit_ids': sorted(u['unit_id'] for u in units if u['relationship_type'] == 'direct'),

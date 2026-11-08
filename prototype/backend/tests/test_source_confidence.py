@@ -174,6 +174,12 @@ class SourceConfidenceTest(unittest.TestCase):
         self.assertEqual(roots, {'samsung.co.kr'})
         self.assertEqual(source_confidence.provenance(filing, company, roots), 'issuer_filing')
 
+    def test_verified_issuer_named_document_cdn_is_not_third_party(self):
+        company = {'name': 'DELTA ELECTRONICS', 'bloomberg_ticker': '2308 TT Equity'}
+        filing = source('delta', 'https://filecenter.deltaww.com/annual-report.pdf', ['e1'],
+                        'annual_report')
+        self.assertEqual(source_confidence.provenance(filing, company), 'issuer_filing')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -33,7 +33,7 @@ def holding(cid, w, sid=None):
     }
 
 class EngineCalculations(unittest.TestCase):
-    def test_spec_mixed_business_has_no_point(self):
+    def test_spec_mixed_business_uses_conservative_evidence_point(self):
         e = engine.estimate(case([
             unit('ai', 20, 1, 1, 1),
             unit('mixed', 40, 0, 1, None),
@@ -41,7 +41,8 @@ class EngineCalculations(unittest.TestCase):
         ]), NODES, {'e1'})
         self.assertAlmostEqual(e['lower'], 0.2)
         self.assertAlmostEqual(e['upper'], 0.6)
-        self.assertIsNone(e['point'])
+        self.assertAlmostEqual(e['point'], 0.2)
+        self.assertEqual(e['point_basis'], 'conservative_evidence')
 
     def test_spec_portfolio_example(self):
         estimates = {
@@ -116,11 +117,12 @@ class EngineCalculations(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 engine.estimate(case([u]), NODES, {'e1'})
 
-    def test_residual_never_silently_zero(self):
+    def test_residual_keeps_a_conservative_point_and_audit_issue(self):
         e = engine.estimate(case([unit('a', 20, 1, 1, 1)]), NODES, {'e1'})
         self.assertEqual(e['lower'], 0.2)
         self.assertEqual(e['upper'], 1.0)
-        self.assertIsNone(e['point'])
+        self.assertAlmostEqual(e['point'], .2)
+        self.assertEqual(e['point_basis'], 'conservative_evidence')
         self.assertTrue(e['issues'])
 
     def test_indirect_does_not_enter_revenue(self):
