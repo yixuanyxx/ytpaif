@@ -297,11 +297,13 @@ test('Dashboard charts top ten portfolio contributions and aggregates the pie by
   const {run,node} = setup();
   run(`state = {
     themes:[{id:'theme-1',theme_name:'AI',approved:true,nodes:[
-      {node_id:'compute',parent_id:null,name:'Compute'},
-      {node_id:'chips',parent_id:'compute',name:'Chips'},
-      {node_id:'cloud',parent_id:'compute',name:'Cloud'},
-      {node_id:'energy',parent_id:null,name:'Energy'},
-      {node_id:'wind',parent_id:'energy',name:'Wind'}
+      {node_id:'compute',name:'Compute',children:[
+        {node_id:'chips',name:'Chips',children:[]},
+        {node_id:'cloud',name:'Cloud',children:[]}
+      ]},
+      {node_id:'energy',name:'Energy',children:[
+        {node_id:'wind',name:'Wind',children:[]}
+      ]}
     ]}],
     portfolio_imports:[{id:'portfolio-1',theme_id:'theme-1',name:'Core',snapshot_id:'snapshot-1'}],
     snapshots:[{id:'snapshot-1',portfolio:[]}],
@@ -309,7 +311,10 @@ test('Dashboard charts top ten portfolio contributions and aggregates the pie by
     sources:[],
     cases:Array.from({length:12},(_,i)=>({
       company_id:'company-'+(i+1),theme_id:'theme-1',review_status:'approved',
-      estimate:{subthemes:{chips:{point:0.5},cloud:{point:null,upper:0.5},wind:{point:1}}}
+      estimate:{
+        node_exposures:{compute:{point:null,upper:1},energy:{point:1,upper:1}},
+        subthemes:{chips:{point:0.5},cloud:{point:null,upper:0.5},wind:{point:1}}
+      }
     }))
   };
   selectedDashboardThemeId='theme-1';
@@ -343,6 +348,7 @@ test('Dashboard charts top ten portfolio contributions and aggregates the pie by
   assert.match(html,/aria-label="Portfolio exposure breakdown by Tier-1 theme"/);
   assert.match(html,/Compute/);
   assert.match(html,/Energy/);
+  assert.doesNotMatch(node('#subtheme-pie-content').innerHTML,/No Tier-1 exposure/);
   assert.doesNotMatch(node('#subtheme-pie-content').innerHTML,/Chips|Cloud|Wind/);
 });
 test('Dashboard demo toggle previews sample data without changing workspace data or selections',async()=>{

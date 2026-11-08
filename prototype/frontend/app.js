@@ -4562,7 +4562,18 @@ async function viewDashboard() {
 
   // Subtheme rows from cases
   const theme = selectedTheme;
-  const nodes  = theme.nodes || [];
+  const flattenDashboardTaxonomy = tree => {
+    const flattened = [];
+    const visit = (node, parentId = null) => {
+      if (!node || typeof node !== 'object') return;
+      const children = Array.isArray(node.children) ? node.children : null;
+      flattened.push({...node, parent_id: children ? parentId : (node.parent_id ?? parentId)});
+      children?.forEach(child => visit(child, node.node_id));
+    };
+    (Array.isArray(tree) ? tree : []).forEach(node => visit(node));
+    return flattened;
+  };
+  const nodes  = flattenDashboardTaxonomy(theme.nodes || []);
   const tier1  = nodes.filter(n=>!n.parent_id);
   const cases  = demoMode ? demo.cases : (state.cases || []);
 
@@ -4584,10 +4595,21 @@ async function viewDashboard() {
       && ['approved','needs_review'].includes(x.review_status)).at(-1);
     if (!c) return;
     const w = row.weights.portfolio;
+    const resolvedRoots = new Set();
+    tier1.forEach(root => {
+      const rollup = c.estimate?.node_exposures?.[root.node_id];
+      const exposure = Number.isFinite(rollup?.point) ? rollup.point : rollup?.upper;
+      if (Number.isFinite(exposure)) {
+        tier1Exposure[root.node_id] += w * exposure;
+        resolvedRoots.add(root.node_id);
+      }
+    });
     Object.entries(c.estimate?.subthemes||{}).forEach(([nid, v]) => {
       const root = tier1ForNode(nid);
       const exposure = Number.isFinite(v?.point) ? v.point : v?.upper;
-      if (root && Number.isFinite(exposure)) tier1Exposure[root.node_id] += w * exposure;
+      if (root && !resolvedRoots.has(root.node_id) && Number.isFinite(exposure)) {
+        tier1Exposure[root.node_id] += w * exposure;
+      }
     });
   });
   const tier1PieHtml = () => {
@@ -4598,7 +4620,7 @@ async function viewDashboard() {
     })).filter(segment => Number.isFinite(segment.value) && segment.value > 0);
     const total = segments.reduce((sum, segment) => sum + segment.value, 0);
     if (!segments.length || total <= 0) {
-      return '<div class="subtheme-pie-empty">No Tier-1 exposure is available from approved company analyses.</div>';
+      return '<div class="subtheme-pie-empty">No Tier-1 exposure is available from calculated company analyses.</div>';
     }
 
     const center = 110, radius = 96;
