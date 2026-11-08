@@ -921,11 +921,17 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
 });
-test('Analysis selection omits the stage pipeline explainer card',()=>{
-  const {run} = setup();
-  const html = run(`analysisSelectPanel('', [], [], {ai_configured:true}, null)`);
-  assert.match(html,/Run AI analysis/);
-  assert.doesNotMatch(html,/Stage pipeline|Fact<br>Extraction|Awaiting<br>Review/);
+test('Analysis view omits manual AI analysis and stage pipeline cards',async()=>{
+  const {run,node} = setup();
+  run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:3}];
+    selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html = node('#page-content').innerHTML;
+  assert.doesNotMatch(html,/Run AI analysis|Evidence passages|Stage pipeline|Fact<br>Extraction|Awaiting<br>Review/);
+  assert.match(html,/Analyse all ready companies/);
+  assert.match(html,/Ready/);
 });
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
   const {run,node,storage} = setup();

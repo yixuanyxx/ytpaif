@@ -3431,8 +3431,8 @@ async function viewAnalysis() {
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
 
                   return `
-                    <tr class="queue-row ${rowClass}" style="cursor:pointer;border-bottom:1px solid var(--slate-100)"
-                      onclick="${caseRec ? `openCase('${esc(caseRec.id)}')` : (hasSrc ? `openAnalysisPanel('${esc(c.id)}')` : `setView('sources')`)}">
+                    <tr class="queue-row ${rowClass}" style="cursor:${caseRec || !hasSrc ? 'pointer' : 'default'};border-bottom:1px solid var(--slate-100)"
+                      onclick="${caseRec ? `openCase('${esc(caseRec.id)}')` : (!hasSrc ? `setView('sources')` : '')}">
                       <td class="td-company">
                         <div style="font-weight:650;color:var(--slate-900)">${esc(c.name)}</div>
                         <div class="ticker" style="font-size:10.5px">${esc(c.bloomberg_ticker || c.id)}</div>
@@ -3455,9 +3455,7 @@ async function viewAnalysis() {
                             Review →
                           </button>
                         ` : (hasSrc ? `
-                          <button class="btn btn-sm btn-primary" onclick="openAnalysisPanel('${esc(c.id)}')">
-                            ✧ Analyse
-                          </button>
+                          <span class="badge badge-neutral">Ready</span>
                         ` : `
                           <button class="btn btn-sm" onclick="event.stopPropagation(); openManualUploadForCompany('${esc(c.id)}')">Upload</button>
                         `)}
@@ -3482,7 +3480,7 @@ async function viewAnalysis() {
             <div class="empty-state" style="padding:40px 16px">
               <div class="empty-icon">✓</div>
               <h3>Select a case or company</h3>
-              <p>Click a case or company from the queue on the left to review, or click "Analyse all ready companies" above.</p>
+              <p>Click a case from the queue on the left to review, or click "Analyse all ready companies" above.</p>
             </div>
           </div>`}
       </div>
@@ -3531,130 +3529,10 @@ async function viewAnalysis() {
   }
 }
 
-function analysisSelectPanel(selectedCompanyId, companies, sources, state, theme) {
-  const company = selectedCompanyId ? companies.find(c=>c.id===selectedCompanyId) : null;
-  const compSources = company ? sources.filter(s=>s.company_id===company.id) : [];
-  const allEvidence = compSources.flatMap(s => s.evidence||[]);
-
-  return `
-    <div class="panel">
-      <div class="panel-title">Run AI analysis</div>
-      <div class="panel-subtitle">
-        Select a company and relevant evidence passages. AI will extract revenue facts (Stage 1)
-        then classify against Tier-2 taxonomy nodes (Stage 2).
-      </div>
-
-      <div class="form-group">
-        <label class="field-label">Company</label>
-        <select id="analysis-company-select" onchange="openAnalysisPanel(this.value)">
-          <option value="">— select company —</option>
-          ${companies.map(c=>`<option value="${esc(c.id)}" ${c.id===selectedCompanyId?'selected':''}>${esc(c.name)}</option>`).join('')}
-        </select>
-      </div>
-
-      ${company ? `
-        <div class="form-section-title">Evidence passages
-          <span class="text-muted text-small" style="font-weight:400">
-            (${allEvidence.length} available · max 60,000 chars selected)
-          </span>
-        </div>
-        ${allEvidence.length > 0 ? `
-          <div style="max-height:260px;overflow-y:auto;margin-bottom:14px">
-            ${compSources.filter(s=>!theme||s.publication_date<=theme.cutoff).flatMap(s=>s.evidence).map(ev=>`
-              <label style="display:flex;gap:10px;padding:8px;cursor:pointer;border-radius:var(--radius-sm);
-                border:1px solid transparent;font-size:12px"
-                onmouseover="this.style.background='var(--slate-50)'"
-                onmouseout="this.style.background=''">
-                <input type="checkbox" class="ev-checkbox" value="${esc(ev.evidence_id)}" style="width:auto;margin-top:2px;flex-shrink:0">
-                <div>
-                  <span class="badge badge-neutral" style="margin-right:6px">p.${ev.page}</span>
-                  ${esc(ev.passage.slice(0,120))}…
-                </div>
-              </label>`).join('')}
-          </div>
-          <div class="btn-group">
-            <button class="btn btn-primary" id="btn-run-ai" ${!state.ai_configured?'disabled':''}>
-              ✧ Extract &amp; classify
-            </button>
-            <button class="btn" id="btn-select-all-ev">Select all</button>
-            <span class="text-muted text-small" id="ev-char-count">0 chars selected</span>
-          </div>` :
-          `<div class="notice warning"><span class="notice-icon">⚠</span>No passages available for this company within the evidence cutoff.</div>`}
-      ` : ''}
-
-      ${!company ? `
-        <div class="empty-state" style="padding:32px 16px">
-          <div class="empty-icon">↑</div>
-          <h3>Select a company above</h3>
-          <p>Or click "Analyse" next to a company in the queue.</p>
-        </div>` : ''}
-    </div>`;
-}
-
-window.openAnalysisPanel = async function(companyId) {
-  const portfolio = activeSourcePortfolio();
-  const companyIds = portfolioCompanyIds(portfolio);
-  const companies = (state.companies || []).filter(company => companyIds.has(company.id));
-  const theme = (state.themes || []).find(t => t.approved && t.id === selectedDashboardThemeId);
-  const panel = $('#case-detail-panel') || $('#analysis-panel');
-  if (!panel || (companyId && !companyIds.has(companyId))) return;
-  try {
-    if (companyId) await loadCompanySources(companyId);
-    if (currentView !== 'analysis') return;
-    panel.innerHTML = analysisSelectPanel(companyId, companies, state.sources || [], state, theme);
-    bindAnalysisPanel(companyId, theme);
-    panel.scrollIntoView({ behavior: 'smooth' });
-  } catch (error) {
-    notice(error.message, 'error');
-  }
-};
-
 window.openManualUploadForCompany = function(companyId) {
   pendingManualUploadCompanyId = companyId;
   setView('sources');
 };
-
-function bindAnalysisPanel(companyId, theme) {
-  const allCheckboxes = () => $$('.ev-checkbox');
-
-  // Char count
-  function updateCharCount() {
-    const selected = [...allCheckboxes()].filter(c=>c.checked);
-    const sources  = state.sources || [];
-    const allEvs   = sources.flatMap(s=>s.evidence||[]);
-    const total = selected.reduce((s,cb) => {
-      const ev = allEvs.find(e=>e.evidence_id===cb.value);
-      return s + (ev?.passage?.length||0);
-    }, 0);
-    const el = $('#ev-char-count');
-    if (el) {
-      el.textContent = `${total.toLocaleString()} / 60,000 chars`;
-      el.style.color = total > 60000 ? 'var(--red-600)' : '';
-    }
-  }
-  $$('.ev-checkbox').forEach(cb => cb.onchange = updateCharCount);
-
-  $('#btn-select-all-ev')?.addEventListener('click', () => {
-    const cbs = [...allCheckboxes()];
-    const allChecked = cbs.every(c=>c.checked);
-    cbs.forEach(c => c.checked = !allChecked);
-    updateCharCount();
-  });
-
-  $('#btn-run-ai')?.addEventListener('click', () => {
-    if (!theme) return notice('Approve a theme before running analysis.', 'error');
-    const ids = [...allCheckboxes()].filter(c=>c.checked).map(c=>c.value);
-    if (ids.length === 0) return notice('Select at least one evidence passage.', 'error');
-    run(async () => {
-      const result = await api('analyze', { theme_id: theme.id, company_id: companyId, evidence_ids: ids });
-      await refresh();
-      notice('Analysis complete. Case created and ready for review.', 'success');
-      render();
-      const newCase = (state.cases || []).filter(x => x.company_id === companyId).at(-1);
-      if (newCase) openCase(newCase.id);
-    }, 'Running AI analysis (2 LLM calls)…');
-  });
-}
 
 // ══════════════════════════════════════════════════════
 // VIEW: REVIEW CASES  (YTP-21, YTP-22)
