@@ -921,6 +921,12 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   assert.match(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/TSMC/);
 });
+test('Analysis selection omits the stage pipeline explainer card',()=>{
+  const {run} = setup();
+  const html = run(`analysisSelectPanel('', [], [], {ai_configured:true}, null)`);
+  assert.match(html,/Run AI analysis/);
+  assert.doesNotMatch(html,/Stage pipeline|Fact<br>Extraction|Awaiting<br>Review/);
+});
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
   const {run,node,storage} = setup();
   run(`state.themes=[

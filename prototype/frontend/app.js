@@ -3588,34 +3588,6 @@ function analysisSelectPanel(selectedCompanyId, companies, sources, state, theme
           <h3>Select a company above</h3>
           <p>Or click "Analyse" next to a company in the queue.</p>
         </div>` : ''}
-    </div>
-
-    <div class="panel">
-      <div class="panel-title">Stage pipeline</div>
-      <div class="stepper">
-        <div class="stepper-step">
-          <div class="stepper-circle">1</div>
-          <div class="stepper-label">Fact<br>Extraction</div>
-        </div>
-        <div class="stepper-step">
-          <div class="stepper-circle">2</div>
-          <div class="stepper-label">Tier-2<br>Classification</div>
-        </div>
-        <div class="stepper-step">
-          <div class="stepper-circle">3</div>
-          <div class="stepper-label">Engine<br>Validation</div>
-        </div>
-        <div class="stepper-step">
-          <div class="stepper-circle">4</div>
-          <div class="stepper-label">Awaiting<br>Review</div>
-        </div>
-      </div>
-      <div class="text-muted text-small">
-        Stage 1 extracts revenue figures from passages (1 LLM call).
-        Stage 2 classifies each unit against approved Tier-2 nodes (1 LLM call).
-        The deterministic engine validates; no figures are invented.
-        A failed run never produces a case.
-      </div>
     </div>`;
 }
 
