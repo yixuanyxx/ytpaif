@@ -22,6 +22,7 @@ const trackedSourceSearches = new Set();
 let analysisPollTimer = null;
 let analysisPollErrorShown = false;
 const trackedAnalysisRuns = new Set();
+const cancellingAnalysisRuns = new Set();
 const loadedSourceCompanyIds = new Set();
 function isAnalysisRun(run) {
   return run?.job_type === 'analysis';
@@ -207,14 +208,21 @@ function analysisRunsForScope(themeId, portfolioId) {
   return (state?.search_runs || []).filter(run => isAnalysisRun(run)
     && run.theme_id === themeId && run.portfolio_id === portfolioId);
 }
+function preferredActiveAnalysisRun(runs) {
+  const active = runs.filter(isActiveAnalysisRun);
+  // The durable worker runs one job at a time. Prefer the job it is actively
+  // processing over a newer per-stock job waiting behind it in the queue, so
+  // the progress text and top-level Cancel button always refer to the same job.
+  return active.findLast(run => run.phase === 'analysing') || active.at(-1);
+}
 function latestAnalysisRunForScope(themeId, portfolioId) {
   const runs = analysisRunsForScope(themeId, portfolioId);
-  return runs.findLast(isActiveAnalysisRun) || runs.at(-1);
+  return preferredActiveAnalysisRun(runs) || runs.at(-1);
 }
 function latestAnalysisRunForCompany(themeId, portfolioId, companyId) {
   const runs = analysisRunsForScope(themeId, portfolioId)
     .filter(run => analysisRunIncludesCompany(run, companyId));
-  return runs.findLast(isActiveAnalysisRun) || runs.at(-1);
+  return preferredActiveAnalysisRun(runs) || runs.at(-1);
 }
 function analysisRunIncludesCompany(run, companyId) {
   return Boolean(run && (run.company_ids || []).includes(companyId));
@@ -3624,13 +3632,14 @@ async function viewAnalysis() {
     // Once a successful case has reached the workspace, its review state is
     // the useful per-company status. Keep terminal failures visible instead.
     const analysisState = caseRec && !rawAnalysisState?.error ? null : rawAnalysisState;
-    const retryable = ['Analysis failed', 'Analysis incomplete'].includes(rawAnalysisState?.label)
+    const retryable = ['Analysis failed', 'Analysis incomplete', 'Analysis cancelled'].includes(rawAnalysisState?.label)
       && !rawAnalysisState?.active;
     // A failed or deferred calculation is ready again when source evidence is
     // present, even if an older case is still visible for that company.
     const readyForBulk = hasSrc && (retryable || (status === 'Ready to analyse' && !rawAnalysisState));
     const companyAnalysisInProgress = rawAnalysisState?.active === true;
     return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState,
+      companyAnalysisRun: latestCompanyRun,
       retryable, readyForBulk, companyAnalysisInProgress };
   });
 
@@ -3649,7 +3658,11 @@ async function viewAnalysis() {
       ${theme ? `
         <button class="btn btn-primary" id="btn-analyze-all" ${!state.ai_configured || !readyCount || analysisInProgress ? 'disabled' : ''} style="box-shadow:0 2px 4px rgba(13,148,136,0.2)">
           ${analysisInProgress ? 'Analysing companies…' : `✦ Analyse all ready companies (${readyCount})`}
-        </button>` : ''}
+        </button>
+        ${analysisInProgress ? `<button class="btn btn-danger" id="btn-cancel-analysis"
+          data-analysis-run-id="${esc(scopedAnalysisRun.id)}"
+          onclick="cancelAnalysisRun('${esc(scopedAnalysisRun.id)}', this)"
+          aria-label="Cancel current analysis">Cancel analysis</button>` : ''}` : ''}
       <div class="text-muted text-small">${state.ai_configured
         ? `${state.calls_used} AI calls used`
         : `<span style="color:var(--amber-600)">⚠ AI not configured</span>`}
@@ -3716,7 +3729,7 @@ async function viewAnalysis() {
               </thead>
               <tbody id="analysis-queue-rows">
                 ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState,
-                  readyForBulk, companyAnalysisInProgress }) => {
+                  readyForBulk, companyAnalysisInProgress, companyAnalysisRun }) => {
                   // A case's single point estimate is the exposure shown in
                   // this queue. `exposure_percent` preserves the same result
                   // for older saved cases that do not include nested estimate.
@@ -3747,10 +3760,20 @@ async function viewAnalysis() {
                       </td>
                       <td style="text-align:right" onclick="event.stopPropagation()">
                         ${hasSrc ? `
-                          <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}"
-                            onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme || companyAnalysisInProgress ? 'disabled' : ''}>
-                            ${analysisState?.active ? analysisState.label : (analysisState?.error ? '↻ Retry' : (caseRec ? '↻ Re-run' : '✧ Analyse'))}
-                          </button>
+                          ${companyAnalysisInProgress ? `
+                            <button class="btn btn-sm btn-danger"
+                              data-analysis-run-id="${esc(companyAnalysisRun.id)}"
+                              onclick="cancelAnalysisRun('${esc(companyAnalysisRun.id)}', this)"
+                              title="${(companyAnalysisRun.company_ids || []).length > 1 ? `Stops the entire ${(companyAnalysisRun.company_ids || []).length}-company analysis` : 'Stops this company analysis'}"
+                              aria-label="${(companyAnalysisRun.company_ids || []).length > 1 ? `Cancel the entire ${(companyAnalysisRun.company_ids || []).length}-company analysis` : `Cancel analysis for ${esc(c.name)}`}">
+                              ${(companyAnalysisRun.company_ids || []).length > 1 ? 'Cancel batch' : 'Cancel'}
+                            </button>
+                          ` : `
+                            <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}"
+                              onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme ? 'disabled' : ''}>
+                              ${analysisState?.error ? '↻ Retry' : (caseRec ? '↻ Re-run' : '✧ Analyse')}
+                            </button>
+                          `}
                         ` : `
                           <button class="btn btn-sm" onclick="event.stopPropagation(); openManualUploadForCompany('${esc(c.id)}')">Upload</button>
                         `}
@@ -3817,6 +3840,67 @@ async function viewAnalysis() {
     };
   }
 }
+
+window.cancelAnalysisRun = async function(runId, button) {
+  const analysisRun = (state.search_runs || []).find(run => run.id === runId && isAnalysisRun(run));
+  if (!analysisRun?.id) return notice('This analysis job is no longer available.', 'warning');
+  if (!isActiveAnalysisRun(analysisRun)) {
+    if (currentView === 'analysis') await viewAnalysis();
+    return notice(analysisRunProgressText(analysisRun), 'info');
+  }
+  if (cancellingAnalysisRuns.has(runId)) return;
+
+  const matchingButtons = [...$$('[data-analysis-run-id]')]
+    .filter(control => control.dataset?.analysisRunId === runId);
+  if (button && !matchingButtons.includes(button)) matchingButtons.push(button);
+  const originalControls = matchingButtons.map(control => ({
+    control,
+    disabled: control.disabled,
+    textContent: control.textContent,
+  }));
+  for (const control of matchingButtons) {
+    control.disabled = true;
+    control.textContent = 'Cancelling…';
+  }
+  cancellingAnalysisRuns.add(runId);
+  clearNotice();
+
+  try {
+    const response = await api('analysis/cancel', {id: runId});
+    const terminalRun = response?.analysis_run;
+    if (!terminalRun?.id || !isAnalysisRun(terminalRun)) {
+      throw new Error('The exposure analysis could not be cancelled.');
+    }
+    mergeAnalysisRun(terminalRun);
+    if (isTerminalAnalysisRun(terminalRun)) trackedAnalysisRuns.delete(runId);
+
+    let refreshError = null;
+    try {
+      await refresh();
+    } catch (error) {
+      refreshError = error;
+    }
+    // The cancel response is authoritative even if a remote state mirror was
+    // a fraction behind the local durable queue during the refresh.
+    mergeAnalysisRun(terminalRun);
+    if (currentView === 'analysis') await viewAnalysis();
+
+    if (terminalRun.status === 'cancelled') {
+      const suffix = refreshError ? ` Workspace refresh will retry automatically: ${refreshError.message}` : '';
+      notice(`${analysisRunProgressText(terminalRun)} Completed company results were kept.${suffix}`, 'warning');
+    } else {
+      notice(`The analysis had already finished. ${analysisRunProgressText(terminalRun)}`, 'info');
+    }
+  } catch (error) {
+    for (const {control, disabled, textContent} of originalControls) {
+      control.disabled = disabled;
+      control.textContent = textContent;
+    }
+    showAlert(`Could not cancel exposure analysis: ${error.message}`, 'Analysis cancellation failed', { searchCompletion: true });
+  } finally {
+    cancellingAnalysisRuns.delete(runId);
+  }
+};
 
 window.rerunCompanyAnalysis = async function(companyId, button) {
   const themeId = selectedDashboardThemeId;

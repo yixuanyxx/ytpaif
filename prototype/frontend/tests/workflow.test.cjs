@@ -1061,13 +1061,76 @@ test('Active batch locks only its companies and lets an unrelated failed stock r
   const retryStart=html.indexOf('Retry stock');
   const retryRow=html.slice(retryStart,html.indexOf('</tr>',retryStart));
   assert.match(node('#page-actions').innerHTML,/Analysing companies/);
-  assert.match(activeRow,/disabled[\s\S]*Analysing…/);
+  assert.match(activeRow,/Analysing…[\s\S]*data-analysis-run-id="active-a"[\s\S]*Cancel/);
   assert.match(retryRow,/↻ Retry/);
   assert.doesNotMatch(retryRow,/onclick="rerunCompanyAnalysis\('b', this\)" disabled/);
   await run("window.rerunCompanyAnalysis('b', {disabled:false,textContent:'↻ Retry'})");
   assert.equal(run('unrelatedRetryRequest.path'),'analysis/start');
   assert.deepEqual(JSON.parse(run('JSON.stringify(unrelatedRetryRequest.data)')),
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['b'],force_recalculate:true});
+});
+test('Active bulk analysis exposes top and row cancel controls and stops the durable job',async()=>{
+  const {run,node,context}=setup();
+  context.setTimeout=()=>1;
+  run(`state.companies=[{id:'a',name:'TSMC'},{id:'b',name:'Samsung'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'}]}];
+    state.source_summaries=[{company_id:'a',count:2},{company_id:'b',count:2}];
+    state.search_runs=[{id:'bulk-active',job_type:'analysis',status:'running',phase:'analysing',
+      theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b'],companies_completed:[]}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';
+    currentView='analysis'; trackedAnalysisRuns.add('bulk-active');`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-actions').innerHTML,/id="btn-cancel-analysis"[\s\S]*data-analysis-run-id="bulk-active"/);
+  assert.equal((node('#page-content').innerHTML.match(/Cancel batch/g)||[]).length,2);
+
+  const controls=[0,1,2].map(()=>({dataset:{analysisRunId:'bulk-active'},disabled:false,textContent:'Cancel batch'}));
+  context.document.querySelectorAll=selector=>selector==='[data-analysis-run-id]'?controls:[];
+  run(`let cancelRequest; api=async(path,data)=>{
+    cancelRequest={path,data,allDisabled:[...document.querySelectorAll('[data-analysis-run-id]')].every(button=>button.disabled)};
+    return {analysis_run:{id:'bulk-active',job_type:'analysis',status:'cancelled',phase:'analysing',
+      theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b'],companies_completed:['a']}};
+  }; refresh=async()=>{};`);
+  await run("window.cancelAnalysisRun('bulk-active', document.querySelectorAll('[data-analysis-run-id]')[1])");
+  assert.equal(run('cancelRequest.path'),'analysis/cancel');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(cancelRequest.data)')),{id:'bulk-active'});
+  assert.equal(run('cancelRequest.allDisabled'),true);
+  assert.equal(run("trackedAnalysisRuns.has('bulk-active')"),false);
+  assert.doesNotMatch(node('#page-actions').innerHTML,/btn-cancel-analysis/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Cancel batch/);
+  assert.match(node('#notice-area').innerHTML,/Analysis cancelled.*1 of 2 companies processed.*Completed company results were kept/);
+});
+test('Top and per-stock cancel controls target the jobs they describe',async()=>{
+  const {run,node}=setup();
+  run(`state.companies=[{id:'a',name:'Bulk stock'},{id:'b',name:'Queued stock'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'}]}];
+    state.source_summaries=[{company_id:'a',count:2},{company_id:'b',count:2}];
+    state.search_runs=[
+      {id:'bulk-running',job_type:'analysis',status:'running',phase:'analysing',theme_id:'theme-a',portfolio_id:'core',company_ids:['a','another'],companies_completed:[]},
+      {id:'stock-queued',job_type:'analysis',status:'running',phase:'queued',theme_id:'theme-a',portfolio_id:'core',company_ids:['b'],companies_completed:[]}
+    ]; state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-actions').innerHTML,/data-analysis-run-id="bulk-running"[\s\S]*Cancel analysis/);
+  const html=node('#page-content').innerHTML;
+  const bulkRow=html.slice(html.indexOf('Bulk stock'),html.indexOf('</tr>',html.indexOf('Bulk stock')));
+  const stockRow=html.slice(html.indexOf('Queued stock'),html.indexOf('</tr>',html.indexOf('Queued stock')));
+  assert.match(bulkRow,/cancelAnalysisRun\('bulk-running',[\s\S]*Cancel batch/);
+  assert.match(stockRow,/cancelAnalysisRun\('stock-queued',[\s\S]*>\s*Cancel\s*</);
+});
+test('Analysis cancellation errors restore the clicked control',async()=>{
+  const {run,node,context}=setup();
+  node('#alert-modal').showModal=()=>{};
+  node('#alert-modal-ok').focus=()=>{};
+  run(`state.search_runs=[{id:'analysis-error',job_type:'analysis',status:'running',phase:'analysing',
+    theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],companies_completed:[]}];
+    api=async()=>{throw new Error('network unavailable')};`);
+  const button={dataset:{analysisRunId:'analysis-error'},disabled:false,textContent:'Cancel'};
+  context.contextButton=button;
+  await run("window.cancelAnalysisRun('analysis-error', contextButton)");
+  assert.equal(button.disabled,false);
+  assert.equal(button.textContent,'Cancel');
+  assert.match(node('#alert-modal-message').textContent,/Could not cancel exposure analysis: network unavailable/);
 });
 test('Analysis polling refreshes terminal results and keeps per-company failures visible',async()=>{
   const {run,node,context} = setup();

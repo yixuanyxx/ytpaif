@@ -81,6 +81,20 @@ def _unique_node_id(base, used):
     return candidate
 
 def put(kind, record):
+    if kind == 'search_runs' and isinstance(record, dict) and record.get('id'):
+        # The local queue owns job lifecycle state. A worker may have passed
+        # its first cancellation check immediately before the user cancels,
+        # then arrive here with an older ``running`` checkpoint. Mirror the
+        # durable cancelled record instead so that remote state cannot regress.
+        try:
+            import source_jobs
+            current, _ = source_jobs.Queue().job(record['id'])
+            if current.get('status') == 'cancelled' and record.get('status') != 'cancelled':
+                record = current
+        except (OSError, TypeError, ValueError):
+            # Some synchronous/legacy run records are not queue-backed. Their
+            # normal persistence path must remain available.
+            pass
     saved = store.put(kind, record)
     if kind == 'sources':
         source_cache.save_sources_to_redis([record])
@@ -375,6 +389,12 @@ def analysis_start(d):
 def analysis_run(d):
     import analysis_jobs
     return analysis_jobs.status(d)
+
+
+def analysis_cancel(d):
+    import analysis_jobs
+    import sys
+    return analysis_jobs.cancel(sys.modules[__name__], d)
 
 
 def company_source_records(company_id):
@@ -1883,6 +1903,7 @@ def _dispatch(path, d):
     if path == '/api/financials/populate': return populate_company_financials(d)
     if path == '/api/financials/cancel': return cancel_company_financials(d)
     if path == '/api/analysis/start': return analysis_start(d)
+    if path == '/api/analysis/cancel': return analysis_cancel(d)
     raise ValueError('Unknown API endpoint')
 
 def dispatch(path, d):

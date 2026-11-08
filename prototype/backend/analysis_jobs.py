@@ -146,6 +146,36 @@ def status(data):
     return {'analysis_run': run}
 
 
+def cancel(app, data):
+    """Durably cancel one queued or running exposure-analysis job.
+
+    Resolve and validate the record before changing it so this endpoint can
+    never be used to cancel a financial or source-search job whose identifier
+    happens to be known by the caller. ``Queue.cancel`` performs the actual
+    terminal transition under a write lock and is idempotent for jobs that
+    already finished.
+    """
+    run_id = str(data.get('id') or '').strip()
+    if not run_id:
+        raise ValueError('Analysis run ID is required')
+    queue = source_jobs.Queue()
+    try:
+        run, _ = queue.job(run_id)
+    except (TypeError, ValueError):
+        raise ValueError('Analysis run not found') from None
+    if run.get('job_type') != 'analysis':
+        raise ValueError('Analysis run not found')
+    run = queue.cancel(run_id, 'Analysis cancelled by user.')
+    # Keep the shared state mirror useful across deployments, while treating
+    # the local queue transition above as authoritative. Cancellation must
+    # still succeed when the remote store is temporarily unavailable.
+    try:
+        app.put('search_runs', run)
+    except Exception:
+        pass
+    return {'analysis_run': run}
+
+
 def _quota_error(value):
     """Recognise provider quota failures which should halt an 80-row run."""
     text = str(value or '').lower()

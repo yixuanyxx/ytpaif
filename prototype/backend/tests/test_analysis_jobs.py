@@ -1,5 +1,7 @@
 """Durable thematic-exposure analysis job tests."""
 import copy
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -278,6 +280,79 @@ class AnalysisJobsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'not found'):
                 analysis_jobs.status({'id': 'not-analysis'})
 
+    def test_cancel_marks_active_analysis_terminal_in_the_durable_queue(self):
+        run = self._run()
+        run.update(
+            results={'a': {'status': 'success', 'case_id': 'case-a'}},
+            outcomes={'a': {'status': 'success', 'case_id': 'case-a'}},
+            companies_completed=['a'], analysed_count=1, calculated_count=1,
+            reused_count=0, failed_count=0,
+        )
+        self.queue.enqueue(run, [])
+        with patch.object(analysis_jobs.source_jobs, 'Queue', return_value=self.queue):
+            response = analysis_jobs.cancel(self.app, {'id': '  analysis-test  '})
+        saved, _ = self.queue.job('analysis-test')
+        self.assertEqual(response['analysis_run']['status'], 'cancelled')
+        self.assertEqual(saved['status'], 'cancelled')
+        self.assertEqual(saved['cancel_reason'], 'Analysis cancelled by user.')
+        self.assertEqual(saved['results'], run['results'])
+        self.assertEqual(saved['outcomes'], run['outcomes'])
+        self.assertEqual(saved['companies_completed'], ['a'])
+        self.assertEqual((saved['analysed_count'], saved['calculated_count'],
+                          saved['reused_count'], saved['failed_count']), (1, 1, 0, 0))
+        self.assertEqual(self.store.get('search_runs', run['id'])['status'], 'cancelled')
+        self.assertIsNone(self.queue.next_job())
+
+    def test_cancel_cannot_target_another_durable_job_type(self):
+        financial = {
+            'id': 'financial-running', 'job_type': 'financials',
+            'status': 'running', 'portfolio_id': 'portfolio',
+        }
+        self.queue.enqueue(financial, [])
+        with patch.object(analysis_jobs.source_jobs, 'Queue', return_value=self.queue):
+            with self.assertRaisesRegex(ValueError, '^Analysis run not found$'):
+                analysis_jobs.cancel(self.app, {'id': financial['id']})
+        saved, _ = self.queue.job(financial['id'])
+        self.assertEqual(saved['status'], 'running')
+        self.assertIsNotNone(self.queue.next_job())
+
+    def test_cancel_validates_missing_and_unknown_run_ids(self):
+        with patch.object(analysis_jobs.source_jobs, 'Queue', return_value=self.queue):
+            with self.assertRaisesRegex(ValueError, '^Analysis run ID is required$'):
+                analysis_jobs.cancel(self.app, {'id': '  '})
+            with self.assertRaisesRegex(ValueError, '^Analysis run not found$'):
+                analysis_jobs.cancel(self.app, {'id': 'missing'})
+
+    def test_cancel_is_idempotent_after_an_analysis_has_finished(self):
+        run = self._run()
+        self.queue.enqueue(run, [])
+        self.queue.save({**run, 'status': 'completed', 'phase': 'finished'})
+        with patch.object(analysis_jobs.source_jobs, 'Queue', return_value=self.queue):
+            response = analysis_jobs.cancel(self.app, {'id': run['id']})
+        saved, _ = self.queue.job(run['id'])
+        self.assertEqual(response['analysis_run']['status'], 'completed')
+        self.assertEqual(saved['status'], 'completed')
+        self.assertNotIn('cancel_reason', saved)
+
+    def test_cancel_succeeds_when_the_remote_mirror_is_unavailable(self):
+        run = self._run()
+        self.queue.enqueue(run, [])
+        unavailable = SimpleNamespace(put=Mock(side_effect=RuntimeError('offline')))
+        with patch.object(analysis_jobs.source_jobs, 'Queue', return_value=self.queue):
+            response = analysis_jobs.cancel(unavailable, {'id': run['id']})
+        self.assertEqual(response['analysis_run']['status'], 'cancelled')
+        self.assertEqual(self.queue.job(run['id'])[0]['status'], 'cancelled')
+
+    def test_remote_mirror_cannot_regress_a_cancelled_run_to_running(self):
+        run = self._run()
+        self.queue.enqueue(run, [])
+        cancelled = self.queue.cancel(run['id'], 'Analysis cancelled by user.')
+        stale = {**run, 'phase': 'analysing', 'analysed_count': 1}
+        with patch.object(app, 'store', self.store), \
+                patch.object(source_jobs, 'Queue', return_value=self.queue):
+            app.put('search_runs', stale)
+        self.assertEqual(self.store.get('search_runs', run['id']), cancelled)
+
     def test_queue_dispatches_analysis_worker(self):
         run = self._run()
         self.queue.enqueue(run, [{'id': 'a', 'name': 'Company A'}])
@@ -317,6 +392,38 @@ class AnalysisStatusHttpTest(unittest.TestCase):
                 patch.object(app, 'analysis_run') as status:
             handler.do_GET()
         status.assert_not_called()
+        self.assertEqual(replies, [({'error': 'Login required'}, 401)])
+
+    def _post_handler(self, body):
+        raw = json.dumps(body).encode()
+        handler = object.__new__(app.Handler)
+        handler.path = '/api/analysis/cancel'
+        handler.headers = {
+            'Host': '127.0.0.1',
+            'Origin': 'http://127.0.0.1',
+            'Cookie': 'session',
+            'Content-Length': str(len(raw)),
+        }
+        handler.rfile = io.BytesIO(raw)
+        replies = []
+        handler.respond = lambda response, status=200, **_: replies.append((response, status))
+        return handler, replies
+
+    def test_post_cancel_dispatches_after_authentication(self):
+        handler, replies = self._post_handler({'id': 'analysis-one'})
+        response = {'analysis_run': {'id': 'analysis-one', 'status': 'cancelled'}}
+        with patch.object(app.app_auth, 'valid', return_value=True), \
+                patch.object(app, 'analysis_cancel', return_value=response) as cancel:
+            handler.do_POST()
+        cancel.assert_called_once_with({'id': 'analysis-one'})
+        self.assertEqual(replies, [(response, 200)])
+
+    def test_post_cancel_requires_authenticated_session(self):
+        handler, replies = self._post_handler({'id': 'analysis-one'})
+        with patch.object(app.app_auth, 'valid', return_value=False), \
+                patch.object(app, 'analysis_cancel') as cancel:
+            handler.do_POST()
+        cancel.assert_not_called()
         self.assertEqual(replies, [({'error': 'Login required'}, 401)])
 
 
