@@ -16,6 +16,11 @@ def source(source_id, url, evidence_ids, source_type='annual_report', **extra):
 
 class SourceConfidenceTest(unittest.TestCase):
     def setUp(self):
+        # Keep these unit tests independent from a developer's local .env.
+        # Individual tests override this explicitly when they exercise Gemini.
+        provider_env = patch.dict(os.environ, {'EXPOSURE_CONFIDENCE_PROVIDER': 'claude'}, clear=False)
+        provider_env.start()
+        self.addCleanup(provider_env.stop)
         self.company = {'name': 'Example Semiconductors', 'bloomberg_ticker': 'EX TT Equity'}
         self.sources = [
             source('filing', 'https://www.sec.gov/Archives/example/report', ['e1']),
@@ -41,12 +46,12 @@ class SourceConfidenceTest(unittest.TestCase):
         self.assertEqual(result['source_confidence_source_ids'], ['filing', 'reuters', 'yahoo'])
         self.assertEqual(len(model.call_args.args[0]['sources']), 3)
 
-    def test_credible_divergent_reporting_schedules_are_yellow(self):
+    def test_credible_divergent_reporting_schedules_are_amber(self):
         with patch.object(source_confidence, 'claude_assess',
-                          return_value=self.assess('yellow', ['filing', 'reuters'], ['yahoo'],
+                          return_value=self.assess('amber', ['filing', 'reuters'], ['yahoo'],
                                                      'Yahoo uses a different reporting schedule.')):
             result = source_confidence.evaluate(self.sources, self.company, self.facts, self.passages)
-        self.assertEqual(result['source_confidence_light'], 'yellow')
+        self.assertEqual(result['source_confidence_light'], 'amber')
         self.assertIn('reporting schedules', result['source_confidence_basis'])
 
     def test_different_reporting_period_cannot_count_for_green(self):
@@ -54,7 +59,7 @@ class SourceConfidenceTest(unittest.TestCase):
         with patch.object(source_confidence, 'claude_assess',
                           return_value=self.assess('green', ['filing', 'reuters', 'yahoo'])):
             result = source_confidence.evaluate(self.sources, self.company, self.facts, self.passages)
-        self.assertEqual(result['source_confidence_light'], 'yellow')
+        self.assertEqual(result['source_confidence_light'], 'amber')
 
     def test_unapproved_third_party_cited_for_revenue_is_red(self):
         self.sources.append(source('blog', 'https://market-rumours.test/article', ['e4'], 'other'))
@@ -79,7 +84,7 @@ class SourceConfidenceTest(unittest.TestCase):
                           return_value=self.assess('green', ['filing'])):
             result = source_confidence.evaluate(one, self.company, self.facts,
                 [{'source_id': 'filing', **e} for e in one[0]['evidence']])
-        self.assertEqual(result['source_confidence_light'], 'yellow')
+        self.assertEqual(result['source_confidence_light'], 'amber')
         self.assertIn('needs at least three', result['source_confidence_basis'])
 
     def test_duplicate_urls_are_one_document_for_green_threshold(self):
@@ -90,7 +95,33 @@ class SourceConfidenceTest(unittest.TestCase):
                           return_value=self.assess('green', ['filing_a', 'filing_b', 'filing_c'])):
             result = source_confidence.evaluate(duplicates, self.company, self.facts,
                 [{'source_id': row['id'], **e} for row in duplicates for e in row['evidence']])
-        self.assertEqual(result['source_confidence_light'], 'yellow')
+        self.assertEqual(result['source_confidence_light'], 'amber')
+
+    def test_ai_search_allowlisted_publishers_are_credible_not_red(self):
+        allowed = [
+            source('capitaliq', 'https://www.capitaliq.com/company/example', ['e1'], 'other'),
+            source('spglobal', 'https://www.spglobal.com/marketintelligence/example', ['e2'], 'other'),
+            source('seekingalpha', 'https://seekingalpha.com/symbol/EX', ['e3'], 'other'),
+        ]
+        facts = {**self.facts, 'denominator_evidence_ids': ['e1', 'e2', 'e3'],
+                 'units': [{**self.facts['units'][0], 'evidence_ids': ['e1', 'e2', 'e3']}]}
+        passages = [{'source_id': row['id'], **e} for row in allowed for e in row['evidence']]
+        with patch.object(source_confidence, 'claude_assess',
+                          return_value=self.assess('green', ['capitaliq', 'spglobal', 'seekingalpha'])):
+            result = source_confidence.evaluate(allowed, self.company, facts, passages)
+        self.assertEqual(result['source_confidence_light'], 'amber')
+        self.assertTrue(all(source_confidence.provenance(row, self.company) == 'approved_search_source'
+                            for row in allowed))
+
+    def test_unapproved_source_is_red_without_waiting_for_a_model(self):
+        self.sources.append(source('blog', 'https://market-rumours.test/article', ['e4'], 'other'))
+        self.facts['units'][0]['evidence_ids'].append('e4')
+        self.passages.append({'source_id': 'blog', **self.sources[-1]['evidence'][0]})
+        with patch.object(source_confidence, 'claude_assess') as model:
+            result = source_confidence.evaluate(self.sources, self.company, self.facts, self.passages)
+        model.assert_not_called()
+        self.assertEqual(result['source_confidence_light'], 'red')
+        self.assertEqual(result['source_confidence_model'], 'deterministic-provenance')
 
     def test_model_cannot_claim_unprovided_source_id(self):
         with patch.object(source_confidence, 'claude_assess',

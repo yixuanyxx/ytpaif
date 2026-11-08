@@ -973,13 +973,37 @@ test('Per-stock rerun uses the latest case result in the queue',async()=>{
     state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'}]}];
     state.source_summaries=[{company_id:'a',count:3}]; state.ai_configured=true;
     state.cases=[
-      {id:'old',theme_id:'theme-a',company_id:'a',created_at:'2026-01-01T00:00:00Z',review_status:'approved',classification_confidence:'low',estimate:{point:.2}},
-      {id:'new',theme_id:'theme-a',company_id:'a',created_at:'2026-01-02T00:00:00Z',review_status:'needs_review',classification_confidence:'high',estimate:{point:.9}}
+      {id:'old',theme_id:'theme-a',company_id:'a',created_at:'2026-01-01T00:00:00Z',review_status:'approved',source_confidence_light:'red',estimate:{point:.2}},
+      {id:'new',theme_id:'theme-a',company_id:'a',created_at:'2026-01-02T00:00:00Z',review_status:'needs_review',source_confidence_light:'green',source_confidence_basis:'Three cited sources agree.',estimate:{point:.9}}
     ]; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/90\.0%[\s\S]*High · 92%[\s\S]*↻ Re-run/);
+  assert.match(html,/90\.0%[\s\S]*dot-green[\s\S]*AI confidence: green[\s\S]*↻ Re-run/);
   assert.doesNotMatch(html,/20\.0%/);
+  assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%/);
+});
+test('Calculate Exposure shows a point percentage and source-confidence dots',async()=>{
+  const {run,node} = setup();
+  run(`state.companies=[
+      {id:'a',name:'TSMC',sedol:'6889106'},
+      {id:'b',name:'Samsung',sedol:'6771720'},
+      {id:'c',name:'Example Co',sedol:'9999999'}
+    ];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'},{company_id:'c'}]}];
+    state.source_summaries=[{company_id:'a',count:3},{company_id:'b',count:3},{company_id:'c',count:3}];
+    state.cases=[
+      {id:'green',theme_id:'theme-a',company_id:'a',review_status:'needs_review',exposure_percent:50,source_confidence_light:'green',source_confidence_basis:'Three trusted sources agree.'},
+      {id:'amber',theme_id:'theme-a',company_id:'b',review_status:'needs_review',estimate:{point:.25},source_confidence_light:'yellow',source_confidence_basis:'Credible sources diverge.'},
+      {id:'red',theme_id:'theme-a',company_id:'c',review_status:'needs_review',estimate:{point:.75},source_confidence_light:'red',source_confidence_basis:'Unapproved website cited.'}
+    ];
+    selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  assert.match(html,/50\.0%[\s\S]*dot-green[\s\S]*AI confidence: green/);
+  assert.match(html,/25\.0%[\s\S]*dot-amber[\s\S]*AI confidence: amber/);
+  assert.match(html,/75\.0%[\s\S]*dot-red[\s\S]*AI confidence: red/);
+  assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
   const {run,node,storage} = setup();

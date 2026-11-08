@@ -222,6 +222,19 @@ function badge(text, cls = 'neutral') {
 function statusDot(color, label) {
   return `<span class="status-indicator"><span class="status-dot-sm dot-${color}"></span>${esc(label)}</span>`;
 }
+function sourceConfidenceDot(light, basis) {
+  // "yellow" remains readable for cases calculated before the amber label was
+  // introduced. The visible UI intentionally remains a dot only; the title
+  // and accessible label explain the result without reintroducing a score.
+  const normalized = String(light || '').toLowerCase() === 'yellow'
+    ? 'amber' : String(light || '').toLowerCase();
+  const color = ['green', 'amber', 'red'].includes(normalized) ? normalized : 'grey';
+  const label = color === 'grey' ? 'not calculated' : normalized;
+  const detail = basis || (color === 'grey'
+    ? 'Re-run the company analysis to calculate source confidence.'
+    : `AI confidence: ${label}.`);
+  return `<span class="status-indicator" title="${esc(detail)}"><span class="status-dot-sm confidence-light-dot dot-${color}" role="img" aria-label="AI confidence: ${esc(label)}"></span></span>`;
+}
 function reviewStatusBadge(s) {
   if (s === 'approved')    return badge('Approved', 'green');
   if (s === 'rejected')    return badge('Rejected', 'red');
@@ -3463,10 +3476,12 @@ async function viewAnalysis() {
               </thead>
               <tbody id="analysis-queue-rows">
                 ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount }) => {
-                  const pt = caseRec?.estimate?.point != null ? pct(caseRec.estimate.point) : (caseRec ? '—' : '');
-                  const conf = caseRec?.classification_confidence || '';
-                  const confDisplay = conf === 'high' ? 'High · 92%' : (conf === 'medium' ? 'Med · 70%' : (conf === 'low' ? 'Low · 35%' : '—'));
-                  const confColor = conf === 'high' ? 'green' : (conf === 'medium' ? 'amber' : (conf === 'low' ? 'red' : 'neutral'));
+                  // A case's single point estimate is the exposure shown in
+                  // this queue. `exposure_percent` preserves the same result
+                  // for older saved cases that do not include nested estimate.
+                  const savedPercent = Number(caseRec?.exposure_percent);
+                  const point = caseRec?.estimate?.point ?? (Number.isFinite(savedPercent) ? savedPercent / 100 : null);
+                  const pt = point != null ? pct(point) : (caseRec ? '—' : '');
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
 
                   return `
@@ -3485,7 +3500,7 @@ async function viewAnalysis() {
                         ${pt || '<span class="text-muted text-small">—</span>'}
                       </td>
                       <td>
-                        ${caseRec ? `<span class="badge ${confColor}" style="font-size:10.5px">${confDisplay}</span>` : statusDot(color, status)}
+                        ${caseRec ? sourceConfidenceDot(caseRec.source_confidence_light, caseRec.source_confidence_basis) : sourceConfidenceDot('', '')}
                       </td>
                       <td style="text-align:right" onclick="event.stopPropagation()">
                         ${hasSrc ? `

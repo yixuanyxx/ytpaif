@@ -12,8 +12,13 @@ from urllib.request import Request, urlopen
 
 import exchange_filings
 import gemini_fallback
+import source_discovery
 
 
+# These are the higher-trust publishers that can contribute to a green result.
+# The broader source-search allowlist is deliberately handled below so a source
+# accepted by the search workflow is never incorrectly labelled as an
+# unverified third-party website.
 APPROVED_PUBLISHERS = ('finance.yahoo.com', 'reuters.com', 'bloomberg.com')
 OFFICIAL_FILINGS = ('sec.gov',)
 ISSUER_BASIS = ('official regulator filing', 'official exchange issuer directory',
@@ -83,6 +88,23 @@ def _issuer_roots(sources, company):
     return roots
 
 
+def _approved_by_source_search(url, company):
+    """Whether this URL is on the canonical AI-search allowlist.
+
+    Source discovery is the authority for approved publishers, issuer/IR
+    domains and exchange filing authorities. Keeping this predicate shared
+    prevents the confidence checker from treating a document that the search
+    workflow was allowed to collect as an unverified third-party source.
+    """
+    host = _host(url)
+    if not host:
+        return False
+    extra = tuple(x.strip() for x in os.environ.get(
+        'EXPOSURE_CONFIDENCE_APPROVED_DOMAINS', '').split(',') if x.strip())
+    return (source_discovery.approved_source_url(url, company)
+            or any(_matches(host, domain) for domain in extra))
+
+
 def provenance(source, company, issuer_roots=()):
     """Classify source origin without trusting an editable source-type label."""
     url = str(source.get('url') or '')
@@ -93,8 +115,7 @@ def provenance(source, company, issuer_roots=()):
         return 'uploaded_unverified_origin'
     if not host:
         return 'unverified_third_party'
-    extra = tuple(x.strip() for x in os.environ.get('EXPOSURE_CONFIDENCE_APPROVED_DOMAINS', '').split(',') if x.strip())
-    if any(_matches(host, domain) for domain in (*APPROVED_PUBLISHERS, *extra)):
+    if any(_matches(host, domain) for domain in APPROVED_PUBLISHERS):
         return 'approved_publisher'
     if (source.get('source_type') in FILING_TYPES
             and any(_matches(host, domain) for domain in (*OFFICIAL_FILINGS, *exchange_filings.domains(company)))):
@@ -113,6 +134,12 @@ def provenance(source, company, issuer_roots=()):
     if (source.get('source_type') in FILING_TYPES and source.get('link_status') == 'verified'
             and source.get('ai_confidence_basis') in ISSUER_BASIS):
         return 'issuer_filing'
+    if _approved_by_source_search(url, company):
+        # Capital IQ, S&P Global, Seeking Alpha, explicitly recorded issuer
+        # sites and equivalent AI-search-approved sources are credible enough
+        # for amber, but only the higher-trust publishers and filings above can
+        # make a three-source result green.
+        return 'approved_search_source'
     return 'unverified_third_party'
 
 
@@ -158,17 +185,17 @@ def claude_assess(payload):
     anthropic_api = _matches((parsed.hostname or '').lower(), 'anthropic.com')
     prompt = (
         'Assess source confidence for the extracted company revenue and thematic classification. '
-        'Return JSON only: {"light":"green|yellow|red","basis":"specific concise reason",'
+        'Return JSON only: {"light":"green|amber|red","basis":"specific concise reason",'
         '"agreeing_source_ids":[],"divergent_source_ids":[]}. '
         'Green only if at least three independent APPROVED sources agree on the material revenue numbers '
         'for the same reporting period. Approved means Yahoo Finance, Reuters, Bloomberg or verified company '
         'filings from the issuer/official regulator. Three passages from one document count as ONE source. '
-        'Yellow (amber) when credible approved sources disagree, their reporting schedules differ, or fewer '
+        'Amber when credible approved sources disagree, their reporting schedules differ, or fewer '
         'than three independent approved sources corroborate the relevant figures. Red when extracted data '
         'relies on an unverified third-party website outside the provisional approved list. '
         'Only list source IDs supplied in sources; do not infer agreement just because sources share a publisher '
         'or cite a company. Compare fiscal periods, currencies and actual material figures. If agreement is '
-        'not demonstrated, return yellow rather than green. The exposure range and its model confidence are '
+        'not demonstrated, return amber rather than green. The exposure range and its model confidence are '
         'different from this source-provenance traffic light.\n' + json.dumps(payload, ensure_ascii=False))
     if anthropic_api:
         headers = {'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json'}
@@ -206,17 +233,17 @@ def gemini_assess(payload):
         raise ValueError('Gemini endpoint must use HTTPS')
     prompt = (
         'Assess source confidence for the extracted company revenue and thematic classification. '
-        'Return JSON only: {"light":"green|yellow|red","basis":"specific concise reason",'
+        'Return JSON only: {"light":"green|amber|red","basis":"specific concise reason",'
         '"agreeing_source_ids":[],"divergent_source_ids":[]}. '
         'Green only if at least three independent APPROVED sources agree on the material revenue numbers '
         'for the same reporting period. Approved means Yahoo Finance, Reuters, Bloomberg or verified company '
         'filings from the issuer/official regulator. Three passages from one document count as ONE source. '
-        'Yellow (amber) when credible approved sources disagree, their reporting schedules differ, or fewer '
+        'Amber when credible approved sources disagree, their reporting schedules differ, or fewer '
         'than three independent approved sources corroborate the relevant figures. Red when extracted data '
         'relies on an unverified third-party website outside the provisional approved list. '
         'Only list source IDs supplied in sources; do not infer agreement just because sources share a publisher '
         'or cite a company. Compare fiscal periods, currencies and actual material figures. If agreement is '
-        'not demonstrated, return yellow rather than green. The exposure range and its model confidence are '
+        'not demonstrated, return amber rather than green. The exposure range and its model confidence are '
         'different from this source-provenance traffic light.\n' + json.dumps(payload, ensure_ascii=False))
     body = {'model': model, 'response_format': {'type': 'json_object'},
             'messages': [{'role': 'user', 'content': prompt}]}
@@ -249,32 +276,52 @@ def evaluate(sources, company, facts, passages):
                           'revenue': unit.get('revenue'), 'evidence_ids': unit.get('evidence_ids')}
                          for unit in facts.get('units') or []],
                'sources': used}
-    assessment, model = assess(payload)
     source_ids = {source['id'] for source in used}
+    trusted = {source['id'] for source in used if source['provenance'] in
+               ('approved_publisher', 'official_filing', 'issuer_filing')}
+    unapproved = [source for source in used if source['provenance'] == 'unverified_third_party']
+
+    # Provenance alone is enough to decide red. Do this before an optional LLM
+    # check so an unapproved cited website cannot delay or prevent an otherwise
+    # valid exposure calculation.
+    if unapproved:
+        hosts = ', '.join(sorted({source['host'] or 'unverified URL' for source in unapproved}))
+        assessment = {
+            'light': 'red',
+            'basis': f'Cited revenue relies on unapproved third-party source(s): {hosts}.',
+            'agreeing_source_ids': [],
+            'divergent_source_ids': [],
+        }
+        return {
+            'source_confidence_light': 'red',
+            'source_confidence_basis': assessment['basis'],
+            'source_confidence_model': 'deterministic-provenance',
+            'source_confidence_source_ids': sorted(source_ids),
+            'source_confidence_assessment': assessment,
+        }
+
+    assessment, model = assess(payload)
     for field in ('agreeing_source_ids', 'divergent_source_ids'):
         ids = assessment.get(field)
         if not isinstance(ids, list) or any(not isinstance(sid, str) or sid not in source_ids for sid in ids):
             raise ValueError('Claude source confidence cited an invalid source ID')
-    if assessment.get('light') not in ('green', 'yellow', 'red') or not str(assessment.get('basis') or '').strip():
+    # Accept yellow from historical model prompts, but persist the user-facing
+    # vocabulary as green, amber or red.
+    model_light = 'amber' if assessment.get('light') == 'yellow' else assessment.get('light')
+    if model_light not in ('green', 'amber', 'red') or not str(assessment.get('basis') or '').strip():
         raise ValueError('Claude source confidence requires a traffic light and reason')
-    trusted = {source['id'] for source in used if source['provenance'] in
-               ('approved_publisher', 'official_filing', 'issuer_filing')}
-    unapproved = [source for source in used if source['provenance'] == 'unverified_third_party']
+    assessment = {**assessment, 'light': model_light}
     target_period = _period_key(facts.get('period'))
     agreeing = {source['id'] for source in used
                 if source['id'] in set(assessment['agreeing_source_ids']) & trusted
                 and target_period and _period_key(source['period']) == target_period}
     agreeing_documents = {source['document_key'] for source in used if source['id'] in agreeing}
     divergent = set(assessment['divergent_source_ids'])
-    if unapproved:
-        light = 'red'
-        hosts = ', '.join(sorted({source['host'] or 'unverified URL' for source in unapproved}))
-        basis = f'Cited revenue relies on unapproved third-party source(s): {hosts}. ' + assessment['basis']
-    elif (assessment['light'] == 'green' and len(agreeing_documents) >= 3 and not divergent):
+    if (assessment['light'] == 'green' and len(agreeing_documents) >= 3 and not divergent):
         light = 'green'
         basis = f'{len(agreeing_documents)} independent approved cited documents agree on the material figures. ' + assessment['basis']
     else:
-        light = 'yellow'
+        light = 'amber'
         if divergent:
             reason = 'Credible cited sources diverge or use different reporting schedules. '
         elif len(agreeing_documents) < 3:
