@@ -884,7 +884,7 @@ test('Financial citations count documents separately from source categories',()=
     {financial_facts:Array(2).fill({metric:'revenue',display:'USD 100 million'})}, {}
   ], []).revCitation`), 'net revenue usd 100 million (1/2 documents)');
 });
-test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
+test('Unified Step 4 renders the queue and bulk analysis controls',async()=>{
   const {run,node} = setup();
   run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
     state.portfolio_imports=[
@@ -901,7 +901,7 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   assert.match(node('#page-content').innerHTML,/Company-level Exposure/);
   assert.doesNotMatch(node('#page-content').innerHTML,/analysis-company-search|Search company name/);
   assert.doesNotMatch(node('#page-content').innerHTML,/max-height:480px;overflow-y:auto/);
-  assert.match(node('#page-content').innerHTML,/case-detail-panel/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/case-detail-panel|Review →|Review decision/);
   assert.match(node('#page-content').innerHTML,/<option value="core" selected>Asia Core<\/option>/);
   assert.match(node('#page-content').innerHTML,/TSMC/);
   assert.match(node('#page-content').innerHTML,/3 docs/);
@@ -910,7 +910,7 @@ test('Unified Step 4 renders queue, review workspace and bulk button',async()=>{
   assert.match(node('#page-content').innerHTML,/Korea Growth/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Samsung/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Targeted passage analysis|Create manual case|btn-open-manual/);
-  assert.match(node('#page-content').innerHTML,/Analyse all ready companies/);
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies/);
   assert.doesNotMatch(node('#page-content').innerHTML,/Confidence color guide|Revenue figures align across all credible sources/);
   const sidebar = fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');
   assert.match(sidebar,/<strong>Calculate Exposure<\/strong>/);
@@ -930,7 +930,7 @@ test('Analysis view omits manual AI analysis and stage pipeline cards',async()=>
   await run('viewAnalysis()');
   const html = node('#page-content').innerHTML;
   assert.doesNotMatch(html,/Run AI analysis|Evidence passages|Stage pipeline|Fact<br>Extraction|Awaiting<br>Review/);
-  assert.match(html,/Analyse all ready companies/);
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies/);
   assert.match(html,/Ready/);
 });
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
@@ -985,20 +985,17 @@ test('Company source rows expand and collapse',()=>{
   run("window.toggleSourceRow('a')"); assert.equal(node('#src-detail-a').style.display,'table-row');
   run("window.toggleSourceRow('a')"); assert.equal(node('#src-detail-a').style.display,'none');
 });
-test('Case tiles show point, bounds and rubric percentage; unknown point stays a dash',()=>{
+test('Calculate Exposure omits opened case-detail and review cards',async()=>{
   const {run,node}=setup();
-  run(`state.cases=[{id:'case',company_id:'a',classification_confidence:'high', review_status:'approved',case:{units:[]},estimate:{point:0.4,lower:0.3,upper:0.5,issues:[]}}]; window.openCase('case')`);
-  let html=node('#case-detail-panel').innerHTML;
-  for(const label of ['Point estimate','40.0%','30.0% – 50.0%','92%','High Confidence (3/3)']) assert.ok(html.includes(label),label);
-  run(`state.cases[0].estimate.point=null; window.openCase('case')`);
-  html=node('#case-detail-panel').innerHTML; assert.match(html,/font-size:26px">—/);
-});
-
-test('Case detail omits deprecated AI checker and confidence rubric cards',()=>{
-  const {run,node}=setup();
-  run(`state.cases=[{id:'case',company_id:'a',classification_confidence:'high',case:{units:[]},estimate:{point:.5,lower:.5,upper:.5}}]; state.companies=[{id:'a',name:'TSMC'}]; window.openCase('case')`);
-  const html=node('#case-detail-panel').innerHTML;
-  assert.doesNotMatch(html,/AI Checker Verification|Run AI Checker|Claude Sonnet 5|AI Confidence Score & Rubric|Rubric Evaluation & Evidence Basis/);
+  run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:3}];
+    state.cases=[{id:'case',theme_id:'theme-a',company_id:'a',classification_confidence:'high',review_status:'needs_review',case:{units:[{activity:'High Performance Computing'}]},estimate:{point:.4,lower:.3,upper:.5}}];
+    selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  assert.match(html,/Awaiting review/);
+  assert.doesNotMatch(html,/case-detail-panel|Point estimate|Revenue units|Review decision|Save review decision/);
 });
 
 test('Banners clear when changing views and stay cleared on return',()=>{

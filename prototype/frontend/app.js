@@ -3366,9 +3366,6 @@ async function viewAnalysis() {
       </div>
     </div>`;
 
-  // Default selected case: first pending case, or newest case, or null
-  const selectedCaseId = cases.find(c => c.review_status === 'needs_review')?.id || cases.at(-1)?.id || null;
-
   $('#page-content').innerHTML = `
     <div class="dashboard-selectors analysis-selectors">
       <div class="dashboard-setup-header">
@@ -3392,7 +3389,7 @@ async function viewAnalysis() {
         </select>
       </label>
     </div>
-    <div class="grid-1-2" style="align-items:start">
+    <div>
 
       <!-- Left Column: Queue & Cases -->
       <div class="panel">
@@ -3419,7 +3416,7 @@ async function viewAnalysis() {
                   <th>Sources</th>
                   <th class="td-num">Exposure</th>
                   <th>AI confidence</th>
-                  <th style="text-align:right">Action</th>
+                  <th style="text-align:right">Next step</th>
                 </tr>
               </thead>
               <tbody id="analysis-queue-rows">
@@ -3431,8 +3428,8 @@ async function viewAnalysis() {
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
 
                   return `
-                    <tr class="queue-row ${rowClass}" style="cursor:${caseRec || !hasSrc ? 'pointer' : 'default'};border-bottom:1px solid var(--slate-100)"
-                      onclick="${caseRec ? `openCase('${esc(caseRec.id)}')` : (!hasSrc ? `setView('sources')` : '')}">
+                    <tr class="queue-row ${rowClass}" style="cursor:${!hasSrc ? 'pointer' : 'default'};border-bottom:1px solid var(--slate-100)"
+                      onclick="${!hasSrc ? `setView('sources')` : ''}">
                       <td class="td-company">
                         <div style="font-weight:650;color:var(--slate-900)">${esc(c.name)}</div>
                         <div class="ticker" style="font-size:10.5px">${esc(c.bloomberg_ticker || c.id)}</div>
@@ -3450,10 +3447,7 @@ async function viewAnalysis() {
                       </td>
                       <td style="text-align:right" onclick="event.stopPropagation()">
                         ${caseRec ? `
-                          <button class="btn btn-sm ${caseRec.review_status==='needs_review'?'btn-primary':'btn-secondary'}"
-                            onclick="openCase('${esc(caseRec.id)}')">
-                            Review →
-                          </button>
+                          ${reviewStatusBadge(caseRec.review_status)}
                         ` : (hasSrc ? `
                           <span class="badge badge-neutral">Ready</span>
                         ` : `
@@ -3470,20 +3464,6 @@ async function viewAnalysis() {
             <h3>No companies yet</h3>
             <p><a href="#" data-goto="portfolio">Import a portfolio</a> to add companies for analysis.</p>
           </div>`}
-
-      </div>
-
-      <!-- Right Column: Case Review & Auditor Workspace -->
-      <div id="case-detail-panel">
-        ${selectedCaseId ? '' : `
-          <div class="panel">
-            <div class="empty-state" style="padding:40px 16px">
-              <div class="empty-icon">✓</div>
-              <h3>Select a case or company</h3>
-              <p>Click a case from the queue on the left to review, or click "Analyse all ready companies" above.</p>
-            </div>
-          </div>`}
-      </div>
     </div>`;
 
   $('#analysis-theme-select')?.addEventListener('change', event => {
@@ -3522,10 +3502,6 @@ async function viewAnalysis() {
         res.errors?.length ? 'warning' : 'success');
       render();
     }, 'Batch analyzing…');
-  }
-
-  if (selectedCaseId) {
-    openCase(selectedCaseId);
   }
 }
 
