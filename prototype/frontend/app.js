@@ -3701,17 +3701,20 @@ async function viewAnalysis() {
     const analysisState = caseRec && !rawAnalysisState?.error ? null : rawAnalysisState;
     const retryable = ['Analysis failed', 'Analysis incomplete', 'Analysis cancelled'].includes(rawAnalysisState?.label)
       && !rawAnalysisState?.active;
+    const calculationOutdated = Boolean(caseRec?.estimate?.calculation_version
+      && state.calculation_version
+      && caseRec.estimate.calculation_version !== state.calculation_version);
     // Missing-source rows and saved zero/unknown cases are deliberately
     // eligible: the backend can discover approved numeric web evidence before
     // analysis. A recent completed fallback is suppressed until its retry
     // window expires so the bulk button does not immediately requeue it.
     const fallbackNeeded = needsExposureWebFallback(caseRec);
     const readyForBulk = !demoMode && !rawAnalysisState?.active
-      && (retryable || fallbackNeeded || (status === 'Ready to analyse' && !rawAnalysisState));
+      && (retryable || calculationOutdated || fallbackNeeded || (status === 'Ready to analyse' && !rawAnalysisState));
     const companyAnalysisInProgress = rawAnalysisState?.active === true;
     return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState,
       companyAnalysisRun: latestCompanyRun,
-      retryable, fallbackNeeded, readyForBulk, companyAnalysisInProgress };
+      retryable, calculationOutdated, fallbackNeeded, readyForBulk, companyAnalysisInProgress };
   });
 
   // Send new and retryable source-ready companies. An active job is never
@@ -3722,10 +3725,11 @@ async function viewAnalysis() {
   const readyCount = readyCompanyIds.length;
   // A failed rerun may leave an older reusable case. Force this batch to
   // recalculate when one of its retry targets still has a saved case.
-  const forceBulkRecalculate = companyProgress.some(p => p.readyForBulk && p.retryable && p.caseRec);
+  const forceBulkRecalculate = companyProgress.some(p => p.readyForBulk
+    && (p.retryable || p.calculationOutdated) && p.caseRec);
 
   $('#page-actions').innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <div class="analysis-page-actions">
       <label class="dashboard-demo-toggle"><input type="checkbox" id="analysis-demo-toggle" ${demoMode?'checked':''}><span>Demo data</span></label>
       ${demoMode?'<span class="badge badge-amber">Illustrative</span>':theme ? `
         <button class="btn btn-primary" id="btn-analyze-all" ${!state.ai_configured || !readyCount || analysisInProgress ? 'disabled' : ''} style="box-shadow:0 2px 4px rgba(13,148,136,0.2)">
@@ -3789,7 +3793,14 @@ async function viewAnalysis() {
 
         ${companyProgress.length > 0 ? `
           <div class="table-wrap" style="margin-bottom:16px">
-            <table style="width:100%;font-size:12.5px">
+            <table class="analysis-queue-table">
+              <colgroup>
+                <col class="analysis-company-col">
+                <col class="analysis-sources-col">
+                <col class="analysis-exposure-col">
+                <col class="analysis-confidence-col">
+                <col class="analysis-action-col">
+              </colgroup>
               <thead>
                 <tr>
                   <th>Company</th>
@@ -3843,9 +3854,9 @@ async function viewAnalysis() {
                       <td style="text-align:center">
                         ${confidence}
                       </td>
-                      <td style="text-align:right" onclick="event.stopPropagation()">
+                      <td class="analysis-action-cell" onclick="event.stopPropagation()">
                         ${demoMode && caseRec ? `<button class="btn btn-sm btn-secondary" style="min-width:104px" onclick="openCase('${esc(caseRec.id)}')">Review →</button>` : companyAnalysisInProgress ? `
-                            <button class="btn btn-sm btn-danger"
+                            <button class="btn btn-sm btn-danger analysis-row-action"
                               data-analysis-run-id="${esc(companyAnalysisRun.id)}"
                               data-analysis-company-id="${esc(c.id)}"
                               onclick="cancelCompanyAnalysis('${esc(companyAnalysisRun.id)}', '${esc(c.id)}', this)"
@@ -3854,11 +3865,11 @@ async function viewAnalysis() {
                               Cancel
                             </button>
                           ` : `
-                            <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}" style="min-width:104px"
+                            <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'} analysis-row-action"
                               onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme ? 'disabled' : ''}>
                               ${retryable ? 'Retry →' : (caseRec ? 'Re-run →' : 'Analyse →')}
                             </button>
-                            ${!hasSrc ? `<button class="btn btn-sm btn-secondary" style="min-width:104px" onclick="openManualUploadForCompany('${esc(c.id)}')">Upload →</button>` : ''}
+                            ${!hasSrc ? `<button class="btn btn-sm btn-secondary analysis-row-action" onclick="openManualUploadForCompany('${esc(c.id)}')">Upload →</button>` : ''}
                           `}
                       </td>
                     </tr>`;

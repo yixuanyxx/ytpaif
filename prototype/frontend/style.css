@@ -211,6 +211,24 @@ body { display: flex; min-height: 125vh; }
 }
 .page-header-right { display: flex; gap: 10px; align-items: flex-start; margin-top: 4px; }
 
+/* Calculate Exposure uses one stable alignment grid for demo and live data. */
+.analysis-page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  max-width: min(100%, 900px);
+}
+.analysis-queue-table { width: 100%; table-layout: fixed; font-size: 12.5px; }
+.analysis-queue-table .analysis-company-col { width: 36%; }
+.analysis-queue-table .analysis-sources-col { width: 15%; }
+.analysis-queue-table .analysis-exposure-col { width: 15%; }
+.analysis-queue-table .analysis-confidence-col { width: 18%; }
+.analysis-queue-table .analysis-action-col { width: 16%; }
+.analysis-action-cell { text-align: right; }
+.analysis-action-cell .analysis-row-action { min-width: 104px; justify-content: center; }
+
 .content { padding: 32px 40px; flex: 1; }
 
 /* ===== WORKFLOW PROGRESS BAR ===== */
@@ -890,6 +908,8 @@ tr:hover td { background: var(--slate-50); }
   .workflow-progress { padding: 0 20px; }
 }
 @media (max-width: 640px) {
+  .analysis-page-actions { justify-content: flex-start; }
+  .analysis-queue-table { min-width: 760px; }
   .metric-grid { grid-template-columns: 1fr; }
   .metric-grid.dashboard-summary-metrics { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr; }

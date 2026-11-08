@@ -604,6 +604,59 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(result['classifications'][0]['original_relationship_type'], 'excluded')
         self.assertEqual(record['relationship_type'], 'excluded')
 
+    def test_mixed_segment_uses_fractional_attribution_and_leaf_split(self):
+        passages = [{'evidence_id': 'e1', 'passage':
+            'HPC revenue was USD 600 million and growth was driven by AI accelerators.'}]
+        facts = {'units': [
+            {'unit_id': 'hpc', 'activity': 'High performance computing'},
+            {'unit_id': 'other', 'activity': 'Other revenue'},
+        ]}
+        records = [
+            {'unit_id': 'hpc', 'node_ids': ['foundry', 'packaging'], 'relationship_type': 'direct',
+             'rationale': 'Only the evidenced AI-related portion qualifies', 'scope_check': 'AI infrastructure revenue',
+             'evidence_ids': ['e1'], 'unresolved_questions': [], 'whole_unit_supported': False,
+             'allocation': {'lower': .35, 'upper': .5, 'point': 5/12, 'method': 'estimated',
+                            'assumption': 'AI foundry and packaging are 25% of total company revenue.'},
+             'leaf_allocations': {'foundry': .8, 'packaging': .2},
+             'revenue_attribution_quote': 'HPC revenue was USD 600 million and growth was driven by AI accelerators.'},
+            {'unit_id': 'other', 'node_ids': [], 'relationship_type': 'excluded',
+             'rationale': 'Outside theme', 'scope_check': 'Not AI infrastructure', 'evidence_ids': ['e1'],
+             'unresolved_questions': [], 'whole_unit_supported': False, 'revenue_attribution_quote': ''},
+        ]
+        classified = self.app._validate_classification_response(
+            {'classifications': records, 'confidence_band': 'medium', 'confidence_basis': 'Estimated from cited mix'},
+            facts, {'foundry', 'packaging'}, {'e1'}, passages)
+        by_id = {record['unit_id']: record for record in classified['classifications']}
+        lo, hi, point, method = self.app._classification_allocation(by_id['hpc'], passages)
+        case = {'total_revenue': 1000, 'denominator_evidence_ids': ['e1'], 'period': 'FY2026',
+                'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': [
+            {'unit_id': 'hpc', 'activity': 'High performance computing', 'revenue': 600,
+             'period': 'FY2026', 'currency': 'USD', 'scale': 'millions', 'external': True,
+             'evidence_ids': ['e1'], 'classification_evidence_ids': ['e1'], 'overlap_group': None,
+             'node_ids': ['foundry', 'packaging'], 'relationship_type': 'direct', 'rationale': 'Supported',
+             'scope_check': 'AI infrastructure', 'lower': lo, 'upper': hi, 'point': point, 'method': method,
+             'assumption': records[0]['allocation']['assumption'],
+             'allocations': records[0]['leaf_allocations']},
+            {'unit_id': 'other', 'activity': 'Other revenue', 'revenue': 400,
+             'period': 'FY2026', 'currency': 'USD', 'scale': 'millions', 'external': True,
+             'evidence_ids': ['e1'], 'classification_evidence_ids': ['e1'], 'overlap_group': None,
+             'node_ids': [], 'relationship_type': 'excluded', 'rationale': 'Outside theme',
+             'scope_check': 'Not AI infrastructure', 'lower': 0, 'upper': 0, 'point': 0,
+             'method': 'derived', 'assumption': '', 'allocations': {}},
+        ]}
+        nodes = [
+            {'node_id': 'theme', 'parent_id': None, 'name': 'AI Infrastructure',
+             'definition': 'AI infrastructure', 'examples': []},
+            {'node_id': 'foundry', 'parent_id': 'theme', 'name': 'Wafers & Foundry',
+             'definition': 'AI chip foundry', 'examples': []},
+            {'node_id': 'packaging', 'parent_id': 'theme', 'name': 'Advanced Packaging',
+             'definition': 'AI chip packaging', 'examples': []},
+        ]
+        estimate = self.app.engine.estimate(case, nodes, {'e1'})
+        self.assertAlmostEqual(estimate['point'], .25)
+        self.assertAlmostEqual(estimate['node_exposures']['foundry']['point'], .20)
+        self.assertAlmostEqual(estimate['node_exposures']['packaging']['point'], .05)
+
     def test_batch_calculates_example_exposure_and_persists_cited_rollup(self):
         import engine
         node = lambda nid, name, children: {'node_id': nid, 'name': name, 'definition': name,

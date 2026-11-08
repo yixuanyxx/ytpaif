@@ -780,21 +780,49 @@ def generate(d):
 # ── Analyze ───────────────────────────────────────────────────────────────────
 
 def _classification_allocation(classification, passages):
-    """A complete unit match needs a source quote, not just a thematic label."""
+    """Return the evidenced share of a broad revenue unit that qualifies.
+
+    Earlier versions could only count none or all of an extracted segment. That
+    materially overstated exposure when a mixed segment (for example HPC,
+    memory, cloud or power products) contained a smaller theme-related share.
+    """
     if classification['relationship_type'] in ('excluded', 'indirect'):
         if classification.get('unresolved_questions'):
             raise ValueError('Resolve scope uncertainty before treating revenue as excluded or indirect')
         return 0, 0, 0, 'derived'
-    if (classification['relationship_type'] != 'direct'
-            or classification.get('whole_unit_supported') is not True
-            or classification.get('unresolved_questions')):
+    if classification['relationship_type'] != 'direct' or classification.get('unresolved_questions'):
         return 0, 1, None, 'insufficient_evidence'
+
+    allocation = classification.get('allocation')
+    if allocation is None:
+        if classification.get('whole_unit_supported') is not True:
+            return 0, 1, None, 'insufficient_evidence'
+        allocation = {'lower': 1, 'upper': 1, 'point': 1, 'method': 'disclosed', 'assumption': ''}
+    if not isinstance(allocation, dict):
+        raise ValueError('Revenue allocation must be an object')
+    method = allocation.get('method')
+    if method not in ('disclosed', 'derived', 'estimated', 'insufficient_evidence'):
+        raise ValueError('Revenue allocation requires a valid method')
+    if method == 'insufficient_evidence':
+        return 0, 1, None, method
+    try:
+        lower = float(allocation.get('lower'))
+        upper = float(allocation.get('upper'))
+        point = float(allocation.get('point'))
+    except (TypeError, ValueError):
+        raise ValueError('Revenue allocation requires numeric lower, upper and point shares') from None
+    if not (0 <= lower <= point <= upper <= 1):
+        raise ValueError('Revenue allocation shares must satisfy 0 <= lower <= point <= upper <= 1')
+    if classification.get('whole_unit_supported') is True and (lower, point, upper) != (1, 1, 1):
+        raise ValueError('A whole-unit classification must allocate the complete revenue unit')
+    if method == 'estimated' and not str(allocation.get('assumption') or '').strip():
+        raise ValueError('Estimated revenue allocation requires a documented assumption')
     quote = ' '.join(str(classification.get('revenue_attribution_quote', '')).split())
     cited = set(classification.get('evidence_ids', []))
-    if not quote or not any(
-            quote in ' '.join(p['passage'].split()) for p in passages if p['evidence_id'] in cited):
-        raise ValueError('A full revenue match requires a supporting quote from cited evidence')
-    return 1, 1, 1, 'disclosed'
+    if point > 0 and (not quote or not any(
+            quote in ' '.join(p['passage'].split()) for p in passages if p['evidence_id'] in cited)):
+        raise ValueError('A positive revenue allocation requires a supporting quote from cited evidence')
+    return lower, upper, point, method
 
 
 def _preserve_classification_uncertainty(record, activity):
@@ -834,6 +862,15 @@ def _validate_classification_response(classified, facts, leaves, selected, passa
         safe_record = _preserve_classification_uncertainty(
             record, by_unit[record['unit_id']].get('activity') or record['unit_id'])
         _classification_allocation(safe_record, passages)
+        leaf_allocations = safe_record.get('leaf_allocations') or {}
+        if not isinstance(leaf_allocations, dict) or not set(leaf_allocations) <= set(safe_record['node_ids']):
+            raise ValueError('Leaf allocations must use only this unit\'s approved leaf matches')
+        try:
+            leaf_total = sum(float(value) for value in leaf_allocations.values())
+        except (TypeError, ValueError):
+            raise ValueError('Leaf allocations must be numeric shares') from None
+        if any(float(value) < 0 or float(value) > 1 for value in leaf_allocations.values()) or leaf_total > 1 + 1e-10:
+            raise ValueError('Leaf allocation shares must be between zero and one and sum to at most one')
         normalized.append(safe_record)
     return {**classified, 'classifications': normalized}
 
@@ -926,14 +963,20 @@ def analyze(d):
         classified = llm(
             'Classify extracted units against approved taxonomy LEAF nodes only, regardless of tier, within the Asian equities excluding Japan scope (all Asian stocks outside Japan, including stocks outside any benchmark index). '
             'Return {"classifications":[{"unit_id":"...","node_ids":[],"relationship_type":"direct|indirect|excluded|insufficient_evidence",'
-            '"rationale":"...","scope_check":"...","evidence_ids":[],"unresolved_questions":[],"whole_unit_supported":false,"revenue_attribution_quote":"..."}],'
+            '"rationale":"...","scope_check":"...","evidence_ids":[],"unresolved_questions":[],"whole_unit_supported":false,'
+            '"allocation":{"lower":0.0,"upper":1.0,"point":null,"method":"disclosed|derived|estimated|insufficient_evidence","assumption":"..."},'
+            '"leaf_allocations":{"approved_leaf_id":0.0},"revenue_attribution_quote":"..."}],'
             '"confidence_band":"high|medium|low","confidence_percent":number or null,"confidence_basis":"rubric reason, not probability"}. '
             'confidence_percent is your self-assessed confidence in the evidence and classification on a 0-100 scale, not a calibrated probability; use null if unavailable. '
-            'Every unit must appear exactly once. Positive labels require cited evidence. A unit may match more than one leaf; preserve every supported leaf match, but do not invent allocation shares. '
+            'Every unit must appear exactly once. Positive labels require cited evidence. A unit may match more than one leaf; preserve every supported leaf match and use only evidence-grounded allocation shares as described below. '
             'Copy unit_id values exactly from facts.units. Never create a unit for the consolidated denominator or invent additional unit IDs. '
             'Process the deepest leaves first, then leaves at higher tiers. At each tier consider all node details together to distinguish their meanings. '
             'Match using names, definitions, examples, keywords, synonyms and similar phrases in the supplied documents. '
             'Set whole_unit_supported=true ONLY if cited evidence establishes that the whole revenue unit qualifies for its matched leaves. '
+            'For a broad mixed revenue unit, estimate only the qualifying fraction: allocation shares are fractions of that extracted unit, not percentages of total company revenue. '
+            'Use disclosed for an explicit share, derived for arithmetic from cited figures, estimated only for a bounded and documented assumption grounded in cited evidence, and insufficient_evidence when no defensible share exists. '
+            'Never set a mixed segment to 100% merely because its growth is AI-driven or it contains an AI product. '
+            'When the qualifying share is split across multiple leaves, leaf_allocations gives the non-overlapping relative split of that qualifying share and must sum to at most 1. '
             'Supply an exact revenue_attribution_quote from the cited passage supporting that attribution. A keyword hit or broad mixed segment is insufficient; keep whole_unit_supported=false for unsupported shares. '
             'Use insufficient_evidence for an unspecified Others segment; no supported classification is not proof of exclusion. '
             'Business scope_check must address the activity and theme exclusions, not merely state the company country. '
@@ -959,9 +1002,11 @@ def analyze(d):
                 'A keyword match does not justify assigning an entire mixed revenue segment. Broad platforms such as high-performance computing may contain both AI and non-AI activities; '
                 'set whole_unit_supported=false if the documents do not establish the whole amount as qualifying. '
                 'Use insufficient_evidence for unspecified Others or an unsupported allocation; missing information is not excluded revenue. '
+                'For mixed segments, return a bounded allocation object rather than treating the entire segment as qualifying. allocation shares are fractions of the extracted unit. '
+                'Estimated allocations require a concise evidence-grounded assumption. leaf_allocations may split the qualifying share across matched leaves without overlap. '
                 'A scope_check must address business activity, not just the company country. '
                 'Use only approved leaf IDs from leaf_node_ids. For unsupported shares retain uncertainty instead of inventing a split. '
-                'Return all original required fields, including relationship_type, rationale, scope_check, evidence_ids, node_ids, unresolved_questions, whole_unit_supported and revenue_attribution_quote.',
+                'Return all original required fields, including relationship_type, rationale, scope_check, evidence_ids, node_ids, unresolved_questions, whole_unit_supported, allocation, leaf_allocations and revenue_attribution_quote.',
                 {'validation_error': str(validation_error), 'rejected_response': classified, 'facts': facts,
                  'theme': {**theme, 'nodes': engine.nest_taxonomy(theme['nodes'])},
                  'leaf_node_ids': sorted(leaves), 'passages': passages}, run_rec)
@@ -991,10 +1036,12 @@ def analyze(d):
                 node_ids=c['node_ids'], unresolved_questions=c['unresolved_questions']
             )
             lower, upper, point, method = _classification_allocation(c, passages)
+            allocation = c.get('allocation') if isinstance(c.get('allocation'), dict) else {}
             u.update(lower=lower, upper=upper, point=point, method=method,
                      whole_unit_supported=c.get('whole_unit_supported') is True,
                      revenue_attribution_quote=c.get('revenue_attribution_quote', ''),
-                     assumption='', allocations={})
+                     assumption=str(allocation.get('assumption') or ''),
+                     allocations={key: float(value) for key, value in (c.get('leaf_allocations') or {}).items()})
         facts['unresolved_questions'] = list(dict.fromkeys([
             *facts.get('unresolved_questions', []),
             *(question for unit in facts['units'] for question in unit.get('unresolved_questions', []))]))

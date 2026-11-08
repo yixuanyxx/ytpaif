@@ -1,7 +1,7 @@
 """Deterministic, review-gated thematic revenue calculations."""
 import math
 
-VERSION = '1.2.2'
+VERSION = '1.3.0'
 
 def number(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):

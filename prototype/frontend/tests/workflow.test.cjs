@@ -389,6 +389,15 @@ test('Dashboard demo toggle previews sample data without changing workspace data
   assert.equal(run('dashboardApiCalls'),2);
   assert.equal(run('JSON.stringify(state)'),initialWorkspace);
 });
+test('First 26 demo exposures and weighted totals reconcile to the manual workbook',()=>{
+  const {run}=setup();
+  const fixture=JSON.parse(run('JSON.stringify(analysisDemoData())'));
+  assert.deepEqual(fixture.companyRows.map(row=>row.exposure.point),
+    [.25,.13,.55,0,.03,.063,0,0,.38,0,.095,0,0,.29,0,0,0,.20,0,0,0,0,0,0,.2665,0]);
+  assert.ok(Math.abs(fixture.dashboard.summary.portfolio.point-.14152794808977343)<1e-12);
+  assert.ok(Math.abs(fixture.dashboard.summary.benchmark.point-.0950110085681377)<1e-12);
+  assert.ok(Math.abs(fixture.dashboard.summary.active.point-.04651693952163573)<1e-12);
+});
 test('Dashboard demo toggle works when the workspace has no approved theme or portfolio',async()=>{
   const {run,node} = setup();
   run(`let dashboardApiCalls=0;
@@ -1067,6 +1076,26 @@ test('Bulk analysis retries saved zero and unknown cases but suppresses recent c
   await node('#btn-analyze-all').onclick();
   assert.deepEqual(JSON.parse(run('JSON.stringify(fallbackBulkRequest.data)')),
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['zero','unknown']});
+});
+test('Bulk analysis recalculates cases produced by an older exposure methodology',async()=>{
+  const {run,node,context}=setup();
+  context.setTimeout=()=>1;
+  run(`state.companies=[{id:'old',name:'Old method'},{id:'current',name:'Current method'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'old'},{company_id:'current'}]}];
+    state.cases=[
+      {id:'old-case',theme_id:'theme-a',company_id:'old',review_status:'needs_review',estimate:{point:.6,calculation_version:'1.2.2'}},
+      {id:'current-case',theme_id:'theme-a',company_id:'current',review_status:'needs_review',estimate:{point:.2,calculation_version:'1.3.0'}}];
+    state.calculation_version='1.3.0'; state.ai_configured=true;
+    selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core'; currentView='analysis';
+    let versionRequest; api=async(path,data)=>{ versionRequest={path,data}; return {analysis_run:{
+      id:'version-rerun',job_type:'analysis',status:'running',phase:'queued',theme_id:'theme-a',portfolio_id:'core',
+      company_ids:data.company_ids,companies_completed:[]}}; };`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(1 of 2\)/);
+  await node('#btn-analyze-all').onclick();
+  assert.deepEqual(JSON.parse(run('JSON.stringify(versionRequest.data)')),
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['old'],force_recalculate:true});
 });
 test('Active batch locks only its companies and lets an unrelated failed stock retry',async()=>{
   const {run,node,context}=setup();
