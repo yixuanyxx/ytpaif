@@ -3624,16 +3624,23 @@ async function viewAnalysis() {
     // Once a successful case has reached the workspace, its review state is
     // the useful per-company status. Keep terminal failures visible instead.
     const analysisState = caseRec && !rawAnalysisState?.error ? null : rawAnalysisState;
-    return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState };
+    const retryable = ['Analysis failed', 'Analysis incomplete'].includes(rawAnalysisState?.label)
+      && !rawAnalysisState?.active;
+    // A failed or deferred calculation is ready again when source evidence is
+    // present, even if an older case is still visible for that company.
+    const readyForBulk = hasSrc && (retryable || (status === 'Ready to analyse' && !rawAnalysisState));
+    return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState, retryable, readyForBulk };
   });
 
-  // Send only companies that are actually ready. This avoids a bulk request
-  // accidentally re-running every holding, especially while a prior job is
-  // still processing one of them.
+  // Send new and retryable source-ready companies. An active job is never
+  // included, and the bulk control remains disabled while this scope runs.
   const readyCompanyIds = companyProgress
-    .filter(p => p.hasSrc && p.status === 'Ready to analyse' && !p.rawAnalysisState)
+    .filter(p => p.readyForBulk)
     .map(p => p.c.id);
   const readyCount = readyCompanyIds.length;
+  // A failed rerun may leave an older reusable case. Force this batch to
+  // recalculate when one of its retry targets still has a saved case.
+  const forceBulkRecalculate = companyProgress.some(p => p.readyForBulk && p.retryable && p.caseRec);
 
   $('#page-actions').innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -3706,7 +3713,7 @@ async function viewAnalysis() {
                 </tr>
               </thead>
               <tbody id="analysis-queue-rows">
-                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState }) => {
+                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState, readyForBulk }) => {
                   // A case's single point estimate is the exposure shown in
                   // this queue. `exposure_percent` preserves the same result
                   // for older saved cases that do not include nested estimate.
@@ -3714,9 +3721,10 @@ async function viewAnalysis() {
                   const point = caseRec?.estimate?.point ?? (Number.isFinite(savedPercent) ? savedPercent / 100 : null);
                   const pt = point != null ? pct(point) : (caseRec ? '—' : '');
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
+                  const readyClass = readyForBulk && rowClass !== 'ready-row' ? ' ready-row' : '';
 
                   return `
-                    <tr class="queue-row ${rowClass}" style="cursor:${!hasSrc ? 'pointer' : 'default'};border-bottom:1px solid var(--slate-100)"
+                    <tr class="queue-row ${rowClass}${readyClass}" style="cursor:${!hasSrc ? 'pointer' : 'default'};border-bottom:1px solid var(--slate-100)"
                       onclick="${!hasSrc ? `setView('sources')` : ''}">
                       <td class="td-company">
                         <div style="font-weight:650;color:var(--slate-900)">${esc(c.name)}</div>
@@ -3793,6 +3801,7 @@ async function viewAnalysis() {
           theme_id: theme.id,
           portfolio_id: portfolio.id,
           company_ids: readyCompanyIds,
+          ...(forceBulkRecalculate ? {force_recalculate: true} : {}),
         });
         notice(`Exposure analysis queued for ${readyCompanyIds.length} ready ${readyCompanyIds.length === 1 ? 'company' : 'companies'}. You can leave this page.`, 'info');
         if (isTerminalAnalysisRun(analysisRun)) await refresh();

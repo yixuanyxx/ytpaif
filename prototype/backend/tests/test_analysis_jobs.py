@@ -174,7 +174,7 @@ class AnalysisJobsTest(unittest.TestCase):
         self.queue.enqueue(run, companies)
         self.app.analyze_all = Mock(return_value={
             'results': [],
-            'errors': [{'company_id': 'a', 'error': 'Gemini safety budget reached: 60 requests in the last 24 hours.'}],
+            'errors': [{'company_id': 'a', 'error': 'Provider HTTP 429'}],
         })
         analysis_jobs.worker(self.app, run, companies)
         saved, _ = self.queue.job('analysis-test')
@@ -183,7 +183,28 @@ class AnalysisJobsTest(unittest.TestCase):
         self.assertEqual(saved['completion_reason'], 'provider_quota')
         self.assertEqual(saved['deferred_company_ids'], ['b'])
         self.assertEqual(saved['outcomes']['a']['status'], 'failed')
-        self.assertIn('Gemini safety budget reached', saved['outcomes']['a']['error'])
+        self.assertIn('HTTP 429', saved['outcomes']['a']['error'])
+
+    def test_fallback_provider_quota_defers_current_and_remaining_companies(self):
+        run = self._run()
+        run['allow_unresolved_web_search'] = True
+        companies = [{'id': 'a', 'name': 'Company A'}, {'id': 'b', 'name': 'Company B'}]
+        self.queue.enqueue(run, companies)
+        first = self._success('a')
+        first['results'][0].update(
+            fallback_status='analysis_deferred',
+            fallback_message='Follow-up analysis is waiting for Gemini provider quota or rate limit: Provider HTTP 429',
+            fallback_search_attempted=True,
+        )
+        self.app.analyze_all = Mock(return_value=first)
+        analysis_jobs.worker(self.app, run, companies)
+        saved, _ = self.queue.job('analysis-test')
+        self.app.analyze_all.assert_called_once()
+        self.assertEqual(saved['status'], 'incomplete')
+        self.assertEqual(saved['completion_reason'], 'provider_quota')
+        self.assertEqual(saved['deferred_company_ids'], ['a', 'b'])
+        self.assertEqual(saved['outcomes']['a']['status'], 'deferred')
+        self.assertIn('HTTP 429', saved['outcomes']['a']['error'])
 
     def test_worker_resumes_after_a_checkpoint_without_repeating_completed_company(self):
         run = self._run()

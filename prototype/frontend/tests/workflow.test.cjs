@@ -994,6 +994,44 @@ test('Bulk analysis queues only ready companies rather than every holding',async
   assert.match(node('#page-actions').innerHTML,/Analysis queued.*0 of 2 companies processed/);
   assert.doesNotMatch(run('JSON.stringify(bulkRequest.data)'),/"b"|"d"/);
 });
+test('Bulk analysis includes source-ready failures and deferred companies for retry',async()=>{
+  const {run,node,context}=setup();
+  context.setTimeout=()=>1;
+  run(`state.companies=[
+      {id:'a',name:'Failed rerun'}, {id:'b',name:'Deferred'},
+      {id:'c',name:'Completed'}, {id:'d',name:'New ready'}, {id:'e',name:'No sources'}
+    ];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[
+      {company_id:'a'},{company_id:'b'},{company_id:'c'},{company_id:'d'},{company_id:'e'}]}];
+    state.source_summaries=[
+      {company_id:'a',count:2},{company_id:'b',count:2},
+      {company_id:'c',count:2},{company_id:'d',count:2}];
+    state.cases=[
+      {id:'old-a',theme_id:'theme-a',company_id:'a',review_status:'needs_review',estimate:{point:.1}},
+      {id:'done-c',theme_id:'theme-a',company_id:'c',review_status:'approved',estimate:{point:.2}}];
+    state.search_runs=[
+      {id:'prior',job_type:'analysis',status:'incomplete',theme_id:'theme-a',portfolio_id:'core',
+       company_ids:['a','b'],companies_completed:['a'],deferred_company_ids:['b'],
+       outcomes:{a:'failed'},results:{a:{company_id:'a',status:'failed',error:'Provider quota reached'}}},
+      {id:'done',job_type:'analysis',status:'completed',theme_id:'theme-a',portfolio_id:'core',
+       company_ids:['c'],companies_completed:['c'],outcomes:{c:'success'}}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a';
+    selectedDashboardPortfolioId='core'; currentView='analysis';
+    let retryBulkRequest; api=async(path,data)=>{
+      retryBulkRequest={path,data};
+      return {analysis_run:{id:'retry-bulk',job_type:'analysis',status:'running',phase:'queued',
+        theme_id:'theme-a',portfolio_id:'core',company_ids:data.company_ids,companies_completed:[]}};
+    };`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(3\)/);
+  assert.match(node('#page-content').innerHTML,/queue-row pending-row ready-row[\s\S]*Failed rerun/);
+  await node('#btn-analyze-all').onclick();
+  assert.equal(run('retryBulkRequest.path'),'analysis/start');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(retryBulkRequest.data)')),
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b','d'],force_recalculate:true});
+  assert.match(node('#page-actions').innerHTML,/id="btn-analyze-all" disabled/);
+});
 test('Analysis polling refreshes terminal results and keeps per-company failures visible',async()=>{
   const {run,node,context} = setup();
   let poll;

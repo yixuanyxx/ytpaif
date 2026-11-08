@@ -1,9 +1,7 @@
 import importlib
 import copy
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from test_fixtures import MemoryStore
@@ -12,14 +10,6 @@ from test_source_cache import FakeRedis
 
 class UnresolvedFallbackTest(unittest.TestCase):
     def setUp(self):
-        budget_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(budget_dir.cleanup)
-        budget_env = patch.dict(os.environ, {
-            'GEMINI_BUDGET_DB': str(Path(budget_dir.name) / 'gemini-budget.sqlite'),
-            'GEMINI_DAILY_CALL_CAP': '60',
-        })
-        budget_env.start()
-        self.addCleanup(budget_env.stop)
         import app
         self.app = importlib.reload(app)
         self.app.store = MemoryStore()
@@ -184,7 +174,7 @@ class UnresolvedFallbackTest(unittest.TestCase):
         self.assertIsNone(result['results'][0]['case']['estimate']['point'])
         self.assertEqual(self.app.get('sources', 'web-approx')['theme_numeric_evidence_kind'], 'approximate_share')
 
-    def test_saved_web_evidence_waits_for_budget_then_analyses_without_searching_again(self):
+    def test_saved_web_evidence_retries_after_provider_quota_without_searching_again(self):
         import unresolved_web_search
         facts, classification = self._initial_outputs()
         with patch.object(self.app, 'llm', side_effect=[facts, classification]):
@@ -198,21 +188,24 @@ class UnresolvedFallbackTest(unittest.TestCase):
                                  'passage': 'Dedicated AI chip revenue was 18 percent of FY2025 total revenue.'}]}
         with patch.object(unresolved_web_search, 'discover', return_value={
                 'sources': [numeric], 'queries': ['Acme FY2025 AI revenue'], 'diagnostics': {}}) as discover, \
-                patch.object(self.app, '_fallback_analysis_budget_available', return_value=False), \
+                patch.object(self.app, '_analyse_found_web_sources',
+                             side_effect=ValueError('Provider HTTP 429')) as analyse, \
                 patch.object(self.app, 'llm') as model:
             first = self.app.analyze_all(self._request())
         discover.assert_called_once()
+        analyse.assert_called_once()
         model.assert_not_called()
         self.assertEqual(first['results'][0]['fallback_status'], 'analysis_deferred')
+        self.assertIn('provider quota', first['results'][0]['fallback_message'])
         self.assertEqual(self.app.get('sources', 'web-saved')['id'], 'web-saved')
 
         saved_case = first['results'][0]['case']
-        resolved = {**saved_case, 'id': 'resolved-after-budget',
+        resolved = {**saved_case, 'id': 'resolved-after-quota',
                     'estimate': {**saved_case['estimate'], 'point': .18},
                     'exposure_percent': 18}
         metadata = {**saved_case['fallback_web_search'], 'status': 'resolved',
                     'message': 'New cited evidence produced an exposure estimate.'}
-        with patch.object(self.app, '_fallback_analysis_budget_available', return_value=True), \
+        with patch.dict(os.environ, {'GEMINI_DAILY_CALL_CAP': '0'}), \
                 patch.object(self.app, '_analyse_found_web_sources', return_value=(resolved, metadata)) as analyse, \
                 patch.object(unresolved_web_search, 'discover') as discover:
             second = self.app.analyze_all(self._request())

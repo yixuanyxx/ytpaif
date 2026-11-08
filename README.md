@@ -76,7 +76,7 @@ cp .env.example .env
 python app.py
 ```
 
-Exposure extraction and classification default to Gemini (`gemini-3.8-flash`). `GEMINI_DAILY_CALL_CAP` defaults to 60 actual HTTP attempts in a rolling 24 hours, including model fallbacks. The counter uses `prototype/backend/data/gemini-budget.sqlite3` by default; put `GEMINI_BUDGET_DB` on persistent shared storage for a multi-process installation. The budget counts requests from the time this version starts recording; check Google AI Studio for the project's actual quota. A cached model response uses no provider request.
+Exposure extraction and classification default to Gemini (`gemini-3.8-flash`). The app does not impose a daily Gemini call cap. Google AI Studio's provider quota and rate limits still apply; a provider rejection is reported with the affected companies, and the remaining batch is deferred rather than retried repeatedly. Cached model responses use no provider request.
 
 ## Workflow additions
 
@@ -92,7 +92,7 @@ Exposure extraction and classification default to Gemini (`gemini-3.8-flash`). `
 2. Ensure the existing `themes`, `portfolios`, and `source_documents` tables and private `source-documents` / `portfolio-files` buckets are configured.
 3. If a database error reports `42P01` for `public.audit_events`, remove any remaining public-schema trigger that references the obsolete audit table. This does not remove analyst reviews or the AI Checker feature.
 
-The app uses Supabase for company, source and analysis records. Local SQLite files hold the source-job queue and Gemini safety budget; keep them on persistent storage when running on a server. New portfolio imports keep their original Excel file in the private `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in `portfolios`.
+The app uses Supabase for company, source and analysis records. The local SQLite source-job queue must be kept on persistent storage when running on a server. New portfolio imports keep their original Excel file in the private `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in `portfolios`.
 
 ## Tests
 

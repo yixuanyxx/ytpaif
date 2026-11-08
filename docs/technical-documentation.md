@@ -910,7 +910,7 @@ python -m unittest discover -v
 | `test_cutoff_excludes_future_sources` | Future-dated source absent from valid evidence set |
 | `test_versions_are_immutable` | New theme version created; v1 record unchanged |
 | `test_failed_model_does_not_create_zero_case` | LLM failure → no case written, run marked `failed` |
-| `test_provider_call_cap` | Cap = 0 blocks any call immediately |
+| `test_provider_ignores_legacy_call_cap` | A legacy local call-cap setting does not block a provider request |
 | `test_security_company_mapping` | Conflicting security-company mapping flagged |
 | `test_excel_import_weight_validation` | Invalid/missing weights flagged; percentage format converted correctly |
 | `test_ai_pipeline_classifies_tier2_only` | Classification to a Tier-1 node ID rejected |

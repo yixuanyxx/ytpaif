@@ -1059,12 +1059,13 @@ def _fallback_evidence_ids(sources, theme, new_source_ids):
         *notes, 'Included cited numeric evidence from the unresolved-company web search.']
 
 
-def _fallback_analysis_budget_available():
-    provider_host = (urlparse(os.environ.get('LLM_ENDPOINT') or DEFAULT_LLM_ENDPOINT).hostname or '').lower()
-    if provider_host != 'generativelanguage.googleapis.com':
+def _provider_quota_error(error):
+    """Recognize a real provider limit without imposing a local request cap."""
+    if isinstance(error, HTTPError) and error.code == 429:
         return True
-    import gemini_budget
-    return gemini_budget.status()['calls_remaining_24h'] >= 2
+    message = str(error or '').lower()
+    return ('http 429' in message or 'resource_exhausted' in message
+            or 'quota exceeded' in message or 'rate limit' in message)
 
 
 def _analyse_found_web_sources(case, company, theme, metadata, analysis_job_id=None):
@@ -1109,36 +1110,30 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis
 
     previous = case.get('fallback_web_search') or {}
     if previous.get('status') == 'analysis_deferred':
-        if not _fallback_analysis_budget_available():
-            return case, {'status': 'deferred',
-                          'message': 'Web evidence is saved. Follow-up analysis is waiting for the Gemini daily budget.'}, False, False
         try:
             revised, metadata = _analyse_found_web_sources(
                 case, company, theme, dict(previous), analysis_job_id)
             return revised, metadata, True, False
         except Exception as error:
-            budget_reached = 'Gemini safety budget reached' in str(error)
-            metadata = {**previous, 'status': 'analysis_deferred' if budget_reached else 'search_failed',
-                        'message': ('Follow-up analysis is waiting for the Gemini daily budget.' if budget_reached
-                                    else 'Follow-up analysis of saved web evidence failed: ' + str(error))}
+            quota_reached = _provider_quota_error(error)
+            metadata = {**previous, 'status': 'analysis_deferred' if quota_reached else 'search_failed',
+                        'message': ('Follow-up analysis of saved web evidence is waiting for Gemini provider quota or rate limit: '
+                                    if quota_reached else 'Follow-up analysis of saved web evidence failed: ') + str(error)}
             case['fallback_web_search'] = metadata
             put('cases', case)
             return case, metadata, False, False
     if (previous.get('status') == 'search_failed' and previous.get('source_ids')
             and not _recent_fallback_search(previous, 1)):
-        if not _fallback_analysis_budget_available():
-            return case, {'status': 'deferred',
-                          'message': 'Saved web evidence is waiting for the Gemini daily budget.'}, False, False
         try:
             revised, metadata = _analyse_found_web_sources(
                 case, company, theme, dict(previous), analysis_job_id)
             return revised, metadata, True, False
         except Exception as error:
-            budget_reached = 'Gemini safety budget reached' in str(error)
-            metadata = {**previous, 'status': 'analysis_deferred' if budget_reached else 'search_failed',
+            quota_reached = _provider_quota_error(error)
+            metadata = {**previous, 'status': 'analysis_deferred' if quota_reached else 'search_failed',
                         'searched_at': now(),
-                        'message': ('Follow-up analysis is waiting for the Gemini daily budget.' if budget_reached
-                                    else 'Follow-up analysis of saved web evidence failed: ' + str(error))}
+                        'message': ('Follow-up analysis of saved web evidence is waiting for Gemini provider quota or rate limit: '
+                                    if quota_reached else 'Follow-up analysis of saved web evidence failed: ') + str(error)}
             case['fallback_web_search'] = metadata
             put('cases', case)
             return case, metadata, False, False
@@ -1203,22 +1198,16 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis
             case['fallback_web_search'] = metadata
             put('cases', case)
             return case, metadata, False, True
-        if not _fallback_analysis_budget_available():
-            metadata.update(status='analysis_deferred',
-                            message='New cited web evidence is saved; follow-up analysis is waiting for the Gemini daily budget.')
-            case['fallback_web_search'] = metadata
-            put('cases', case)
-            return case, metadata, False, True
         revised, metadata = _analyse_found_web_sources(case, company, theme, metadata, analysis_job_id)
         return revised, metadata, True, True
     except Exception as error:
         metadata = locals().get('metadata', {
             'searched_at': attempted_at, 'queries': [], 'diagnostics': {}, 'source_ids': []})
-        budget_reached = bool(metadata.get('source_ids')) and 'Gemini safety budget reached' in str(error)
+        quota_reached = bool(metadata.get('source_ids')) and _provider_quota_error(error)
         metadata.update(
-            status='analysis_deferred' if budget_reached else 'search_failed',
-            message=('New cited web evidence is saved; follow-up analysis is waiting for the Gemini daily budget.'
-                     if budget_reached else 'Web evidence follow-up failed: ' + str(error)))
+            status='analysis_deferred' if quota_reached else 'search_failed',
+            message=('New cited web evidence is saved; follow-up analysis is waiting for Gemini provider quota or rate limit: '
+                     if quota_reached else 'Web evidence follow-up failed: ') + str(error))
         case['fallback_web_search'] = metadata
         put('cases', case)
         return case, metadata, False, True
@@ -1823,7 +1812,6 @@ def stock_sources(d):
 
 def state():
     import source_discovery
-    import gemini_budget
     import sys
     source_discovery.recover_stale_runs(sys.modules[__name__])
     key = os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()
@@ -1849,7 +1837,6 @@ def state():
     reusable_case_ids = {case['id'] for case in company_analysis_library}
     workspace['cases'] = [{**case, 'analysis_reusable': case['id'] in reusable_case_ids}
                           for case in workspace['cases']]
-    budget = gemini_budget.status()
     return {
         **workspace,
         'company_analysis_library': company_analysis_library,
@@ -1861,10 +1848,7 @@ def state():
         'checker_configured': bool(checker_key),
         'checker_model': checker_model if checker_key else '',
         'financials_ai_configured': bool(os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()),
-        'call_cap': budget['call_cap'],
         'calls_used': len(all_records('model_calls')),
-        'calls_used_24h': budget['calls_used_24h'],
-        'calls_remaining_24h': budget['calls_remaining_24h'],
         'unresolved_search_batch_limit': unresolved_search_batch_limit(),
         'max_tiers': engine.MAX_TIERS,
         'calculation_version': engine.VERSION,

@@ -1,9 +1,7 @@
 import io
 import json
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -13,14 +11,6 @@ import gemini_fallback
 
 class GeminiFallbackTest(unittest.TestCase):
     def setUp(self):
-        budget_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(budget_dir.cleanup)
-        budget_env = patch.dict(os.environ, {
-            'GEMINI_BUDGET_DB': str(Path(budget_dir.name) / 'budget.sqlite3'),
-            'GEMINI_DAILY_CALL_CAP': '100',
-        })
-        budget_env.start()
-        self.addCleanup(budget_env.stop)
         self.blocked_patch = patch.dict(gemini_fallback._blocked, {}, clear=True)
         self.blocked_patch.start()
         self.addCleanup(self.blocked_patch.stop)
@@ -33,6 +23,14 @@ class GeminiFallbackTest(unittest.TestCase):
         os.environ.pop('GEMINI_MODEL_FALLBACKS', None)
         for name in ('FINANCIALS_LLM_API_KEY', 'GEMINI_API_KEY', 'LLM_API_KEY'):
             os.environ[name] = ''
+
+    def test_legacy_daily_cap_setting_does_not_block_provider_requests(self):
+        request = self.request()
+        send = Mock(side_effect=lambda *args, **kwargs: io.BytesIO(b'{}'))
+        with patch.dict(os.environ, {'GEMINI_DAILY_CALL_CAP': '0', 'GEMINI_MODEL_FALLBACKS': ''}):
+            for _ in range(61):
+                gemini_fallback.request_json(request, 5, open_request=send)
+        self.assertEqual(send.call_count, 61)
 
     def request(self, key='key-a', grounded=True):
         body = {'model': 'gemini-3.8-flash', 'input': 'Read only the supplied evidence.', 'store': False}

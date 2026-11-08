@@ -147,9 +147,9 @@ def status(data):
 
 
 def _quota_error(value):
-    """Recognise quota failures which should halt rather than fail 80 rows."""
+    """Recognise provider quota failures which should halt an 80-row run."""
     text = str(value or '').lower()
-    return ('gemini safety budget reached' in text or 'http 429' in text
+    return ('http 429' in text or 'resource_exhausted' in text
             or 'quota exceeded' in text or 'rate limit' in text)
 
 
@@ -273,10 +273,23 @@ def worker(app, run, companies):
                                 if row.get('company_id') == company_id), None)
                 if completed:
                     summary = _summary(company, completed)
+                    followup_quota = _quota_error(summary['fallback_message'])
+                    if followup_quota:
+                        # The first case may be saved, but its web-evidence
+                        # follow-up could not complete. Show Retry and stop
+                        # before 79 more companies hit the same provider limit.
+                        summary['status'] = 'deferred'
+                        summary['error'] = summary['fallback_message']
+                        run['errors'].append({'company_id': company_id,
+                                              'company_name': company.get('name', company_id),
+                                              'reason': summary['error']})
                     run['results'][company_id] = summary
                     run['outcomes'][company_id] = summary
                     if search_permitted and completed.get('fallback_search_attempted'):
                         run['fallback_searches'] += 1
+                    if followup_quota:
+                        defer_remaining(index + 1, 'provider_quota')
+                        run['deferred_company_ids'].insert(0, company_id)
                 else:
                     reason = str((failure or {}).get('error') or 'The company analysis returned no result')
                     summary = {
