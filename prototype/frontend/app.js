@@ -3691,8 +3691,6 @@ window.openCase = function(caseId) {
   const panel = $('#case-detail-panel');
   if (!panel) return;
 
-  const chk = c.checker_result;
-
   const confLevel = (c.classification_confidence || 'medium').toLowerCase();
   const confScoreMap = {
     high: {
@@ -3825,62 +3823,6 @@ window.openCase = function(caseId) {
         </div>
       </div>
 
-      <!-- AI Checker Model (Claude Sonnet 5) -->
-      <div class="form-section mt-16" style="background:var(--slate-50);border:1px solid var(--slate-200);border-radius:8px;padding:16px">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px">
-          <div>
-            <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px">
-              <span>🛡️ AI Checker Verification (Claude Sonnet 5)</span>
-              <span class="badge ${chk ? (chk.verdict==='VERIFIED'?'badge-green':'badge-amber') : 'badge-neutral'}">
-                ${chk ? `${esc(chk.verdict)}` : 'Not yet audited'}
-              </span>
-            </div>
-            <div class="text-muted text-small" style="margin-top:2px">
-              Independent secondary LLM auditor cross-checks revenue extractions, Tier-2 classifications, and confidence calibration.
-            </div>
-          </div>
-          <button type="button" class="btn btn-sm ${chk ? 'btn-secondary' : 'btn-primary'}" id="btn-run-checker">
-            ${chk ? '↻ Re-run AI Checker' : '✧ Run AI Checker (Claude Sonnet 5)'}
-          </button>
-        </div>
-
-        ${chk ? `
-          <div style="background:white;border:1px solid var(--slate-200);border-radius:6px;padding:12px;margin-top:10px">
-            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
-              <div style="background:var(--slate-50);padding:8px;border-radius:4px">
-                <span style="font-size:10px;color:var(--slate-400);text-transform:uppercase;font-weight:700">Agreement Score</span>
-                <div style="font-size:16px;font-weight:700;color:var(--teal-800)">${chk.agreement_score ? `${chk.agreement_score} / 5` : '—'}</div>
-              </div>
-              <div style="background:var(--slate-50);padding:8px;border-radius:4px">
-                <span style="font-size:10px;color:var(--slate-400);text-transform:uppercase;font-weight:700">Confidence Calibration</span>
-                <div style="font-size:14px;font-weight:600;color:var(--slate-800);text-transform:capitalize">${esc(chk.confidence_assessment || 'Agreed')}</div>
-              </div>
-              <div style="background:var(--slate-50);padding:8px;border-radius:4px">
-                <span style="font-size:10px;color:var(--slate-400);text-transform:uppercase;font-weight:700">Recommendation</span>
-                <div style="font-size:14px;font-weight:600;color:${chk.recommendation==='Approve as-is'?'var(--teal-700)':'var(--amber-700)'}">${esc(chk.recommendation || 'Review')}</div>
-              </div>
-            </div>
-            
-            <div style="font-size:13px;line-height:1.5;color:var(--slate-700);margin-bottom:10px">
-              <strong>Audit Summary:</strong> ${esc(chk.summary || '')}
-            </div>
-
-            <div style="display:grid;gap:6px;font-size:12px;color:var(--slate-600)">
-              ${chk.extraction_audit ? `<div><strong>• Fact Extraction Audit:</strong> ${esc(chk.extraction_audit)}</div>` : ''}
-              ${chk.classification_audit ? `<div><strong>• Taxonomy Alignment Audit:</strong> ${esc(chk.classification_audit)}</div>` : ''}
-              ${chk.confidence_audit ? `<div><strong>• Confidence Rubric Audit:</strong> ${esc(chk.confidence_audit)}</div>` : ''}
-            </div>
-            <div class="text-muted text-small" style="margin-top:8px;font-size:11px">
-              Audited by ${esc(chk.checker_model || 'Claude Sonnet 5')} at ${esc(chk.checked_at || '')}
-            </div>
-          </div>
-        ` : `
-          <div style="padding:12px;background:white;border:1px dashed var(--slate-300);border-radius:6px;font-size:12px;color:var(--slate-500);text-align:center">
-            Click "Run AI Checker" to dispatch an independent audit verification to Claude Sonnet before approving.
-          </div>
-        `}
-      </div>
-
       <!-- Review form -->
       ${c.review_status === 'needs_review' ? `
         <div class="form-section">
@@ -3918,17 +3860,6 @@ window.openCase = function(caseId) {
 
     <!-- Revised manual case -->
     ${c.review_status !== 'needs_review' ? manualCaseFormHtml(c) : ''}`;
-
-  const btnChecker = $('#btn-run-checker');
-  if (btnChecker) {
-    btnChecker.onclick = () => run(async () => {
-      showLoading('Running AI Checker audit with Claude Sonnet 5...');
-      const chkRes = await api('case/check', { case_id: caseId });
-      await refresh();
-      notice(`Claude Sonnet audit: ${chkRes.verdict} (${chkRes.agreement_score}/5 agreement).`, chkRes.verdict === 'VERIFIED' ? 'success' : 'warning');
-      openCase(caseId);
-    }, 'Auditing case…');
-  }
 
   $('#review-form')?.addEventListener('submit', e => {
     e.preventDefault();

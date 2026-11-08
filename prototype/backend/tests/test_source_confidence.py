@@ -1,5 +1,7 @@
-"""Evidence-grounded Claude source traffic lights."""
+"""Evidence-grounded source-confidence traffic lights."""
+import json
 import unittest
+import os
 from unittest.mock import patch
 
 import source_confidence
@@ -94,6 +96,26 @@ class SourceConfidenceTest(unittest.TestCase):
         with patch.object(source_confidence, 'claude_assess',
                           return_value=self.assess('green', ['filing', 'reuters', 'invented'])):
             with self.assertRaisesRegex(ValueError, 'invalid source ID'):
+                source_confidence.evaluate(self.sources, self.company, self.facts, self.passages)
+
+    def test_gemini_is_used_only_when_explicitly_enabled_for_testing(self):
+        output = {'choices': [{'message': {'content': json.dumps({
+            'light': 'green', 'basis': 'Three approved filings agree.',
+            'agreeing_source_ids': ['filing', 'reuters', 'yahoo'],
+            'divergent_source_ids': []})}}]}
+        with patch.dict(os.environ, {'EXPOSURE_CONFIDENCE_PROVIDER': 'gemini',
+                                     'GEMINI_API_KEY': 'gemini-test-key',
+                                     'EXPOSURE_CONFIDENCE_GEMINI_MODEL': 'gemini-test'}, clear=False), \
+                patch.object(source_confidence.gemini_fallback, 'request_json',
+                             return_value=(output, {'model': 'gemini-test'})) as request:
+            result = source_confidence.evaluate(self.sources, self.company, self.facts, self.passages)
+        self.assertEqual(result['source_confidence_light'], 'green')
+        self.assertEqual(result['source_confidence_model'], 'gemini-test')
+        self.assertEqual(json.loads(request.call_args.args[0].data)['model'], 'gemini-test')
+
+    def test_invalid_provider_is_rejected(self):
+        with patch.dict(os.environ, {'EXPOSURE_CONFIDENCE_PROVIDER': 'unknown'}, clear=False):
+            with self.assertRaisesRegex(ValueError, 'must be claude or gemini'):
                 source_confidence.evaluate(self.sources, self.company, self.facts, self.passages)
 
     def test_filing_type_on_unknown_host_is_not_approved(self):

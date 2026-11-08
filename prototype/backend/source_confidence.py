@@ -1,4 +1,4 @@
-"""Claude's source-provenance traffic light for a calculated company case.
+"""LLM-assisted source-provenance traffic light for a calculated company case.
 
 The model compares the actual cited documents. Local checks keep an invented
 source ID or an unapproved website from producing a green light. The approved
@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import exchange_filings
+import gemini_fallback
 
 
 APPROVED_PUBLISHERS = ('finance.yahoo.com', 'reuters.com', 'bloomberg.com')
@@ -190,8 +191,57 @@ def claude_assess(payload):
     return json.loads(match.group(0)), model
 
 
+def gemini_assess(payload):
+    """Request the same constrained assessment using Gemini during testing only."""
+    endpoint = (os.environ.get('EXPOSURE_CONFIDENCE_GEMINI_ENDPOINT')
+                or 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions')
+    key = (os.environ.get('EXPOSURE_CONFIDENCE_GEMINI_API_KEY')
+           or os.environ.get('GEMINI_API_KEY') or os.environ.get('FINANCIALS_LLM_API_KEY')
+           or os.environ.get('LLM_API_KEY') or '').strip()
+    model = os.environ.get('EXPOSURE_CONFIDENCE_GEMINI_MODEL') or 'gemini-3.8-flash'
+    if not key:
+        raise ValueError('Configure GEMINI_API_KEY to test source confidence with Gemini')
+    parsed = urlparse(endpoint)
+    if parsed.scheme != 'https' and parsed.hostname not in ('localhost', '127.0.0.1'):
+        raise ValueError('Gemini endpoint must use HTTPS')
+    prompt = (
+        'Assess source confidence for the extracted company revenue and thematic classification. '
+        'Return JSON only: {"light":"green|yellow|red","basis":"specific concise reason",'
+        '"agreeing_source_ids":[],"divergent_source_ids":[]}. '
+        'Green only if at least three independent APPROVED sources agree on the material revenue numbers '
+        'for the same reporting period. Approved means Yahoo Finance, Reuters, Bloomberg or verified company '
+        'filings from the issuer/official regulator. Three passages from one document count as ONE source. '
+        'Yellow (amber) when credible approved sources disagree, their reporting schedules differ, or fewer '
+        'than three independent approved sources corroborate the relevant figures. Red when extracted data '
+        'relies on an unverified third-party website outside the provisional approved list. '
+        'Only list source IDs supplied in sources; do not infer agreement just because sources share a publisher '
+        'or cite a company. Compare fiscal periods, currencies and actual material figures. If agreement is '
+        'not demonstrated, return yellow rather than green. The exposure range and its model confidence are '
+        'different from this source-provenance traffic light.\n' + json.dumps(payload, ensure_ascii=False))
+    body = {'model': model, 'response_format': {'type': 'json_object'},
+            'messages': [{'role': 'user', 'content': prompt}]}
+    request = Request(endpoint, data=json.dumps(body).encode(),
+                      headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
+    result, model_info = gemini_fallback.request_json(request, 60, open_request=urlopen)
+    raw = result['choices'][0]['message']['content']
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if not match:
+        raise ValueError('Gemini source confidence response was not JSON')
+    return json.loads(match.group(0)), model_info['model']
+
+
+def assess(payload):
+    """Use Gemini only when the explicit test-only provider switch is enabled."""
+    provider = os.environ.get('EXPOSURE_CONFIDENCE_PROVIDER', 'claude').strip().lower()
+    if provider == 'gemini':
+        return gemini_assess(payload)
+    if provider != 'claude':
+        raise ValueError('EXPOSURE_CONFIDENCE_PROVIDER must be claude or gemini')
+    return claude_assess(payload)
+
+
 def evaluate(sources, company, facts, passages):
-    """Return Claude's traffic light constrained by cited-source provenance."""
+    """Return a provider assessment constrained by cited-source provenance."""
     used = cited_sources(sources, company, facts, passages)
     payload = {'company': company.get('name'), 'period': facts.get('period'),
                'currency': facts.get('currency'), 'total_revenue': facts.get('total_revenue'),
@@ -199,7 +249,7 @@ def evaluate(sources, company, facts, passages):
                           'revenue': unit.get('revenue'), 'evidence_ids': unit.get('evidence_ids')}
                          for unit in facts.get('units') or []],
                'sources': used}
-    assessment, model = claude_assess(payload)
+    assessment, model = assess(payload)
     source_ids = {source['id'] for source in used}
     for field in ('agreeing_source_ids', 'divergent_source_ids'):
         ids = assessment.get(field)
