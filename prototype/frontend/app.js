@@ -499,21 +499,13 @@ function sourceConfidenceDot(light, basis) {
 }
 function confidencePill(caseRecord) {
   if (!caseRecord) return '<span title="AI confidence is not available">—</span>';
-  const aliases = {green:'high', yellow:'medium', amber:'medium', red:'low'};
-  const band = String(caseRecord.classification_confidence
-    || aliases[String(caseRecord.source_confidence_light || '').toLowerCase()] || '').toLowerCase();
-  const fallback = {high:92, medium:70, low:35};
-  const saved = Number(caseRecord.confidence_percent);
-  const value = Number.isFinite(saved) ? Math.max(0, Math.min(100, saved)) : fallback[band];
-  if (!Number.isFinite(value)) return '<span title="AI confidence is not available">—</span>';
-  const colors = {
-    high: ['#dcfce7', '#86efac'],
-    medium: ['#fef3c7', '#fcd34d'],
-    low: ['#fee2e2', '#fca5a5'],
-  };
-  const [background, border] = colors[band] || ['#f1f5f9', '#cbd5e1'];
-  const title = caseRecord.source_confidence_basis || `${band || 'AI'} confidence`;
-  return `<span title="${esc(title)}" style="display:inline-flex;align-items:center;justify-content:center;min-width:54px;padding:4px 10px;border:1px solid ${border};border-radius:999px;background:${background};color:#0f172a;font-weight:700">${Math.round(value)}%</span>`;
+  const aliases = {green:'green', high:'green', yellow:'amber', amber:'amber', medium:'amber', red:'red', low:'red'};
+  const color = aliases[String(caseRecord.source_confidence_light
+    || caseRecord.classification_confidence || '').toLowerCase()];
+  if (!color) return '<span title="AI confidence is not available">—</span>';
+  const label = color === 'green' ? 'Green' : color === 'amber' ? 'Amber' : 'Red';
+  const title = caseRecord.source_confidence_basis || `${label} AI confidence`;
+  return `<span class="status-indicator" title="${esc(title)}"><span class="status-dot-sm confidence-light-dot dot-${color}" role="img" aria-label="AI confidence: ${label}"></span></span>`;
 }
 function reviewStatusBadge(s) {
   if (s === 'approved')    return badge('Approved', 'green');

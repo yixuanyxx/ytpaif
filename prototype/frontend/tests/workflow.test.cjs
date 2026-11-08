@@ -1212,11 +1212,11 @@ test('Per-stock rerun uses the latest case result in the queue',async()=>{
     ]; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/90\.0%[\s\S]*>92%<\/span>[\s\S]*Re-run →/);
+  assert.match(html,/90\.0%[\s\S]*dot-green[\s\S]*AI confidence: Green[\s\S]*Re-run →/);
   assert.doesNotMatch(html,/20\.0%/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%/);
 });
-test('Calculate Exposure shows a point percentage and source-confidence dots',async()=>{
+test('Calculate Exposure shows a point percentage and colour-only AI confidence dots',async()=>{
   const {run,node} = setup();
   run(`state.companies=[
       {id:'a',name:'TSMC',sedol:'6889106'},
@@ -1234,9 +1234,10 @@ test('Calculate Exposure shows a point percentage and source-confidence dots',as
     selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/50\.0%[\s\S]*>92%<\/span>/);
-  assert.match(html,/25\.0%[\s\S]*>70%<\/span>/);
-  assert.match(html,/75\.0%[\s\S]*>35%<\/span>/);
+  assert.match(html,/50\.0%[\s\S]*dot-green[\s\S]*AI confidence: Green/);
+  assert.match(html,/25\.0%[\s\S]*dot-amber[\s\S]*AI confidence: Amber/);
+  assert.match(html,/75\.0%[\s\S]*dot-red[\s\S]*AI confidence: Red/);
+  assert.doesNotMatch(html,/AI confidence[\s\S]*>\d+%<\/span>/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
 test('Calculate Exposure uses the range upper bound when no point estimate exists',async()=>{
