@@ -71,6 +71,21 @@ class SourceJobsTest(unittest.TestCase):
         store.put_many.assert_called_once_with('sources', [record])
         cache.save_sources_to_redis.assert_called_once_with([record])
 
+    def test_search_run_mirror_failure_keeps_the_durable_analysis_checkpoint(self):
+        run = {**self.run, 'job_type': 'analysis', 'portfolio_id': 'portfolio'}
+        self.queue.enqueue(run, [])
+
+        def checkpoint(worker_app, queued_run, companies):
+            worker_app.put('search_runs', {**queued_run, 'phase': 'analysing', 'checkpointed': True})
+
+        with patch.object(source_jobs, 'database_path', return_value=self.path), \
+                patch('analysis_jobs.worker', side_effect=checkpoint), \
+                patch('app.put', side_effect=RuntimeError('Supabase temporarily unavailable')):
+            source_jobs.execute(run['id'])
+        saved, _ = self.queue.job(run['id'])
+        self.assertTrue(saved['checkpointed'])
+        self.assertEqual(saved['phase'], 'analysing')
+
     def test_failed_supabase_save_leaves_staged_sources_unacknowledged(self):
         record = {'id': 'source-a'}
         self.queue.enqueue(self.run, [])
@@ -181,13 +196,13 @@ q.save(r)
         self.assertEqual(self.queue.job('test-job')[0]['status'], cancelled['status'])
 
     def test_cancel_terminates_owned_worker_and_unblocks_next_job(self):
-        for mode in ('financials', 'short', 'long'):
+        for mode in ('financials', 'analysis', 'short', 'long'):
             with self.subTest(mode=mode):
                 self.assert_cancel_terminates_owned_worker(mode)
 
     def assert_cancel_terminates_owned_worker(self, mode):
         queue = source_jobs.Queue(Path(self.temp.name) / f'{mode}.sqlite3')
-        run = {**self.run, **({'job_type': 'financials', 'portfolio_id': 'p'} if mode == 'financials'
+        run = {**self.run, **({'job_type': mode, 'portfolio_id': 'p'} if mode in ('financials', 'analysis')
                              else {'search_mode': mode})}
         queue.enqueue(run, [])
         queue.enqueue({**self.run, 'id': 'next-job'}, [])

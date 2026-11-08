@@ -49,11 +49,17 @@ class Queue:
 
     def enqueue(self, run, companies):
         with self.connect() as db:
-            if run.get('job_type') == 'financials':
+            if run.get('job_type') in ('financials', 'analysis'):
                 db.execute('BEGIN IMMEDIATE')
                 for row in db.execute("SELECT payload FROM jobs WHERE state IN ('queued','running')"):
                     existing = json.loads(row[0])
-                    if existing.get('job_type') == 'financials' and existing.get('portfolio_id') == run['portfolio_id']:
+                    if (run.get('job_type') == 'financials'
+                            and existing.get('job_type') == 'financials'
+                            and existing.get('portfolio_id') == run['portfolio_id']):
+                        return existing
+                    if (existing.get('job_type') == 'analysis'
+                            and existing.get('request_key')
+                            and existing.get('request_key') == run.get('request_key')):
                         return existing
             if run.get('search_mode') in ('short', 'long'):
                 run['awaiting_worker'] = True
@@ -242,7 +248,7 @@ def supervise(queue, command=None, idle_seconds=None):
                 child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
             while child.poll() is None:
                 current, _ = queue.job(job_id)
-                cancellable = current.get('job_type') == 'financials' or current.get('search_mode') in ('short', 'long')
+                cancellable = current.get('job_type') in ('financials', 'analysis') or current.get('search_mode') in ('short', 'long')
                 if cancellable and current.get('status') == 'cancelled':
                     # This is the exact process launched for this job. Killing
                     # it also closes discovery/lookup threads blocked in HTTP;
@@ -301,6 +307,13 @@ def execute(job_id):
                     if record['status'] == 'running' and time.monotonic() - self.last_mirror < 10:
                         return record
                     self.last_mirror = time.monotonic()
+                    # The local queue is the durable source of truth for job
+                    # progress. A transient Supabase mirror failure must not
+                    # throw away a completed local checkpoint or restart work.
+                    try:
+                        return app.put(kind, record)
+                    except Exception:
+                        return record
                 return app.put(kind, record)
 
             def is_cancelled(self, run_id):
@@ -335,6 +348,9 @@ def execute(job_id):
                 # Use the current formatter even if an older supervisor survived deployment.
                 while queue.deliver_next_notification():
                     pass
+        elif run.get('job_type') == 'analysis':
+            import analysis_jobs
+            analysis_jobs.worker(WorkerApp(), run, companies)
         else:
             import source_discovery
             if run.pop('awaiting_worker', False):

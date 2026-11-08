@@ -365,6 +365,18 @@ def cancel_company_financials(d):
     return financial_jobs.cancel(sys.modules[__name__], d)
 
 
+def analysis_start(d):
+    """Queue a durable portfolio analysis instead of holding an HTTP request open."""
+    import analysis_jobs
+    import sys
+    return analysis_jobs.start(sys.modules[__name__], d)
+
+
+def analysis_run(d):
+    import analysis_jobs
+    return analysis_jobs.status(d)
+
+
 def company_source_records(company_id):
     if hasattr(store, 'company_records'):
         return store.company_records('sources', company_id)
@@ -827,6 +839,8 @@ def analyze(d):
         'source_hashes': {s['id']: s['sha256'] for s in sources},
         'selected_evidence_ids': sorted(selected), 'cost': None
     }
+    if d.get('analysis_job_id'):
+        run_rec['analysis_job_id'] = d['analysis_job_id']
     run_rec['evidence_selection_notes'] = d.get('evidence_selection_notes', [])
     run_rec['source_read_errors'] = d.get('source_read_errors', [])
     put('runs', run_rec)
@@ -979,6 +993,7 @@ def analyze(d):
             'exposure_quality': 'low',
             'confidence_basis': classified['confidence_basis'],
             **source_confidence_result,
+            **({'analysis_job_id': d['analysis_job_id']} if d.get('analysis_job_id') else {}),
             'created_at': now()
         })
         case.update(
@@ -1052,7 +1067,7 @@ def _fallback_analysis_budget_available():
     return gemini_budget.status()['calls_remaining_24h'] >= 2
 
 
-def _analyse_found_web_sources(case, company, theme, metadata):
+def _analyse_found_web_sources(case, company, theme, metadata, analysis_job_id=None):
     import exposure_sources
     import sys
 
@@ -1060,12 +1075,15 @@ def _analyse_found_web_sources(case, company, theme, metadata):
         sys.modules[__name__], company['id'], theme['id'])
     selected, notes = _fallback_evidence_ids(prepared, theme, set(metadata['source_ids']))
     try:
-        revised = analyze({
+        request = {
             'theme_id': theme['id'], 'company_id': company['id'],
             'evidence_ids': selected,
             'evidence_selection_notes': notes,
             'source_read_errors': read_errors,
-        })
+        }
+        if analysis_job_id:
+            request['analysis_job_id'] = analysis_job_id
+        revised = analyze(request)
     except Exception:
         # Keep the old unresolved case visible with the newly found documents.
         case['source_signature'] = analysis_library.source_signature(prepared)
@@ -1081,7 +1099,7 @@ def _analyse_found_web_sources(case, company, theme, metadata):
     return revised, metadata
 
 
-def _search_unresolved_case(case, company, theme, *, allow_search=True):
+def _search_unresolved_case(case, company, theme, *, allow_search=True, analysis_job_id=None):
     """Search once for a missing theme share; analyse again only with new evidence."""
     estimate = case.get('estimate')
     if (not isinstance(estimate, dict) or 'point' not in estimate
@@ -1095,7 +1113,8 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True):
             return case, {'status': 'deferred',
                           'message': 'Web evidence is saved. Follow-up analysis is waiting for the Gemini daily budget.'}, False, False
         try:
-            revised, metadata = _analyse_found_web_sources(case, company, theme, dict(previous))
+            revised, metadata = _analyse_found_web_sources(
+                case, company, theme, dict(previous), analysis_job_id)
             return revised, metadata, True, False
         except Exception as error:
             budget_reached = 'Gemini safety budget reached' in str(error)
@@ -1111,7 +1130,8 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True):
             return case, {'status': 'deferred',
                           'message': 'Saved web evidence is waiting for the Gemini daily budget.'}, False, False
         try:
-            revised, metadata = _analyse_found_web_sources(case, company, theme, dict(previous))
+            revised, metadata = _analyse_found_web_sources(
+                case, company, theme, dict(previous), analysis_job_id)
             return revised, metadata, True, False
         except Exception as error:
             budget_reached = 'Gemini safety budget reached' in str(error)
@@ -1189,7 +1209,7 @@ def _search_unresolved_case(case, company, theme, *, allow_search=True):
             case['fallback_web_search'] = metadata
             put('cases', case)
             return case, metadata, False, True
-        revised, metadata = _analyse_found_web_sources(case, company, theme, metadata)
+        revised, metadata = _analyse_found_web_sources(case, company, theme, metadata, analysis_job_id)
         return revised, metadata, True, True
     except Exception as error:
         metadata = locals().get('metadata', {
@@ -1244,6 +1264,7 @@ def analyze_all(d):
     fallback_searches = 0
     search_limit = unresolved_search_batch_limit()
     search_enabled = d.get('allow_unresolved_web_search') is not False
+    analysis_job_id = d.get('analysis_job_id')
     for comp in ready_companies:
         try:
             # Results belong to the company/theme, not to a particular
@@ -1252,7 +1273,8 @@ def analyze_all(d):
             if comp['id'] in reusable:
                 case = reusable[comp['id']]
                 case, fallback, recalculated, searched = _search_unresolved_case(
-                    case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit)
+                    case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit,
+                    analysis_job_id=analysis_job_id)
                 fallback_searches += int(searched)
                 results.append({'company_id': comp['id'], 'company_name': comp['name'],
                                 'case_id': case['id'], 'status': 'success' if recalculated else 'reused',
@@ -1266,15 +1288,19 @@ def analyze_all(d):
             if not valid_eids:
                 raise ValueError('No readable evidence is available within the theme cutoff. Check saved document links or upload a report.')
             selected, selection_notes = exposure_sources.select_evidence(comp_sources, theme)
-            case = analyze({
+            request = {
                 'theme_id': theme_id,
                 'company_id': comp['id'],
                 'evidence_ids': selected,
                 'evidence_selection_notes': selection_notes,
                 'source_read_errors': read_errors,
-            })
+            }
+            if analysis_job_id:
+                request['analysis_job_id'] = analysis_job_id
+            case = analyze(request)
             case, fallback, _, searched = _search_unresolved_case(
-                case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit)
+                case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit,
+                analysis_job_id=analysis_job_id)
             fallback_searches += int(searched)
             results.append({'company_id': comp['id'], 'company_name': comp['name'], 'case_id': case['id'],
                             'status': 'success', 'reused': False, 'case': case,
@@ -1872,6 +1898,7 @@ def _dispatch(path, d):
     if path == '/api/source/delete': return source_delete(d)
     if path == '/api/financials/populate': return populate_company_financials(d)
     if path == '/api/financials/cancel': return cancel_company_financials(d)
+    if path == '/api/analysis/start': return analysis_start(d)
     raise ValueError('Unknown API endpoint')
 
 def dispatch(path, d):
@@ -1907,8 +1934,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.valid_host():
             return self.respond({'error': 'Local access only'}, 403)
         try:
-            from urllib.parse import urlparse as up
-            path = up(self.path).path
+            from urllib.parse import parse_qs, urlparse as up
+            parsed_path = up(self.path)
+            path = parsed_path.path
             if path == '/api/health':
                 return self.respond({'status': 'ok'})
             if path in ('/login', '/login.js', '/login.css'):
@@ -1924,6 +1952,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == '/api/state':
                 return self.respond(state())
+            if path == '/api/analysis/run':
+                run_id = (parse_qs(parsed_path.query).get('id') or [''])[0]
+                try:
+                    return self.respond(analysis_run({'id': run_id}))
+                except ValueError as error:
+                    return self.respond({'error': str(error)}, 400)
             if path in ('/api/sync', '/api/sync_to_supabase', '/api/logout'):
                 return self.respond(sync_to_supabase({}))
             assets = {

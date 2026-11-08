@@ -950,22 +950,88 @@ test('Analysis view omits manual AI analysis and stage pipeline cards',async()=>
   assert.match(node('#page-actions').innerHTML,/Analyse all ready companies/);
   assert.match(html,/✧ Analyse/);
 });
-test('Per-stock Analyse forces a fresh theme exposure and confidence calculation',async()=>{
-  const {run,node} = setup();
+test('Per-stock Analyse queues a fresh theme exposure and confidence calculation',async()=>{
+  const {run,node,context} = setup();
+  context.setTimeout=()=>1;
   run(`state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
     state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'}]}];
     state.source_summaries=[{company_id:'a',count:3}];
-    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core'; currentView='analysis';`);
   await run('viewAnalysis()');
   assert.match(node('#page-content').innerHTML,/onclick="rerunCompanyAnalysis\('a', this\)"[\s\S]*✧ Analyse/);
   run(`let rerunRequest; api=async(path,data)=>{
     rerunRequest={path,data};
-    return {results:[{company_id:'a',case_id:'fresh-case'}],errors:[]};
-  }; refresh=async()=>{}; render=async()=>{};`);
+    return {analysis_run:{id:'analysis-a',job_type:'analysis',status:'running',phase:'queued',theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],companies_completed:[]}};
+  };`);
   await run("window.rerunCompanyAnalysis('a', {disabled:false,textContent:'✧ Analyse'})");
-  assert.equal(run('rerunRequest.path'),'analyze_all');
+  assert.equal(run('rerunRequest.path'),'analysis/start');
   assert.deepEqual(JSON.parse(run('JSON.stringify(rerunRequest.data)')),
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],force_recalculate:true});
+  assert.equal(run("trackedAnalysisRuns.has('analysis-a')"),true);
+  assert.match(node('#page-actions').innerHTML,/Analysis queued.*0 of 1 companies processed/);
+  assert.match(node('#page-content').innerHTML,/Analysis queued/);
+});
+test('Bulk analysis queues only ready companies rather than every holding',async()=>{
+  const {run,node,context} = setup();
+  context.setTimeout=()=>1;
+  run(`state.companies=[
+      {id:'a',name:'TSMC'}, {id:'b',name:'Samsung'}, {id:'c',name:'SK Hynix'}, {id:'d',name:'No documents'}
+    ];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'},{company_id:'c'},{company_id:'d'}]}];
+    state.source_summaries=[{company_id:'a',count:3},{company_id:'b',count:2},{company_id:'c',count:1}];
+    state.cases=[{id:'existing',theme_id:'theme-a',company_id:'b',review_status:'needs_review',estimate:{point:.2}}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core'; currentView='analysis';
+    let bulkRequest; api=async(path,data)=>{
+      bulkRequest={path,data};
+      return {analysis_run:{id:'analysis-bulk',job_type:'analysis',status:'running',phase:'queued',theme_id:'theme-a',portfolio_id:'core',company_ids:data.company_ids,companies_completed:[]}};
+    };`);
+  await run('viewAnalysis()');
+  await node('#btn-analyze-all').onclick();
+  assert.equal(run('bulkRequest.path'),'analysis/start');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(bulkRequest.data)')),
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['a','c']});
+  assert.match(node('#page-actions').innerHTML,/Analysis queued.*0 of 2 companies processed/);
+  assert.doesNotMatch(run('JSON.stringify(bulkRequest.data)'),/"b"|"d"/);
+});
+test('Analysis polling refreshes terminal results and keeps per-company failures visible',async()=>{
+  const {run,node,context} = setup();
+  let poll;
+  context.setTimeout=callback=>{poll=callback;return 1;};
+  run(`state.companies=[{id:'a',name:'TSMC'},{id:'b',name:'Samsung'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'}]}];
+    state.source_summaries=[{company_id:'a',count:3},{company_id:'b',count:3}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core'; currentView='analysis';
+    state.search_runs=[{id:'analysis-poll',job_type:'analysis',status:'running',phase:'analysing',theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b'],companies_completed:['a']}];
+    let statusRequest; apiGet=async path=>{
+      statusRequest=path;
+      return {analysis_run:{id:'analysis-poll',job_type:'analysis',status:'incomplete',phase:'complete',theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b'],companies_completed:['a','b'],analysed_count:1,failed_count:1,outcomes:{a:'success',b:'failed'},results:{a:{company_id:'a',status:'success',case_id:'fresh'},b:{company_id:'b',status:'failed',error:'Provider quota reached'}},errors:[{reason:'Provider quota reached'}],completion_reason:'provider_quota'}};
+    };
+    refresh=async()=>{state.cases=[{id:'fresh',theme_id:'theme-a',company_id:'a',review_status:'needs_review',estimate:{point:.3},source_confidence_light:'amber'}];};`);
+  await run('viewAnalysis()');
+  run('monitorAnalysisRuns()');
+  assert.equal(typeof poll,'function');
+  await poll();
+  assert.equal(run('statusRequest'),'analysis/run?id=analysis-poll');
+  assert.match(node('#page-actions').innerHTML,/Analysis finished incompletely.*2 of 2 companies processed.*1 failed/);
+  assert.match(node('#page-content').innerHTML,/30\.0%/);
+  assert.match(node('#page-content').innerHTML,/Analysis failed: Provider quota reached[\s\S]*↻ Retry/);
+  assert.equal(run("trackedAnalysisRuns.has('analysis-poll')"),false);
+});
+test('Analysis jobs are excluded from source-search polling and use an analysis-specific timeout message',async()=>{
+  const {run,context} = setup();
+  let timerCalls=0;
+  context.setTimeout=()=>{timerCalls++;return 1;};
+  run(`state.search_runs=[{id:'analysis-only',job_type:'analysis',status:'running'}];`);
+  assert.equal(run('activeSourceSearch()'),undefined);
+  run('monitorSourceSearches()');
+  assert.equal(run('trackedSourceSearches.size'),0);
+  assert.equal(timerCalls,0);
+  context.AbortController=class { constructor(){this.signal={};} abort(){} };
+  context.fetch=async()=>{const error=new Error('aborted');error.name='AbortError';throw error;};
+  await assert.rejects(run("api('analysis/start', {}, {timeoutMs: 1})"),
+    /Analysis request took too long.*may already be queued/i);
 });
 test('Per-stock rerun uses the latest case result in the queue',async()=>{
   const {run,node} = setup();

@@ -19,9 +19,19 @@ let sourceSearchPollErrorShown = false;
 let sourceSearchStarting = false;
 let displayedSourceSearchId = '';
 const trackedSourceSearches = new Set();
+let analysisPollTimer = null;
+let analysisPollErrorShown = false;
+const trackedAnalysisRuns = new Set();
 const loadedSourceCompanyIds = new Set();
+function isAnalysisRun(run) {
+  return run?.job_type === 'analysis';
+}
+function isSourceSearchRun(run) {
+  return !isAnalysisRun(run) && run?.job_type !== 'financials';
+}
 function activeSourceSearch() {
-  return (state.search_runs || []).findLast(search => search.job_type !== 'financials' && ['running', 'cancelling'].includes(search.status));
+  return (state?.search_runs || []).findLast(search =>
+    isSourceSearchRun(search) && ['running', 'cancelling'].includes(search.status));
 }
 function financialLookupRun(portfolioId, activeOnly = false) {
   return (state.search_runs || []).findLast(search => search.job_type === 'financials'
@@ -109,6 +119,9 @@ function sourceSearchCompletionSummary(search) {
 function notifyFinishedSourceSearches() {
   if ($('#alert-modal')?.open) return;
   for (const search of state.search_runs || []) {
+    // Analysis jobs share the durable `search_runs` transport, but their
+    // outcomes belong to Calculate Exposure rather than Source Documents.
+    if (isAnalysisRun(search)) continue;
     if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed', 'cancelled'].includes(search.status)) continue;
     trackedSourceSearches.delete(search.id);
     if (search.job_type === 'financials') {
@@ -133,7 +146,9 @@ function monitorSourceSearches() {
   const active = activeSourceSearch();
   if (active) displayedSourceSearchId = active.id;
   for (const search of state.search_runs || []) {
-    if (['running', 'cancelling'].includes(search.status)) trackedSourceSearches.add(search.id);
+    if (isSourceSearchRun(search) || search.job_type === 'financials') {
+      if (['running', 'cancelling'].includes(search.status)) trackedSourceSearches.add(search.id);
+    }
   }
   if (sourceSearchPollTimer || !trackedSourceSearches.size) return;
   sourceSearchPollTimer = setTimeout(async () => {
@@ -150,7 +165,7 @@ function monitorSourceSearches() {
         updateFinancialLookupStatus();
       }
       notifyFinishedSourceSearches();
-      const sourceRuns = (state.search_runs || []).filter(r => running.includes(r.id) && r.job_type !== 'financials');
+      const sourceRuns = (state.search_runs || []).filter(r => running.includes(r.id) && isSourceSearchRun(r));
       const pending = sourceRuns.some(r => ['running', 'cancelling'].includes(r.status));
       const cancelling = sourceRuns.some(r => r.status === 'cancelling');
       if (currentView === 'sources' && sourceRuns.length) {
@@ -176,6 +191,203 @@ function monitorSourceSearches() {
       monitorSourceSearches();
     }
   }, 5000);
+}
+
+// ── Background exposure analysis ─────────────────────
+// Analysis jobs deliberately use the same durable `search_runs` collection as
+// source jobs, but are polled through their own small status endpoint.  This
+// keeps a multi-company LLM run alive when a browser navigates away or reloads.
+function isActiveAnalysisRun(run) {
+  return isAnalysisRun(run) && ['queued', 'running'].includes(run.status);
+}
+function isTerminalAnalysisRun(run) {
+  return isAnalysisRun(run) && ['completed', 'incomplete', 'failed', 'cancelled'].includes(run.status);
+}
+function analysisRunsForScope(themeId, portfolioId) {
+  return (state?.search_runs || []).filter(run => isAnalysisRun(run)
+    && run.theme_id === themeId && run.portfolio_id === portfolioId);
+}
+function latestAnalysisRunForScope(themeId, portfolioId) {
+  const runs = analysisRunsForScope(themeId, portfolioId);
+  return runs.findLast(isActiveAnalysisRun) || runs.at(-1);
+}
+function latestAnalysisRunForCompany(themeId, portfolioId, companyId) {
+  const runs = analysisRunsForScope(themeId, portfolioId)
+    .filter(run => analysisRunIncludesCompany(run, companyId));
+  return runs.findLast(isActiveAnalysisRun) || runs.at(-1);
+}
+function analysisRunIncludesCompany(run, companyId) {
+  return Boolean(run && (run.company_ids || []).includes(companyId));
+}
+function analysisOutcomeRows(run) {
+  // The worker keeps a compact `outcomes` status map for progress and puts
+  // detailed errors/case IDs in `results`. Merge both so a failed company does
+  // not lose its reason merely because outcomes arrived first.
+  const rows = new Map();
+  const add = entries => {
+    if (Array.isArray(entries)) {
+      for (const row of entries) {
+        if (!row || typeof row !== 'object') continue;
+        const companyId = row.company_id;
+        if (!companyId) continue;
+        rows.set(companyId, {...(rows.get(companyId) || {}), ...row, company_id: companyId});
+      }
+      return;
+    }
+    if (!entries || typeof entries !== 'object') return;
+    for (const [companyId, value] of Object.entries(entries)) {
+      const row = value && typeof value === 'object' ? value : {status: value};
+      rows.set(companyId, {...(rows.get(companyId) || {}), ...row, company_id: row.company_id || companyId});
+    }
+  };
+  add(run?.outcomes);
+  add(run?.results); // Detailed records override compact outcome strings.
+  return [...rows.values()];
+}
+function analysisOutcomeForCompany(run, companyId) {
+  return analysisOutcomeRows(run).find(row => row?.company_id === companyId);
+}
+function analysisErrorMessages(run) {
+  const outcomeErrors = analysisOutcomeRows(run).map(row =>
+    row?.error || (['failed', 'error'].includes(String(row?.status || '').toLowerCase()) ? row?.reason : '')
+  );
+  const errors = (run?.errors || []).map(error => error?.reason || error?.error || error);
+  return [...new Set([...outcomeErrors, ...errors].filter(Boolean).map(String))];
+}
+function analysisFailedCount(run) {
+  const explicit = Number(run?.failed_count);
+  if (Number.isFinite(explicit)) return explicit;
+  return analysisOutcomeRows(run).filter(row => row?.error || ['failed', 'error'].includes(String(row?.status || '').toLowerCase())).length;
+}
+function analysisCompletedCount(run) {
+  const completed = run?.companies_completed;
+  if (Array.isArray(completed)) return completed.length;
+  const explicit = Number(run?.analysed_count);
+  if (Number.isFinite(explicit)) return explicit + analysisFailedCount(run);
+  return analysisOutcomeRows(run).length;
+}
+function analysisRunProgressText(run) {
+  if (!run) return '';
+  const total = run.company_ids?.length || 0;
+  const completed = analysisCompletedCount(run);
+  const failed = analysisFailedCount(run);
+  const processed = total ? `${completed} of ${total} companies processed` : `${completed} companies processed`;
+  if (isActiveAnalysisRun(run)) {
+    const verb = run.phase === 'queued' ? 'Analysis queued' : 'Calculating exposure';
+    return `${verb}. ${processed}. You can leave this page; progress is saved.`;
+  }
+  if (run.status === 'cancelled') return `Analysis cancelled. ${processed}.`;
+  if (run.status === 'failed') return `Analysis failed. ${processed}${failed ? `; ${failed} failed` : ''}.`;
+  if (run.status === 'incomplete') {
+    const deferred = run.deferred_company_ids?.length || 0;
+    return `Analysis finished incompletely. ${processed}${failed ? `; ${failed} failed` : ''}${deferred ? `; ${deferred} deferred` : ''}.`;
+  }
+  return `Latest analysis completed. ${processed}${failed ? `; ${failed} failed` : ''}.`;
+}
+function analysisCompanyProgress(run, companyId) {
+  if (!analysisRunIncludesCompany(run, companyId)) return null;
+  const outcome = analysisOutcomeForCompany(run, companyId);
+  const error = outcome?.error || (['failed', 'error'].includes(String(outcome?.status || '').toLowerCase()) ? outcome?.reason : '');
+  if (error) return {label: 'Analysis failed', color: 'red', error: String(error), active: false};
+  if (isActiveAnalysisRun(run)) {
+    if ((run.companies_completed || []).includes(companyId) || outcome) {
+      return {label: 'Analysis processed', color: 'green', active: false};
+    }
+    return {label: run.phase === 'queued' ? 'Analysis queued' : 'Analysing…', color: 'grey', active: true};
+  }
+  if (run.status === 'cancelled') return {label: 'Analysis cancelled', color: 'red', active: false};
+  if (run.status === 'failed') return {label: 'Analysis failed', color: 'red', active: false};
+  if (run.status === 'incomplete' && !(run.companies_completed || []).includes(companyId)) {
+    return {label: 'Analysis incomplete', color: 'amber', active: false};
+  }
+  if (run.status === 'completed') return {label: 'Analysis complete', color: 'green', active: false};
+  return null;
+}
+function mergeAnalysisRun(run) {
+  if (!run?.id) return;
+  state.search_runs = [...(state.search_runs || []).filter(existing => existing.id !== run.id), run];
+}
+function analysisCompletionSummary(run) {
+  const total = run.company_ids?.length || 0;
+  const completed = analysisCompletedCount(run);
+  const failed = analysisFailedCount(run);
+  const deferred = run.deferred_company_ids?.length || 0;
+  const processed = total ? `${completed} of ${total} companies` : `${completed} companies`;
+  const errors = analysisErrorMessages(run);
+  const extra = [
+    failed ? `${failed} failed` : '',
+    deferred ? `${deferred} deferred` : '',
+    ...errors.slice(0, 3),
+  ].filter(Boolean);
+  if (run.status === 'completed' && !failed) {
+    return `Exposure analysis completed for ${processed}.`;
+  }
+  const stateLabel = run.status === 'cancelled' ? 'was cancelled'
+    : run.status === 'failed' ? 'failed' : 'finished incompletely';
+  return `Exposure analysis ${stateLabel} after ${processed} processed.${extra.length ? ` ${extra.join('; ')}` : ''}`;
+}
+function notifyFinishedAnalysisRun(run) {
+  const summary = analysisCompletionSummary(run);
+  if (run.status === 'completed' && analysisFailedCount(run) === 0) {
+    notice(summary, 'success');
+  } else {
+    showAlert(summary, run.status === 'cancelled' ? 'Analysis cancelled' : 'Analysis needs attention', { searchCompletion: true });
+  }
+}
+async function enqueueAnalysis(payload) {
+  const response = await api('analysis/start', payload);
+  const analysisRun = response?.analysis_run;
+  if (!analysisRun?.id || !isAnalysisRun(analysisRun)) {
+    throw new Error('The exposure analysis could not be queued. Please try again.');
+  }
+  mergeAnalysisRun(analysisRun);
+  if (isActiveAnalysisRun(analysisRun)) trackedAnalysisRuns.add(analysisRun.id);
+  monitorAnalysisRuns();
+  return analysisRun;
+}
+function monitorAnalysisRuns() {
+  for (const run of state?.search_runs || []) {
+    if (isActiveAnalysisRun(run)) trackedAnalysisRuns.add(run.id);
+  }
+  if (analysisPollTimer || !trackedAnalysisRuns.size) return;
+  analysisPollTimer = setTimeout(async () => {
+    const terminalRuns = [];
+    try {
+      for (const id of [...trackedAnalysisRuns]) {
+        const response = await apiGet(`analysis/run?id=${encodeURIComponent(id)}`);
+        const analysisRun = response?.analysis_run;
+        if (!analysisRun?.id || !isAnalysisRun(analysisRun)) {
+          throw new Error('The analysis status response was invalid.');
+        }
+        mergeAnalysisRun(analysisRun);
+        if (isTerminalAnalysisRun(analysisRun)) {
+          trackedAnalysisRuns.delete(id);
+          terminalRuns.push(analysisRun);
+        }
+      }
+      analysisPollErrorShown = false;
+      if (terminalRuns.length) {
+        try {
+          await refresh();
+        } catch (error) {
+          // Preserve the just-polled job state so Calculate Exposure can still
+          // explain what happened even when a state refresh is temporarily down.
+          terminalRuns.forEach(mergeAnalysisRun);
+          notice(`Analysis finished, but the workspace could not refresh: ${error.message}`, 'warning');
+        }
+      }
+      if (currentView === 'analysis') await viewAnalysis();
+      terminalRuns.forEach(notifyFinishedAnalysisRun);
+    } catch (error) {
+      if (!analysisPollErrorShown && !$('#alert-modal')?.open) {
+        analysisPollErrorShown = true;
+        showAlert(`Could not check analysis progress: ${error.message}`, 'Analysis status unavailable', { searchCompletion: true });
+      }
+    } finally {
+      analysisPollTimer = null;
+      monitorAnalysisRuns();
+    }
+  }, 2000);
 }
 const VIEW_STORAGE_KEY = 'theme-lab-current-view';
 const SELECTION_STORAGE_KEY = 'theme-lab-dashboard-selection';
@@ -246,7 +458,8 @@ function reviewStatusBadge(s) {
 async function api(path, data, { timeoutMs = 30000 } = {}) {
   const controller = typeof AbortController === 'undefined' ? null : new AbortController();
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
-  const action = path === 'portfolio/import' ? 'Portfolio import' : 'Request';
+  const action = path === 'portfolio/import' ? 'Portfolio import'
+    : path.startsWith('analysis/') ? 'Analysis request' : 'Request';
   try {
     const r = await fetch('/api/' + path, {
       method: 'POST',
@@ -269,6 +482,9 @@ async function api(path, data, { timeoutMs = 30000 } = {}) {
     return json;
   } catch (error) {
     if (error?.name === 'AbortError') {
+      if (path.startsWith('analysis/')) {
+        throw new Error('Analysis request took too long. Check Calculate Exposure before retrying; it may already be queued.');
+      }
       throw new Error(`${action} took too long. No portfolio was imported; please try again.`);
     }
     throw error;
@@ -432,6 +648,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     restoreDashboardSelection();
     render();
     monitorSourceSearches();
+    monitorAnalysisRuns();
   }, 'Loading workspace…');
 
   // Sidebar nav
@@ -3388,6 +3605,8 @@ async function viewAnalysis() {
       latestCasesByCompany.set(caseRecord.company_id, caseRecord);
     }
   }
+  const scopedAnalysisRun = latestAnalysisRunForScope(theme?.id, portfolio?.id);
+  const analysisInProgress = isActiveAnalysisRun(scopedAnalysisRun);
 
   const companyProgress = companies.map(c => {
     const compSources = sources.filter(s => s.company_id === c.id);
@@ -3400,16 +3619,27 @@ async function viewAnalysis() {
     else if (caseRec?.review_status === 'rejected')     { status = 'Rejected';         color = 'red'; }
     else if (hasSrc)                                    { status = 'Ready to analyse'; color = 'neutral'; }
     else                                                { status = 'No sources';       color = 'red'; }
-    return { c, hasSrc, status, color, caseRec, sourceCount };
+    const rawAnalysisState = analysisCompanyProgress(
+      latestAnalysisRunForCompany(theme?.id, portfolio?.id, c.id), c.id);
+    // Once a successful case has reached the workspace, its review state is
+    // the useful per-company status. Keep terminal failures visible instead.
+    const analysisState = caseRec && !rawAnalysisState?.error ? null : rawAnalysisState;
+    return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState };
   });
 
-  const readyCount = companyProgress.filter(p => p.hasSrc && p.status === 'Ready to analyse').length;
+  // Send only companies that are actually ready. This avoids a bulk request
+  // accidentally re-running every holding, especially while a prior job is
+  // still processing one of them.
+  const readyCompanyIds = companyProgress
+    .filter(p => p.hasSrc && p.status === 'Ready to analyse' && !p.rawAnalysisState)
+    .map(p => p.c.id);
+  const readyCount = readyCompanyIds.length;
 
   $('#page-actions').innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       ${theme ? `
-        <button class="btn btn-primary" id="btn-analyze-all" ${!state.ai_configured || !readyCount ? 'disabled' : ''} style="box-shadow:0 2px 4px rgba(13,148,136,0.2)">
-          ✦ Analyse all ready companies (${readyCount})
+        <button class="btn btn-primary" id="btn-analyze-all" ${!state.ai_configured || !readyCount || analysisInProgress ? 'disabled' : ''} style="box-shadow:0 2px 4px rgba(13,148,136,0.2)">
+          ${analysisInProgress ? 'Analysing companies…' : `✦ Analyse all ready companies (${readyCount})`}
         </button>` : ''}
       <div class="text-muted text-small">${state.ai_configured
         ? `${state.calls_used} AI calls used`
@@ -3419,6 +3649,7 @@ async function viewAnalysis() {
         ${pending.length > 0 ? `<span class="badge badge-amber">${pending.length} awaiting review</span>` : ''}
         ${approved.length > 0 ? `<span class="badge badge-green">${approved.length} approved</span>` : ''}
       </div>
+      ${scopedAnalysisRun ? `<div id="analysis-run-status" class="text-muted text-small" style="flex-basis:100%;padding-top:2px">${analysisInProgress ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:12px;height:12px;vertical-align:-1px;margin-right:6px"></span>' : ''}${esc(analysisRunProgressText(scopedAnalysisRun))}</div>` : ''}
     </div>`;
 
   $('#page-content').innerHTML = `
@@ -3475,7 +3706,7 @@ async function viewAnalysis() {
                 </tr>
               </thead>
               <tbody id="analysis-queue-rows">
-                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount }) => {
+                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState }) => {
                   // A case's single point estimate is the exposure shown in
                   // this queue. `exposure_percent` preserves the same result
                   // for older saved cases that do not include nested estimate.
@@ -3495,6 +3726,7 @@ async function viewAnalysis() {
                         <span class="badge ${hasSrc ? 'neutral' : 'amber'}" style="font-size:11px">
                           ${sourceCount} docs
                         </span>
+                        ${analysisState ? `<div style="margin-top:4px;font-size:10.5px">${statusDot(analysisState.color, analysisState.error ? `${analysisState.label}: ${analysisState.error}` : analysisState.label)}</div>` : ''}
                       </td>
                       <td class="td-num" style="font-weight:700">
                         ${pt || '<span class="text-muted text-small">—</span>'}
@@ -3505,8 +3737,8 @@ async function viewAnalysis() {
                       <td style="text-align:right" onclick="event.stopPropagation()">
                         ${hasSrc ? `
                           <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}"
-                            onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme ? 'disabled' : ''}>
-                            ${caseRec ? '↻ Re-run' : '✧ Analyse'}
+                            onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme || analysisInProgress ? 'disabled' : ''}>
+                            ${analysisState?.active ? analysisState.label : (analysisState?.error ? '↻ Retry' : (caseRec ? '↻ Re-run' : '✧ Analyse'))}
                           </button>
                         ` : `
                           <button class="btn btn-sm" onclick="event.stopPropagation(); openManualUploadForCompany('${esc(c.id)}')">Upload</button>
@@ -3551,15 +3783,26 @@ async function viewAnalysis() {
 
   const btnAll = $('#btn-analyze-all');
   if (btnAll) {
-    btnAll.onclick = () => run(async () => {
-      showLoading(`Running batch AI extraction & classification across ready companies...`);
-      const res = await api('analyze_all', { theme_id: theme.id, portfolio_id: portfolio.id });
-      await refresh();
-      notice(`Batch analysis complete: ${res.analysed_count} companies sent to review.` +
-        (res.errors?.length ? ` ${res.errors.length} failed: ${res.errors.map(e => `${e.company_name}: ${e.error}`).join('; ')}` : ''),
-        res.errors?.length ? 'warning' : 'success');
-      render();
-    }, 'Batch analyzing…');
+    btnAll.onclick = async () => {
+      const originalLabel = btnAll.textContent;
+      btnAll.disabled = true;
+      btnAll.textContent = 'Queueing analysis…';
+      clearNotice();
+      try {
+        const analysisRun = await enqueueAnalysis({
+          theme_id: theme.id,
+          portfolio_id: portfolio.id,
+          company_ids: readyCompanyIds,
+        });
+        notice(`Exposure analysis queued for ${readyCompanyIds.length} ready ${readyCompanyIds.length === 1 ? 'company' : 'companies'}. You can leave this page.`, 'info');
+        if (isTerminalAnalysisRun(analysisRun)) await refresh();
+        if (currentView === 'analysis') await viewAnalysis();
+      } catch (error) {
+        btnAll.disabled = false;
+        btnAll.textContent = originalLabel || `✦ Analyse all ready companies (${readyCompanyIds.length})`;
+        showAlert(`Could not queue exposure analysis: ${error.message}`, 'Analysis could not start', { searchCompletion: true });
+      }
+    };
   }
 }
 
@@ -3570,35 +3813,34 @@ window.rerunCompanyAnalysis = async function(companyId, button) {
   if (!themeId || !portfolioId) {
     return notice('Select a theme and portfolio before running analysis.', 'error');
   }
+  if (!state.ai_configured) {
+    return notice('Configure the AI provider before running exposure analysis.', 'error');
+  }
+  if (isActiveAnalysisRun(latestAnalysisRunForScope(themeId, portfolioId))) {
+    return notice('An exposure analysis is already running for this theme and portfolio.', 'info');
+  }
   const originalLabel = button?.textContent;
   if (button) {
     button.disabled = true;
-    button.textContent = 'Analysing…';
+    button.textContent = 'Queueing…';
   }
-  showLoading(`Recalculating exposure and AI confidence for ${companyName}…`);
+  clearNotice();
   try {
-    const result = await api('analyze_all', {
+    const analysisRun = await enqueueAnalysis({
       theme_id: themeId,
       portfolio_id: portfolioId,
       company_ids: [companyId],
       force_recalculate: true
     });
-    const outcome = (result.results || []).find(row => row.company_id === companyId);
-    if (!outcome) {
-      const failure = (result.errors || []).find(row => row.company_id === companyId);
-      throw new Error(failure?.error || 'The company analysis did not return a result.');
-    }
-    await refresh();
-    notice(`${companyName} exposure and AI confidence recalculated.`, 'success');
-    await render();
+    notice(`${companyName} exposure and AI confidence analysis queued. You can leave this page.`, 'info');
+    if (isTerminalAnalysisRun(analysisRun)) await refresh();
+    if (currentView === 'analysis') await viewAnalysis();
   } catch (error) {
     if (button) {
       button.disabled = false;
       button.textContent = originalLabel || '✧ Analyse';
     }
-    showAlert(`Could not analyse ${companyName}: ${error.message}`, 'Company analysis failed', { searchCompletion: true });
-  } finally {
-    hideLoading();
+    showAlert(`Could not queue analysis for ${companyName}: ${error.message}`, 'Company analysis failed', { searchCompletion: true });
   }
 };
 
