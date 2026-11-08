@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 import uuid
 import re
+import socket
 import zipfile
 import engine
 import financials
@@ -669,10 +670,14 @@ def llm(task, payload, run_rec, provider_kind='maker'):
         request = Request(endpoint, data=json.dumps(body).encode(), headers={
             'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
     max_attempts = 2 if provider == 'claude' else 4
+    # Full annual-report evidence payloads regularly take Claude longer than the
+    # previous 90-second allowance. Keep this configurable for operators while
+    # giving production analyses enough time to finish by default.
+    exposure_timeout = max(90, int(os.environ.get('EXPOSURE_LLM_TIMEOUT_SECONDS', '300')))
     for attempt in range(max_attempts):
         try:
             if provider == 'claude':
-                with urlopen(request, timeout=90) as response:
+                with urlopen(request, timeout=exposure_timeout) as response:
                     output = json.load(response)
                 raw_text = ''.join(block.get('text', '') for block in output.get('content', [])
                                    if block.get('type') == 'text').strip()
@@ -714,7 +719,18 @@ def llm(task, payload, run_rec, provider_kind='maker'):
                                                'task': task, 'model': model, 'status': 'retry'})
                 continue
             raise ValueError('Claude returned an invalid or truncated JSON response. Please retry this company.') from None
-        except (URLError, TimeoutError, KeyError) as error:
+        except (TimeoutError, socket.timeout) as error:
+            call.update(status='failed', error=f'Provider timeout after {exposure_timeout}s', finished_at=now())
+            put('model_calls', call)
+            if provider == 'claude' and attempt < max_attempts - 1:
+                with LOCK:
+                    call = put('model_calls', {'id': ident('call'), 'created_at': now(),
+                                               'task': task, 'model': model, 'status': 'retry'})
+                continue
+            raise ValueError(
+                f'Claude timed out after {exposure_timeout} seconds. Please retry this company.'
+            ) from None
+        except (URLError, KeyError) as error:
             call.update(status='failed', error=type(error).__name__)
             put('model_calls', call)
             raise ValueError('Provider connection or JSON response failed') from None
