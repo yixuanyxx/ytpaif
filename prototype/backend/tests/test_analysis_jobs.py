@@ -106,7 +106,7 @@ class AnalysisJobsTest(unittest.TestCase):
             })['analysis_run']
         self.assertEqual(run['company_ids'], ['b'])
         self.assertTrue(run['force_recalculate'])
-        with self.assertRaisesRegex(ValueError, 'selected portfolio'):
+        with self._configured_provider(), self.assertRaisesRegex(ValueError, 'selected portfolio'):
             analysis_jobs.start(self.app, {
                 'theme_id': 'theme', 'portfolio_id': 'portfolio', 'company_ids': ['missing'],
             })
