@@ -1576,7 +1576,6 @@ tr:hover td { background: var(--slate-50); }
 .chart-axis-title { fill: var(--slate-700); font: 11px sans-serif; }
 .contribution-bar.positive { fill: var(--teal-500); }
 .contribution-bar.negative { fill: var(--red-600); }
-.subtheme-tier-selector { margin: 14px 0 8px; }
 .subtheme-pie-layout { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr); align-items: center; gap: 16px; margin-top: 12px; }
 .subtheme-pie-chart { display: block; width: 100%; max-width: 220px; margin: auto; }
 .subtheme-pie-legend { display: grid; gap: 5px; }

@@ -4566,8 +4566,17 @@ async function viewDashboard() {
   const tier1  = nodes.filter(n=>!n.parent_id);
   const cases  = demoMode ? demo.cases : (state.cases || []);
 
-  const subthemeExposure = {};
-  nodes.forEach(n => subthemeExposure[n.node_id] = { point:0 });
+  const tier1Exposure = Object.fromEntries(tier1.map(node => [node.node_id, 0]));
+  const nodesById = new Map(nodes.map(node => [node.node_id, node]));
+  const tier1ForNode = nodeId => {
+    let node = nodesById.get(nodeId);
+    const seen = new Set();
+    while (node?.parent_id && !seen.has(node.node_id)) {
+      seen.add(node.node_id);
+      node = nodesById.get(node.parent_id);
+    }
+    return node && !node.parent_id ? node : null;
+  };
 
   d.companies.forEach(row => {
     if (row.company_id === 'CASH') return;
@@ -4575,21 +4584,19 @@ async function viewDashboard() {
     if (!c) return;
     const w = row.weights.portfolio;
     Object.entries(c.estimate?.subthemes||{}).forEach(([nid, v]) => {
-      if (!subthemeExposure[nid]) subthemeExposure[nid] = { point:0 };
-      if (v.point !== null) subthemeExposure[nid].point += w * v.point;
+      const root = tier1ForNode(nid);
+      if (root && Number.isFinite(v?.point)) tier1Exposure[root.node_id] += w * v.point;
     });
   });
-  const defaultTier1 = tier1.find(node => nodes.some(child => child.parent_id === node.node_id)) || tier1[0];
-  const tier1PieHtml = selectedId => {
-    const children = nodes.filter(node => node.parent_id === selectedId);
-    const segments = children.map((node, index) => ({
+  const tier1PieHtml = () => {
+    const segments = tier1.map((node, index) => ({
       node,
-      value: subthemeExposure[node.node_id]?.point || 0,
+      value: tier1Exposure[node.node_id] || 0,
       color: ['#0f766e', '#2563eb', '#7c3aed', '#d97706', '#db2777', '#0891b2', '#65a30d', '#dc2626'][index % 8],
     })).filter(segment => Number.isFinite(segment.value) && segment.value > 0);
     const total = segments.reduce((sum, segment) => sum + segment.value, 0);
     if (!segments.length || total <= 0) {
-      return '<div class="subtheme-pie-empty">No Tier-2 point exposure is available for this Tier-1 node.</div>';
+      return '<div class="subtheme-pie-empty">No Tier-1 exposure is available from approved company analyses.</div>';
     }
 
     const center = 110, radius = 96;
@@ -4611,7 +4618,7 @@ async function viewDashboard() {
         fill="${segment.color}"><title>${esc(segment.node.name)}: ${pct(segment.value)}</title></path>`;
     }).join('');
     return `<div class="subtheme-pie-layout">
-      <svg class="subtheme-pie-chart" viewBox="0 0 220 220" role="img" aria-label="Tier-2 exposure split for ${esc(tier1.find(node => node.node_id === selectedId)?.name || '')}">
+      <svg class="subtheme-pie-chart" viewBox="0 0 220 220" role="img" aria-label="Portfolio exposure breakdown by Tier-1 theme">
         ${wedges}
       </svg>
       <div class="subtheme-pie-legend">
@@ -4619,7 +4626,7 @@ async function viewDashboard() {
           <i style="background:${segment.color}"></i>
           <span>${esc(segment.node.name)}</span>
           <strong>${pct(segment.value)}</strong>
-          <small>${pct(segment.value / total)} of selected Tier-1</small>
+          <small>${pct(segment.value / total)} of mapped portfolio exposure</small>
         </button>`).join('')}
       </div>
     </div>`;
@@ -4643,20 +4650,14 @@ async function viewDashboard() {
     <div class="grid-2 dashboard-breakdown-grid">
       ${portfolioContributionsPanel(d.companies, companies, hasSources)}
 
-      <!-- Sub-theme breakdown -->
+      <!-- Tier-1 exposure breakdown -->
       <div class="panel dashboard-chart-panel">
-        <div class="panel-title">Sub-theme exposure breakdown</div>
-        <div class="panel-subtitle">Exposure split by Tier-2 sub-theme. Select a Tier-1 node to explore its breakdown.</div>
-        ${assessedHoldings.length && tier1.length ? `<label class="dashboard-selector subtheme-tier-selector">
-          <span>Tier-1 node</span>
-          <select id="dashboard-tier1-select">
-            ${tier1.map(node => `<option value="${esc(node.node_id)}" ${node.node_id === defaultTier1?.node_id ? 'selected' : ''}>${esc(node.name)}</option>`).join('')}
-          </select>
-        </label>
-        <div id="subtheme-pie-content">${tier1PieHtml(defaultTier1?.node_id || '')}</div>` : dashboardEmptyState('Sub-theme breakdown pending',
-          tier1.length ? 'Approve company analyses to see how portfolio exposure is allocated across your taxonomy.' : 'Add a sub-theme taxonomy to organise company exposure by activity.',
+        <div class="panel-title">Exposure breakdown</div>
+        <div class="panel-subtitle">Portfolio exposure split across Tier-1 themes in the taxonomy map.</div>
+        ${assessedHoldings.length && tier1.length ? `<div id="subtheme-pie-content">${tier1PieHtml()}</div>` : dashboardEmptyState('Exposure breakdown pending',
+          tier1.length ? 'Approve company analyses to see how portfolio exposure is allocated across Tier-1 themes.' : 'Add a Tier-1 taxonomy to organise company exposure by theme.',
           tier1.length ? (hasSources ? 'analysis' : 'sources') : 'theme',
-          tier1.length ? (hasSources ? 'Open analysis & review' : 'Add source documents') : 'Define sub-themes')}
+          tier1.length ? (hasSources ? 'Open analysis & review' : 'Add source documents') : 'Define taxonomy')}
       </div>
     </div>
 
@@ -4773,16 +4774,12 @@ async function viewDashboard() {
         }).map(r => r.company_id);
 
         const targetNode = nodes.find(n => n.node_id === nid);
-        filterCompanies(targetNode?.name || nid, matchingCids, 'Sub-theme');
+        filterCompanies(targetNode?.name || nid, matchingCids, 'Tier-1 theme');
         document.getElementById('dashboard-companies')?.scrollIntoView({ behavior: 'smooth' });
       };
     });
   };
   bindSubthemeFilters();
-  $('#dashboard-tier1-select')?.addEventListener('change', event => {
-    $('#subtheme-pie-content').innerHTML = tier1PieHtml(event.target.value);
-    bindSubthemeFilters();
-  });
 
 }
 

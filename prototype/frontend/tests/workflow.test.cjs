@@ -293,7 +293,7 @@ test('Dashboard shows a loading spinner until its data request completes',async(
   assert.match(node('#page-content').innerHTML,/class="label">Reference exposure</);
   assert.match(node('#page-content').innerHTML,/class="metric-grid dashboard-summary-metrics"/);
 });
-test('Dashboard charts top ten active contributions and filters the Tier-2 pie by Tier-1',async()=>{
+test('Dashboard charts top ten portfolio contributions and aggregates the pie by Tier-1',async()=>{
   const {run,node} = setup();
   run(`state = {
     themes:[{id:'theme-1',theme_name:'AI',approved:true,nodes:[
@@ -339,13 +339,11 @@ test('Dashboard charts top ten active contributions and filters the Tier-2 pie b
   assert.doesNotMatch(chart,/Company 11/);
   assert.doesNotMatch(chart,/contribution-bar negative/);
   assert.doesNotMatch(chart,/>-[\d.]+%<\/text>/);
-  assert.match(html,/id="dashboard-tier1-select"/);
-  assert.match(html,/aria-label="Tier-2 exposure split for Compute"/);
-  assert.match(html,/Chips/);
-  assert.match(html,/Cloud/);
-  node('#dashboard-tier1-select').change({target:{value:'energy'}});
-  assert.match(node('#subtheme-pie-content').innerHTML,/Wind/);
-  assert.doesNotMatch(node('#subtheme-pie-content').innerHTML,/Chips/);
+  assert.doesNotMatch(html,/id="dashboard-tier1-select"/);
+  assert.match(html,/aria-label="Portfolio exposure breakdown by Tier-1 theme"/);
+  assert.match(html,/Compute/);
+  assert.match(html,/Energy/);
+  assert.doesNotMatch(node('#subtheme-pie-content').innerHTML,/Chips|Cloud|Wind/);
 });
 test('Dashboard demo toggle previews sample data without changing workspace data or selections',async()=>{
   const {run,node,storage} = setup();
@@ -392,7 +390,8 @@ test('Dashboard demo toggle works when the workspace has no approved theme or po
   await run('viewDashboard()');
   node('#dashboard-demo-toggle').change({target:{checked:true}});
   assert.match(node('#page-content').innerHTML,/Taiwan Semiconductor Mfg/);
-  assert.match(node('#page-content').innerHTML,/id="dashboard-tier1-select"/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/id="dashboard-tier1-select"/);
+  assert.match(node('#page-content').innerHTML,/Portfolio exposure breakdown by Tier-1 theme/);
   assert.equal(run('dashboardApiCalls'),0);
 });
 test('Dashboard New theme sits above the selector and opens a blank editor',async()=>{
