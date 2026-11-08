@@ -435,6 +435,20 @@ const pct = (v, signed = false, dec = 1) =>
   v === null || v === undefined ? '—' :
   `${signed && v > 0 ? '+' : ''}${(v * 100).toFixed(dec)}%`;
 const pctRange = e => `${pct(e.lower)} – ${pct(e.upper)}`;
+function caseExposureValue(caseRecord) {
+  const numeric = value => {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const point = numeric(caseRecord?.estimate?.point);
+  if (point !== null) return {value: point, basis: 'point'};
+  const upper = numeric(caseRecord?.estimate?.upper);
+  if (upper !== null) return {value: upper, basis: 'upper'};
+  const savedPercent = numeric(caseRecord?.exposure_percent);
+  if (savedPercent !== null) return {value: savedPercent / 100, basis: 'legacy_point'};
+  return {value: null, basis: 'missing'};
+}
 
 function badge(text, cls = 'neutral') {
   return `<span class="badge badge-${cls}">${esc(text)}</span>`;
@@ -3730,12 +3744,15 @@ async function viewAnalysis() {
               <tbody id="analysis-queue-rows">
                 ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState,
                   readyForBulk, companyAnalysisInProgress, companyAnalysisRun }) => {
-                  // A case's single point estimate is the exposure shown in
-                  // this queue. `exposure_percent` preserves the same result
-                  // for older saved cases that do not include nested estimate.
-                  const savedPercent = Number(caseRec?.exposure_percent);
-                  const point = caseRec?.estimate?.point ?? (Number.isFinite(savedPercent) ? savedPercent / 100 : null);
-                  const pt = point != null ? pct(point) : (caseRec ? '—' : '');
+                  // Prefer a calculated point. When evidence supports only a
+                  // range, show its upper bound as the requested single
+                  // exposure value. Legacy cases may only have a saved percent.
+                  const exposure = caseExposureValue(caseRec);
+                  const pt = exposure.value != null ? pct(exposure.value) : (caseRec ? '—' : '');
+                  const exposureTitle = exposure.basis === 'upper'
+                    ? 'Upper bound used because a point estimate is unavailable.'
+                    : exposure.basis === 'point' || exposure.basis === 'legacy_point'
+                      ? 'Calculated exposure point estimate.' : '';
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
                   const readyClass = readyForBulk && rowClass !== 'ready-row' ? ' ready-row' : '';
 
@@ -3752,7 +3769,7 @@ async function viewAnalysis() {
                         </span>
                         ${analysisState ? `<div style="margin-top:4px;font-size:10.5px">${statusDot(analysisState.color, analysisState.error ? `${analysisState.label}: ${analysisState.error}` : analysisState.label)}</div>` : ''}
                       </td>
-                      <td class="td-num" style="font-weight:700">
+                      <td class="td-num" style="font-weight:700"${exposureTitle ? ` title="${exposureTitle}"` : ''}>
                         ${pt || '<span class="text-muted text-small">—</span>'}
                       </td>
                       <td>

@@ -1209,6 +1209,38 @@ test('Calculate Exposure shows a point percentage and source-confidence dots',as
   assert.match(html,/75\.0%[\s\S]*dot-red[\s\S]*AI confidence: red/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
+test('Calculate Exposure uses the range upper bound when no point estimate exists',async()=>{
+  const {run,node}=setup();
+  run(`state.companies=[
+      {id:'range',name:'Range company'}, {id:'zero',name:'Exact zero'},
+      {id:'legacy',name:'Legacy point'}, {id:'missing',name:'Missing estimate'}
+    ];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[
+      {company_id:'range'},{company_id:'zero'},{company_id:'legacy'},{company_id:'missing'}]}];
+    state.source_summaries=[
+      {company_id:'range',count:2},{company_id:'zero',count:2},
+      {company_id:'legacy',count:2},{company_id:'missing',count:2}];
+    state.cases=[
+      {id:'range-case',theme_id:'theme-a',company_id:'range',review_status:'needs_review',
+       exposure_percent:null,estimate:{point:null,lower:0,upper:.5666}},
+      {id:'zero-case',theme_id:'theme-a',company_id:'zero',review_status:'needs_review',
+       exposure_percent:0,estimate:{point:0,lower:0,upper:.8}},
+      {id:'legacy-case',theme_id:'theme-a',company_id:'legacy',review_status:'needs_review',exposure_percent:50},
+      {id:'missing-case',theme_id:'theme-a',company_id:'missing',review_status:'needs_review',
+       exposure_percent:null,estimate:{point:null,lower:null,upper:null}}
+    ]; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
+  assert.match(row('Range company'),/title="Upper bound used because a point estimate is unavailable\."[\s\S]*56\.7%/);
+  assert.match(row('Exact zero'),/0\.0%/);
+  assert.doesNotMatch(row('Exact zero'),/80\.0%/);
+  assert.match(row('Legacy point'),/50\.0%/);
+  assert.match(row('Missing estimate'),/—/);
+  assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,upper:.5666},exposure_percent:null}))")),
+    {value:.5666,basis:'upper'});
+});
 test('Calculate Exposure theme and portfolio selectors update the analysis scope',async()=>{
   const {run,node,storage} = setup();
   run(`state.themes=[
