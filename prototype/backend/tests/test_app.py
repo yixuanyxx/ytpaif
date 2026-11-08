@@ -68,7 +68,7 @@ class AppFlowTest(unittest.TestCase):
             self.assertEqual(request.get_header('Authorization'), 'Bearer gemini-test-key')
 
     def test_exposure_analysis_uses_claude_sonnet_5(self):
-        output = json.dumps({'content': [{'type': 'text', 'text': '{"result":"ok"}'}],
+        output = json.dumps({'content': [{'type': 'text', 'text': 'Result:\n```json\n{"result":"ok"}\n```'}],
                              'usage': {'input_tokens': 10, 'output_tokens': 4}}).encode()
         env = {'EXPOSURE_LLM_PROVIDER': 'claude', 'CHECKER_LLM_API_KEY': 'claude-test-key',
                'CHECKER_LLM_ENDPOINT': 'https://api.anthropic.com/v1/messages',
@@ -81,10 +81,24 @@ class AppFlowTest(unittest.TestCase):
         request = send.call_args.args[0]
         body = json.loads(request.data)
         self.assertEqual(body['model'], 'claude-sonnet-5')
+        self.assertEqual(body['max_tokens'], 32768)
         self.assertEqual(body['messages'][0]['role'], 'user')
         self.assertNotIn('response_format', body)
         self.assertEqual(request.get_header('X-api-key'), 'claude-test-key')
         self.assertEqual(request.get_header('Anthropic-version'), '2023-06-01')
+
+    def test_claude_exposure_retries_once_after_truncated_json(self):
+        bad = json.dumps({'content': [{'type': 'text', 'text': '{"result":'}],
+                          'stop_reason': 'max_tokens'}).encode()
+        good = json.dumps({'content': [{'type': 'text', 'text': '{"result":"ok"}'}]}).encode()
+        env = {'EXPOSURE_LLM_PROVIDER': 'claude', 'CHECKER_LLM_API_KEY': 'claude-test-key',
+               'CHECKER_LLM_ENDPOINT': 'https://api.anthropic.com/v1/messages',
+               'CHECKER_LLM_MODEL': 'claude-sonnet-5'}
+        with patch.dict(os.environ, env, clear=False), \
+                patch.object(self.app, 'urlopen', side_effect=[io.BytesIO(bad), io.BytesIO(good)]) as send:
+            result = self.app.llm('exposure retry', {}, {'usage': []}, provider_kind='exposure')
+        self.assertEqual(result, {'result': 'ok'})
+        self.assertEqual(send.call_count, 2)
 
     def test_source_search_prefers_redis_link_cache(self):
         source = self.app.all_records('sources')[0]

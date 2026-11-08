@@ -90,6 +90,22 @@ def exposure_llm_config():
         }
     raise ValueError('EXPOSURE_LLM_PROVIDER must be claude or gemini')
 
+def _model_json_object(text):
+    """Parse a JSON object even when a provider adds a fence or short preface."""
+    value = str(text or '').strip()
+    if value.startswith('```'):
+        value = value.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        start = value.find('{')
+        if start < 0:
+            raise
+        parsed, _ = json.JSONDecoder().raw_decode(value[start:])
+    if not isinstance(parsed, dict):
+        raise ValueError('Model response must be a JSON object')
+    return parsed
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -642,7 +658,7 @@ def llm(task, payload, run_rec, provider_kind='maker'):
                 'Do not invent figures, source IDs, or qualifying allocations. '
                 'Use null with reasons for unsupported estimates. ' + task)
     if provider == 'claude':
-        body = {'model': model, 'max_tokens': 8192, 'system': system_prompt,
+        body = {'model': model, 'max_tokens': 32768, 'system': system_prompt,
                 'messages': [{'role': 'user', 'content': json.dumps(payload)}]}
         request = Request(endpoint, data=json.dumps(body).encode(), headers={
             'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json'})
@@ -652,7 +668,7 @@ def llm(task, payload, run_rec, provider_kind='maker'):
                              {'role': 'user', 'content': json.dumps(payload)}]}
         request = Request(endpoint, data=json.dumps(body).encode(), headers={
             'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
-    max_attempts = 4
+    max_attempts = 2 if provider == 'claude' else 4
     for attempt in range(max_attempts):
         try:
             if provider == 'claude':
@@ -660,13 +676,11 @@ def llm(task, payload, run_rec, provider_kind='maker'):
                     output = json.load(response)
                 raw_text = ''.join(block.get('text', '') for block in output.get('content', [])
                                    if block.get('type') == 'text').strip()
-                if raw_text.startswith('```'):
-                    raw_text = raw_text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
                 model_info = {'provider': 'anthropic', 'model': model, 'models_attempted': [model]}
-                value = json.loads(raw_text)
+                value = _model_json_object(raw_text)
             else:
                 output, model_info = gemini_fallback.request_json(request, 90, open_request=urlopen)
-                value = json.loads(output['choices'][0]['message']['content'])
+                value = _model_json_object(output['choices'][0]['message']['content'])
             put('provider_outputs', {'id': call['id'], 'response': output, 'created_at': now()})
             if not isinstance(value, dict):
                 raise ValueError('Model response must be a JSON object')
@@ -691,7 +705,16 @@ def llm(task, payload, run_rec, provider_kind='maker'):
                 call = put('model_calls', {'id': ident('call'), 'created_at': now(),
                                            'task': task, 'model': model, 'status': 'retry'})
             time.sleep(2 * (attempt + 1))
-        except (URLError, TimeoutError, KeyError, json.JSONDecodeError) as error:
+        except json.JSONDecodeError:
+            call.update(status='failed', error='Invalid or truncated provider JSON', finished_at=now())
+            put('model_calls', call)
+            if provider == 'claude' and attempt < max_attempts - 1:
+                with LOCK:
+                    call = put('model_calls', {'id': ident('call'), 'created_at': now(),
+                                               'task': task, 'model': model, 'status': 'retry'})
+                continue
+            raise ValueError('Claude returned an invalid or truncated JSON response. Please retry this company.') from None
+        except (URLError, TimeoutError, KeyError) as error:
             call.update(status='failed', error=type(error).__name__)
             put('model_calls', call)
             raise ValueError('Provider connection or JSON response failed') from None
