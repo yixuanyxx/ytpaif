@@ -64,17 +64,21 @@ class EngineCalculations(unittest.TestCase):
         self.assertAlmostEqual(d['summary']['active']['upper'], -0.08)
         self.assertIsNone(d['summary']['active']['point'])
 
-    def test_missing_is_unknown_not_zero(self):
+    def test_missing_keeps_uncertainty_while_dashboard_point_starts_at_zero(self):
         d = engine.aggregate([holding('a', 1)], [holding('a', 1)], {})
         self.assertEqual(d['coverage']['portfolio'], 0)
         self.assertEqual(d['summary']['portfolio']['upper'], 1)
-        self.assertIsNone(d['summary']['portfolio']['point'])
+        self.assertEqual(d['summary']['portfolio']['point'], 0)
         self.assertEqual(d['summary']['active']['point'], 0)
 
-    def test_unreviewed_result_is_unknown(self):
+    def test_unreviewed_calculated_result_is_included_provisionally(self):
         d = engine.aggregate([holding('a', 1)], [holding('a', 1)],
-                             {'a': {'lower': 0, 'upper': 0, 'point': 0, 'review_status': 'needs_review'}})
-        self.assertEqual(d['summary']['portfolio']['upper'], 1)
+                             {'a': {'lower': 0.2, 'upper': 0.6, 'point': 0.6,
+                                    'review_status': 'needs_review', 'point_basis': 'upper'}})
+        self.assertEqual(d['summary']['portfolio']['point'], 0.6)
+        self.assertTrue(d['companies'][0]['assessed'])
+        self.assertEqual(d['companies'][0]['review_status'], 'needs_review')
+        self.assertEqual(d['companies'][0]['point_basis'], 'upper')
 
     def test_multiple_share_classes(self):
         d = engine.aggregate([holding('a', 0.3, 'a1'), holding('a', 0.7, 'a2')],

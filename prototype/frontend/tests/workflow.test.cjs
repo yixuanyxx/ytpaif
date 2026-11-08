@@ -309,7 +309,7 @@ test('Dashboard charts top ten portfolio contributions and aggregates the pie by
     sources:[],
     cases:Array.from({length:12},(_,i)=>({
       company_id:'company-'+(i+1),theme_id:'theme-1',review_status:'approved',
-      estimate:{subthemes:{chips:{point:0.5},cloud:{point:0.5},wind:{point:1}}}
+      estimate:{subthemes:{chips:{point:0.5},cloud:{point:null,upper:0.5},wind:{point:1}}}
     }))
   };
   selectedDashboardThemeId='theme-1';

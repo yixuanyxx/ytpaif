@@ -358,11 +358,15 @@ def aggregate(portfolio, benchmark, estimates):
     cash = {'portfolio': p.get('CASH', 0), 'benchmark': b.get('CASH', 0)}
     for cid in sorted(set(p) | set(b)):
         e = estimates.get(cid)
-        assessed = bool(e and e.get('review_status') == 'approved')
-        lo, hi, point = (e['lower'], e['upper'], e['point']) if assessed else (0, 1, None)
+        review_status = e.get('review_status') if e else None
+        assessed = bool(e and review_status in ('approved', 'needs_review'))
+        # Keep the dashboard point-in-time view numeric while preserving the
+        # full uncertainty range and coverage for companies not yet calculated.
+        lo, hi, point = (e['lower'], e['upper'], e['point']) if assessed else (0, 1, 0)
         if cid == 'CASH':
             lo = hi = point = 0
             assessed = True
+            review_status = 'approved'
         weights = {'portfolio': p.get(cid, 0), 'benchmark': b.get(cid, 0), 'active': p.get(cid, 0)-b.get(cid, 0)}
         contribution = {}
         for name, w in weights.items():
@@ -377,6 +381,9 @@ def aggregate(portfolio, benchmark, estimates):
         if assessed and cid != 'CASH':
             for name in coverage:
                 coverage[name] += weights[name]
-        rows.append({'company_id': cid, 'assessed': assessed, 'weights': weights, 'exposure': {'lower': lo, 'upper': hi, 'point': point}, 'contributions': contribution})
+        rows.append({'company_id': cid, 'assessed': assessed, 'review_status': review_status,
+                     'point_basis': e.get('point_basis') if e else None,
+                     'weights': weights, 'exposure': {'lower': lo, 'upper': hi, 'point': point},
+                     'contributions': contribution})
     rows.sort(key=lambda r: abs(r['contributions']['active']['point'] or r['contributions']['active']['upper']), reverse=True)
     return {'summary': summary, 'coverage': coverage, 'cash': cash, 'companies': rows}

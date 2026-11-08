@@ -554,9 +554,15 @@ def selected_estimates(theme_id):
     result = {}
     theme = get('themes', theme_id)
     for c in analysis_library.current_results(all_records('cases'), [theme], source_link_records()):
-        if c['review_status'] == 'approved':
+        if c['review_status'] in ('approved', 'needs_review'):
+            estimate = dict(c['estimate'])
+            point_basis = 'point'
+            if estimate.get('point') is None and isinstance(estimate.get('upper'), (int, float)):
+                estimate['point'] = max(0.0, min(1.0, estimate['upper']))
+                point_basis = 'upper'
             result[c['company_id']] = {
-                **c['estimate'], 'review_status': c['review_status'], 'case_id': c['id']
+                **estimate, 'review_status': c['review_status'], 'case_id': c['id'],
+                'point_basis': point_basis,
             }
     return result
 

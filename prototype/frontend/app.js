@@ -4351,9 +4351,9 @@ function portfolioContributionsPanel(rows, companies, hasSources) {
   const topCompanies = plotted.slice(0, 10);
   const body = topCompanies.length
     ? portfolioContributionBarChart(topCompanies, companies)
-    : dashboardEmptyState(assessed.length ? 'Point estimates pending' : 'No approved exposure yet',
-        assessed.length ? 'Reviewed cases currently contain ranges only. Resolve the missing revenue allocations to plot point contributions.'
-          : 'Contributions will appear after company revenue exposure is analysed and approved. Missing evidence is not treated as zero exposure.',
+    : dashboardEmptyState(assessed.length ? 'Exposure values pending' : 'No calculated exposure yet',
+        assessed.length ? 'Calculated cases do not yet contain a usable point or upper-bound exposure.'
+          : 'Contributions will appear after company revenue exposure is calculated. Missing evidence is not treated as zero exposure.',
         hasSources ? 'analysis' : 'sources', hasSources ? 'Review company analyses' : 'Add source documents');
   return `<div class="panel dashboard-chart-panel">
     <div class="dashboard-panel-heading"><div class="panel-title">Portfolio exposure contributions</div>
@@ -4580,12 +4580,14 @@ async function viewDashboard() {
 
   d.companies.forEach(row => {
     if (row.company_id === 'CASH') return;
-    const c = cases.filter(x => x.company_id === row.company_id && x.theme_id === theme.id && x.review_status === 'approved').at(-1);
+    const c = cases.filter(x => x.company_id === row.company_id && x.theme_id === theme.id
+      && ['approved','needs_review'].includes(x.review_status)).at(-1);
     if (!c) return;
     const w = row.weights.portfolio;
     Object.entries(c.estimate?.subthemes||{}).forEach(([nid, v]) => {
       const root = tier1ForNode(nid);
-      if (root && Number.isFinite(v?.point)) tier1Exposure[root.node_id] += w * v.point;
+      const exposure = Number.isFinite(v?.point) ? v.point : v?.upper;
+      if (root && Number.isFinite(exposure)) tier1Exposure[root.node_id] += w * exposure;
     });
   });
   const tier1PieHtml = () => {
@@ -4665,7 +4667,7 @@ async function viewDashboard() {
     <div class="panel" id="dashboard-companies">
       <div class="panel-title">Company-level exposure</div>
       <div class="panel-subtitle">
-        Approved results only · ${esc(snapshot?.portfolio?.[0]?.as_of_date||'')}
+        Latest calculated results · ${esc(snapshot?.portfolio?.[0]?.as_of_date||'')}
       </div>
 
       <div class="company-filter-banner" id="company-filter-banner" hidden style="align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:12px 0;border:1px solid var(--teal-200);border-left:4px solid var(--teal-500);border-radius:8px;background:var(--teal-50)">
@@ -4703,7 +4705,7 @@ async function viewDashboard() {
                 <td class="td-num">${pct(row.contributions.portfolio.point,false,2)}</td>
                 <td class="td-num">${pct(row.contributions.benchmark?.point,false,2)}</td>
                 <td class="td-num ${ap===null?'':ap>=0?'positive':'negative'}">${pct(ap,true,2)}</td>
-                <td>${row.assessed ? badge('Assessed','green') : badge('Unassessed','amber')}</td>
+                <td>${row.review_status === 'needs_review' ? badge('Awaiting review','amber') : row.assessed ? badge('Assessed','green') : badge('Unassessed','amber')}</td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -4768,7 +4770,8 @@ async function viewDashboard() {
         }
 
         const matchingCids = d.companies.filter(row => {
-          const c = cases.filter(c => c.company_id === row.company_id && c.theme_id === theme.id && c.review_status === 'approved').at(-1);
+          const c = cases.filter(c => c.company_id === row.company_id && c.theme_id === theme.id
+            && ['approved','needs_review'].includes(c.review_status)).at(-1);
           if (!c) return false;
           return c.case?.units?.some(u => (u.node_ids || []).some(n => ids.has(n)) || Object.entries(u.allocations || {}).some(([n, s]) => ids.has(n) && s > 0));
         }).map(r => r.company_id);
