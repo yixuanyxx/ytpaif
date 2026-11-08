@@ -262,7 +262,20 @@ async function api(path, data, { timeoutMs = 30000 } = {}) {
 
 async function apiGet(path) {
   const r = await fetch('/api/' + path);
-  const json = await r.json();
+  let json;
+  try {
+    json = await r.json();
+  } catch {
+    if (r.status === 401) {
+      window.location.assign('/login');
+      throw new Error('Your session has expired. Redirecting to sign in…');
+    }
+    throw new Error(`The server returned an invalid response (HTTP ${r.status || 'unknown'}). Please try again.`);
+  }
+  if (r.status === 401) {
+    window.location.assign('/login');
+    throw new Error('Your session has expired. Redirecting to sign in…');
+  }
   if (!r.ok) throw new Error(json.error || 'Fetch failed');
   return json;
 }

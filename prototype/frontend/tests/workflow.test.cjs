@@ -67,6 +67,18 @@ test('Portfolio import reports an HTML proxy error clearly', async()=>{
   await assert.rejects(run("api('portfolio/import', {}, {timeoutMs: 50})"),
     /Portfolio import could not be completed by the server \(HTTP 502\)/);
 });
+test('Workspace state redirects to sign in when the session expires', async()=>{
+  const {context,run} = setup();
+  context.window.location = { pathname:'/', assign(url) { this.redirectedTo = url; } };
+  context.fetch = async()=>({status:401, ok:false, json:async()=>({error:'Login required'})});
+  await assert.rejects(run("apiGet('state')"),/session has expired/i);
+  assert.equal(context.window.location.redirectedTo, '/login');
+});
+test('Workspace state reports a non-JSON server response clearly', async()=>{
+  const {context,run} = setup();
+  context.fetch = async()=>({status:502, ok:false, json:async()=>{ throw new SyntaxError('Unexpected token <'); }});
+  await assert.rejects(run("apiGet('state')"),/server returned an invalid response \(HTTP 502\)/i);
+});
 test('Dashboard selection survives reload with independently selected theme and portfolio',()=>{
   const first=setup();
   first.run("selectedDashboardThemeId='t1'; selectedDashboardPortfolioId='p1'; saveDashboardSelection()");
