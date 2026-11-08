@@ -1197,6 +1197,30 @@ test('Top and per-stock cancel controls target the jobs they describe',async()=>
   assert.equal(run("state.search_runs.find(run=>run.id==='bulk-running').status"),'running');
   assert.match(node('#page-content').innerHTML,/Bulk stock[\s\S]*Analysis cancelled[\s\S]*Retry →/);
 });
+test('Cancelling a singleton stock run stops its spinner immediately',async()=>{
+  const {run,node,context}=setup();
+  context.setTimeout=()=>1;
+  run(`state.companies=[{id:'a',name:'TSMC'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'a'}]}];
+    state.source_summaries=[{company_id:'a',count:2}];
+    state.search_runs=[{id:'stock-running',job_type:'analysis',status:'running',phase:'analysing',
+      theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],companies_completed:[]}];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';
+    currentView='analysis'; trackedAnalysisRuns.add('stock-running');
+    api=async()=>({analysis_run:{id:'stock-running',job_type:'analysis',status:'cancelled',phase:'finished',
+      theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],companies_completed:[],cancelled_company_ids:['a']},
+      cancelled_company_id:'a'});
+    refresh=async()=>{};`);
+  await run('viewAnalysis()');
+  assert.match(node('#page-actions').innerHTML,/Calculating exposure[\s\S]*0 of 1 companies processed/);
+  context.rowButton={disabled:false,textContent:'Cancel'};
+  await run("window.cancelCompanyAnalysis('stock-running','a',rowButton)");
+  assert.equal(run("trackedAnalysisRuns.has('stock-running')"),false);
+  assert.doesNotMatch(node('#page-actions').innerHTML,/Calculating exposure|dashboard-loading-spinner/);
+  assert.match(node('#page-actions').innerHTML,/Analysis cancelled/);
+  assert.doesNotMatch(node('#notice-area').innerHTML,/remaining batch is still running/);
+});
 test('Analysis cancellation errors restore the clicked control',async()=>{
   const {run,node,context}=setup();
   node('#alert-modal').showModal=()=>{};

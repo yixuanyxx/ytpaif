@@ -200,6 +200,23 @@ q.save(r)
             with self.subTest(mode=mode):
                 self.assert_cancel_terminates_owned_worker(mode)
 
+    def test_company_cancel_requests_one_shot_interrupt_without_stopping_batch(self):
+        run = {
+            **self.run, 'job_type': 'analysis', 'portfolio_id': 'portfolio',
+            'company_ids': ['a', 'b'], 'companies_completed': [],
+            'inflight_company_id': 'a', 'phase': 'analysing',
+        }
+        self.queue.enqueue(run, [{'id': 'a'}, {'id': 'b'}])
+        cancelled = self.queue.cancel_company(run['id'], 'a')
+        self.assertEqual(cancelled['status'], 'running')
+        self.assertEqual(cancelled['interrupt_company_id'], 'a')
+        self.assertEqual(self.queue.claim_company_interrupt(run['id']), 'a')
+        self.assertIsNone(self.queue.claim_company_interrupt(run['id']))
+        saved, _ = self.queue.job(run['id'])
+        self.assertEqual(saved['cancelled_company_ids'], ['a'])
+        self.assertNotIn('interrupt_company_id', saved)
+        self.assertIsNotNone(self.queue.next_job())
+
     def assert_cancel_terminates_owned_worker(self, mode):
         queue = source_jobs.Queue(Path(self.temp.name) / f'{mode}.sqlite3')
         run = {**self.run, **({'job_type': mode, 'portfolio_id': 'p'} if mode in ('financials', 'analysis')

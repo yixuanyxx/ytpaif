@@ -326,6 +326,19 @@ class AnalysisJobsTest(unittest.TestCase):
         self.assertNotIn('b', saved['cancelled_company_ids'])
         self.assertIsNotNone(self.queue.next_job())
 
+    def test_row_cancel_terminalizes_a_single_company_run_immediately(self):
+        run = {**self._run(), 'company_ids': ['a'], 'phase': 'analysing',
+               'inflight_company_id': 'a'}
+        self.queue.enqueue(run, [{'id': 'a'}])
+        with patch.object(analysis_jobs.source_jobs, 'Queue', return_value=self.queue):
+            response = analysis_jobs.cancel(self.app, {'id': run['id'], 'company_id': 'a'})
+        saved, _ = self.queue.job(run['id'])
+        self.assertEqual(response['cancelled_company_id'], 'a')
+        self.assertEqual(saved['status'], 'cancelled')
+        self.assertEqual(saved['phase'], 'finished')
+        self.assertEqual(saved['cancelled_company_ids'], ['a'])
+        self.assertIsNone(self.queue.next_job())
+
     def test_worker_skips_cancelled_company_and_continues_remaining_batch(self):
         run = self._run()
         self.app.is_cancelled = Mock(return_value=False)

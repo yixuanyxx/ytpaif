@@ -4021,10 +4021,13 @@ window.cancelCompanyAnalysis = async function(runId, companyId, button) {
       throw new Error('The company analysis could not be cancelled.');
     }
     mergeAnalysisRun(updatedRun);
+    if (isTerminalAnalysisRun(updatedRun)) trackedAnalysisRuns.delete(runId);
     try { await refresh(); } catch {}
     mergeAnalysisRun(updatedRun);
     if (currentView === 'analysis') await viewAnalysis();
-    notice('This company exposure calculation was cancelled. The remaining batch is still running.', 'warning');
+    notice(isTerminalAnalysisRun(updatedRun)
+      ? 'This company exposure calculation was cancelled.'
+      : 'This company exposure calculation was cancelled. The remaining batch is still running.', 'warning');
   } catch (error) {
     if (button) { button.disabled = original.disabled; button.textContent = original.textContent; }
     showAlert(`Could not cancel this company analysis: ${error.message}`, 'Company cancellation failed', {searchCompletion:true});

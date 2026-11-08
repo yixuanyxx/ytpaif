@@ -157,9 +157,33 @@ class Queue:
             run['cancelled_company_ids'] = list(dict.fromkeys([
                 *run.get('cancelled_company_ids', []), company_id,
             ]))
-            db.execute("UPDATE jobs SET payload=? WHERE id=? AND state IN ('queued','running')",
-                       (json.dumps(run), job_id))
+            if run.get('inflight_company_id') == company_id:
+                run['interrupt_company_id'] = company_id
+            remaining = [candidate for candidate in run.get('company_ids', [])
+                         if candidate not in run.get('companies_completed', [])
+                         and candidate not in run['cancelled_company_ids']]
+            state = 'running'
+            if not remaining:
+                run['status'] = 'cancelled'
+                run['phase'] = 'finished'
+                run['cancel_reason'] = 'All remaining company analyses were cancelled by user.'
+                state = 'cancelled'
+            db.execute("UPDATE jobs SET payload=?, state=? WHERE id=? AND state IN ('queued','running')",
+                       (json.dumps(run), state, job_id))
             return run
+
+    def claim_company_interrupt(self, job_id):
+        """Consume a one-shot request to interrupt the current analysis child."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                return None
+            run = json.loads(row[0])
+            company_id = run.pop('interrupt_company_id', None)
+            if company_id:
+                db.execute('UPDATE jobs SET payload=? WHERE id=?', (json.dumps(run), job_id))
+            return company_id
 
     def merge(self, remote):
         rows = {record['id']: record for record in remote}
@@ -274,6 +298,16 @@ def supervise(queue, command=None, idle_seconds=None):
                     # This is the exact process launched for this job. Killing
                     # it also closes discovery/lookup threads blocked in HTTP;
                     # a cancelled job must not occupy the queue until timeout.
+                    child.terminate()
+                    try:
+                        child.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=2)
+                    break
+                if (current.get('job_type') == 'analysis'
+                        and current.get('interrupt_company_id')
+                        and queue.claim_company_interrupt(job_id)):
                     child.terminate()
                     try:
                         child.wait(timeout=2)
