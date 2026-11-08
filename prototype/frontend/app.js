@@ -3659,6 +3659,11 @@ async function viewAnalysis() {
   }
   const companyIds = portfolioCompanyIds(portfolio);
   const companies = demoMode ? demo.companies : (state.companies || []).filter(c => companyIds.has(c.id));
+  const portfolioHoldingCount = (portfolio?.rows || []).filter(row => !row.excluded && row.company_id && row.company_id !== 'CASH').length;
+  const portfolioCompanyCount = companyIds.size;
+  const portfolioScopeText = portfolioHoldingCount !== portfolioCompanyCount
+    ? `${portfolioCompanyCount} unique companies across ${portfolioHoldingCount} portfolio holdings`
+    : `${portfolioCompanyCount} companies in the portfolio`;
   const counts = new Map(demoMode ? demo.cases.map(c => [c.company_id,c.source_count]) : (state.source_summaries || []).map(summary => [summary.company_id, summary.count]));
   const sources = demoMode ? [] : (state.sources || []);
   const cases = demoMode ? demo.cases : (state.cases || []).filter(c => companyIds.has(c.company_id) && c.theme_id === theme?.id);
@@ -3720,7 +3725,7 @@ async function viewAnalysis() {
       <label class="dashboard-demo-toggle"><input type="checkbox" id="analysis-demo-toggle" ${demoMode?'checked':''}><span>Demo data</span></label>
       ${demoMode?'<span class="badge badge-amber">Illustrative</span>':theme ? `
         <button class="btn btn-primary" id="btn-analyze-all" ${!state.ai_configured || !readyCount || analysisInProgress ? 'disabled' : ''} style="box-shadow:0 2px 4px rgba(13,148,136,0.2)">
-          ${analysisInProgress ? 'Analysing companies…' : `✦ Analyse all ready companies (${readyCount})`}
+          ${analysisInProgress ? 'Analysing companies…' : `✦ Analyse all ready companies (${readyCount} of ${portfolioCompanyCount})`}
         </button>
         ${analysisInProgress ? `<button class="btn btn-danger" id="btn-cancel-analysis"
           data-analysis-run-id="${esc(scopedAnalysisRun.id)}"
@@ -3734,7 +3739,7 @@ async function viewAnalysis() {
         ${pending.length > 0 ? `<span class="badge badge-amber">${pending.length} awaiting review</span>` : ''}
         ${approved.length > 0 ? `<span class="badge badge-green">${approved.length} approved</span>` : ''}
       </div>
-      ${scopedAnalysisRun ? `<div id="analysis-run-status" class="text-muted text-small" style="flex-basis:100%;padding-top:2px">${analysisInProgress ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:12px;height:12px;vertical-align:-1px;margin-right:6px"></span>' : ''}${esc(analysisRunProgressText(scopedAnalysisRun))}</div>` : ''}
+      ${scopedAnalysisRun ? `<div id="analysis-run-status" class="text-muted text-small" style="flex-basis:100%;padding-top:2px">${analysisInProgress ? '<span class="dashboard-loading-spinner" aria-hidden="true" style="display:inline-block;width:12px;height:12px;vertical-align:-1px;margin-right:6px"></span>' : ''}${esc(analysisRunProgressText(scopedAnalysisRun))} ${esc(portfolioScopeText)}.</div>` : `<div class="text-muted text-small" style="flex-basis:100%">${esc(portfolioScopeText)} · ${readyCount} ready for analysis.</div>`}
     </div>`;
 
   $('#page-content').innerHTML = `
@@ -3913,7 +3918,7 @@ async function viewAnalysis() {
         if (currentView === 'analysis') await viewAnalysis();
       } catch (error) {
         btnAll.disabled = false;
-        btnAll.textContent = originalLabel || `✦ Analyse all ready companies (${readyCompanyIds.length})`;
+        btnAll.textContent = originalLabel || `✦ Analyse all ready companies (${readyCompanyIds.length} of ${portfolioCompanyCount})`;
         showAlert(`Could not queue exposure analysis: ${error.message}`, 'Analysis could not start', { searchCompletion: true });
       }
     };
@@ -4556,6 +4561,10 @@ async function viewDashboard() {
   }
 
   const s = d.summary;
+  const rawBenchmarkName = String(snapshot.benchmark_name || '').trim();
+  const benchmarkName = !rawBenchmarkName || /aaxj|msci asia ex japan|reference benchmark/i.test(rawBenchmarkName)
+    ? 'ETF AAXJ' : rawBenchmarkName;
+  const benchmarkShortName = benchmarkName.replace(/^ETF\s+/i, '');
   const assessedHoldings = d.companies.filter(r => r.company_id !== 'CASH' && r.assessed && (r.weights.portfolio || r.weights.benchmark));
   const hasSources = !demoMode && (state.sources || []).some(source => d.companies.some(row => row.company_id === source.company_id));
   const companyName = id => companies.find(c=>c.id===id)?.name || id;
@@ -4659,16 +4668,16 @@ async function viewDashboard() {
   $('#page-actions').innerHTML = `
     <div style="display:flex;gap:8px">
       <button class="btn btn-sm btn-secondary" id="btn-reference" title="Filter to reference benchmark constituents">
-        Benchmark: ${esc(snapshot.benchmark_name || 'MSCI Asia ex Japan')}
+        Benchmark: ${esc(benchmarkName)}
       </button>
     </div>`;
 
   renderDashboardBody(`
     <!-- Top-level exposure metrics -->
     <div class="metric-grid dashboard-summary-metrics">
-      ${metricTile('Portfolio exposure', pct(s.portfolio.point), '', '')}
-      ${metricTile('Reference exposure', pct(s.benchmark.point), '', '')}
-      ${metricTile('Active exposure', pct(s.active.point, true), '', 'accent')}
+      ${metricTile('Portfolio exposure', pct(s.portfolio.point), 'Total portfolio exposure percentage to the theme', '')}
+      ${metricTile(`${benchmarkName} exposure`, pct(s.benchmark.point), `${benchmarkName} exposure percentage to the theme`, '')}
+      ${metricTile('Active exposure', pct(s.active.point, true), `Portfolio exposure − ${benchmarkName} exposure`, 'accent')}
     </div>
 
     <div class="grid-2 dashboard-breakdown-grid">
@@ -4707,10 +4716,10 @@ async function viewDashboard() {
             <tr>
               <th>Company</th>
               <th class="td-num">Portfolio wt</th>
-              <th class="td-num">Ref wt</th>
+              <th class="td-num">${esc(benchmarkShortName)} wt</th>
               <th class="td-num">Active wt</th>
               <th class="td-num">Portfolio exposure</th>
-              <th class="td-num">Ref exposure</th>
+              <th class="td-num">${esc(benchmarkShortName)} exposure</th>
               <th class="td-num">Active exposure</th>
               <th>Status</th>
             </tr>
@@ -4770,7 +4779,7 @@ async function viewDashboard() {
 
   $('#btn-reference').onclick = () => {
     const benchmarkIds = d.companies.filter(r => r.weights.benchmark > 0).map(r => r.company_id);
-    filterCompanies(snapshot.benchmark_name || 'MSCI Asia ex Japan', benchmarkIds, 'Benchmark');
+    filterCompanies(benchmarkName, benchmarkIds, 'Benchmark');
   };
 
   const bindSubthemeFilters = () => {

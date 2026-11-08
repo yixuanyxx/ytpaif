@@ -290,7 +290,7 @@ test('Dashboard shows a loading spinner until its data request completes',async(
   assert.doesNotMatch(node('#page-content').innerHTML,/dashboard-loading/);
   assert.match(node('#page-content').innerHTML,/Company-level exposure/);
   assert.match(node('#page-content').innerHTML,/class="label">Portfolio exposure</);
-  assert.match(node('#page-content').innerHTML,/class="label">Reference exposure</);
+  assert.match(node('#page-content').innerHTML,/class="label">ETF AAXJ exposure</);
   assert.match(node('#page-content').innerHTML,/class="metric-grid dashboard-summary-metrics"/);
 });
 test('Dashboard charts top ten portfolio contributions and aggregates the pie by Tier-1',async()=>{
@@ -334,7 +334,7 @@ test('Dashboard charts top ten portfolio contributions and aggregates the pie by
   await run('viewDashboard()');
   const html = node('#page-content').innerHTML;
   assert.match(html,/<div class="label">Portfolio exposure<\/div>/);
-  assert.match(html,/<div class="label">Reference exposure<\/div>/);
+  assert.match(html,/<div class="label">ETF AAXJ exposure<\/div>/);
   assert.match(html,/<div class="label">Active exposure<\/div>/);
   assert.match(html,/Top 10 of 12/);
   assert.match(html,/Portfolio exposure contribution \(%\)/);
@@ -985,7 +985,7 @@ test('Bulk analysis queues source-ready and source-less companies that need expo
       {id:'a',name:'TSMC'}, {id:'b',name:'Samsung'}, {id:'c',name:'SK Hynix'}, {id:'d',name:'No documents'}
     ];
     state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
-    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'},{company_id:'c'},{company_id:'d'}]}];
+    state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'a',security_id:'a2'},{company_id:'b'},{company_id:'c'},{company_id:'d'}]}];
     state.source_summaries=[{company_id:'a',count:3},{company_id:'b',count:2},{company_id:'c',count:1}];
     state.cases=[{id:'existing',theme_id:'theme-a',company_id:'b',review_status:'needs_review',estimate:{point:.2}}];
     state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core'; currentView='analysis';
@@ -994,6 +994,7 @@ test('Bulk analysis queues source-ready and source-less companies that need expo
       return {analysis_run:{id:'analysis-bulk',job_type:'analysis',status:'running',phase:'queued',theme_id:'theme-a',portfolio_id:'core',company_ids:data.company_ids,companies_completed:[]}};
     };`);
   await run('viewAnalysis()');
+  assert.match(node('#page-actions').innerHTML,/4 unique companies across 5 portfolio holdings/);
   await node('#btn-analyze-all').onclick();
   assert.equal(run('bulkRequest.path'),'analysis/start');
   assert.deepEqual(JSON.parse(run('JSON.stringify(bulkRequest.data)')),
@@ -1031,7 +1032,7 @@ test('Bulk analysis includes source-ready failures and deferred companies for re
         theme_id:'theme-a',portfolio_id:'core',company_ids:data.company_ids,companies_completed:[]}};
     };`);
   await run('viewAnalysis()');
-  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(4\)/);
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(4 of 5\)/);
   assert.match(node('#page-content').innerHTML,/queue-row pending-row ready-row[\s\S]*Failed rerun/);
   await node('#btn-analyze-all').onclick();
   assert.equal(run('retryBulkRequest.path'),'analysis/start');
@@ -1062,7 +1063,7 @@ test('Bulk analysis retries saved zero and unknown cases but suppresses recent c
         theme_id:'theme-a',portfolio_id:'core',company_ids:data.company_ids,companies_completed:[]}};
     };`);
   await run('viewAnalysis()');
-  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(2\)/);
+  assert.match(node('#page-actions').innerHTML,/Analyse all ready companies \(2 of 4\)/);
   await node('#btn-analyze-all').onclick();
   assert.deepEqual(JSON.parse(run('JSON.stringify(fallbackBulkRequest.data)')),
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['zero','unknown']});
