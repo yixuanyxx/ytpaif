@@ -11,6 +11,9 @@ let currentView = 'dashboard';
 let selectedDashboardThemeId = '';
 let selectedDashboardPortfolioId = '';
 let dashboardDemoEnabled = false;
+let analysisDemoEnabled = false;
+let analysisDemoCases = [];
+let analysisDemoCompanies = [];
 let selectedSourcePortfolioId = '';
 let pendingManualUploadCompanyId = '';
 let dashboardRenderVersion = 0;
@@ -493,6 +496,24 @@ function sourceConfidenceDot(light, basis) {
     ? 'Re-run the company analysis to calculate source confidence.'
     : `AI confidence: ${label}.`);
   return `<span class="status-indicator" title="${esc(detail)}"><span class="status-dot-sm confidence-light-dot dot-${color}" role="img" aria-label="AI confidence: ${esc(label)}"></span></span>`;
+}
+function confidencePill(caseRecord) {
+  if (!caseRecord) return '<span title="AI confidence is not available">—</span>';
+  const aliases = {green:'high', yellow:'medium', amber:'medium', red:'low'};
+  const band = String(caseRecord.classification_confidence
+    || aliases[String(caseRecord.source_confidence_light || '').toLowerCase()] || '').toLowerCase();
+  const fallback = {high:92, medium:70, low:35};
+  const saved = Number(caseRecord.confidence_percent);
+  const value = Number.isFinite(saved) ? Math.max(0, Math.min(100, saved)) : fallback[band];
+  if (!Number.isFinite(value)) return '<span title="AI confidence is not available">—</span>';
+  const colors = {
+    high: ['#dcfce7', '#86efac'],
+    medium: ['#fef3c7', '#fcd34d'],
+    low: ['#fee2e2', '#fca5a5'],
+  };
+  const [background, border] = colors[band] || ['#f1f5f9', '#cbd5e1'];
+  const title = caseRecord.source_confidence_basis || `${band || 'AI'} confidence`;
+  return `<span title="${esc(title)}" style="display:inline-flex;align-items:center;justify-content:center;min-width:54px;padding:4px 10px;border:1px solid ${border};border-radius:999px;background:${background};color:#0f172a;font-weight:700">${Math.round(value)}%</span>`;
 }
 function reviewStatusBadge(s) {
   if (s === 'approved')    return badge('Approved', 'green');
@@ -3628,21 +3649,27 @@ async function viewAnalysis() {
   setPageHeader('STEP 4', 'Calculate Exposure',
     'Extract revenue facts, audit classifications with Claude Sonnet 5, and review cases');
 
-  const themes = (state.themes || []).filter(t => t.approved);
-  const theme = themes.find(t => t.id === selectedDashboardThemeId);
-  const eligiblePortfolios = state.portfolio_imports || [];
-  const portfolio = eligiblePortfolios.find(p => p.id === selectedDashboardPortfolioId)
+  const demoMode = analysisDemoEnabled;
+  const demo = demoMode ? analysisDemoData() : null;
+  analysisDemoCases = demo?.cases || [];
+  analysisDemoCompanies = demo?.companies || [];
+  const themes = demoMode ? [demo.theme] : (state.themes || []).filter(t => t.approved);
+  const theme = demoMode ? demo.theme : themes.find(t => t.id === selectedDashboardThemeId);
+  const eligiblePortfolios = demoMode ? [demo.portfolio] : (state.portfolio_imports || []);
+  const portfolio = demoMode ? demo.portfolio : eligiblePortfolios.find(p => p.id === selectedDashboardPortfolioId)
     || activeSourcePortfolio(eligiblePortfolios);
-  selectedDashboardThemeId = theme?.id || '';
-  selectedDashboardPortfolioId = portfolio?.id || '';
-  selectedSourcePortfolioId = portfolio?.id || '';
-  saveDashboardSelection();
-  saveSourcePortfolioSelection();
+  if (!demoMode) {
+    selectedDashboardThemeId = theme?.id || '';
+    selectedDashboardPortfolioId = portfolio?.id || '';
+    selectedSourcePortfolioId = portfolio?.id || '';
+    saveDashboardSelection();
+    saveSourcePortfolioSelection();
+  }
   const companyIds = portfolioCompanyIds(portfolio);
-  const companies = (state.companies || []).filter(c => companyIds.has(c.id));
-  const counts = new Map((state.source_summaries || []).map(summary => [summary.company_id, summary.count]));
-  const sources = state.sources || [];
-  const cases = (state.cases || []).filter(c => companyIds.has(c.company_id) && c.theme_id === theme?.id);
+  const companies = demoMode ? demo.companies : (state.companies || []).filter(c => companyIds.has(c.id));
+  const counts = new Map(demoMode ? demo.cases.map(c => [c.company_id,c.source_count]) : (state.source_summaries || []).map(summary => [summary.company_id, summary.count]));
+  const sources = demoMode ? [] : (state.sources || []);
+  const cases = demoMode ? demo.cases : (state.cases || []).filter(c => companyIds.has(c.company_id) && c.theme_id === theme?.id);
   const approved  = cases.filter(c => c.review_status === 'approved');
   const pending   = cases.filter(c => c.review_status === 'needs_review');
   const latestCasesByCompany = new Map();
@@ -3652,7 +3679,7 @@ async function viewAnalysis() {
       latestCasesByCompany.set(caseRecord.company_id, caseRecord);
     }
   }
-  const scopedAnalysisRun = latestAnalysisRunForScope(theme?.id, portfolio?.id);
+  const scopedAnalysisRun = demoMode ? null : latestAnalysisRunForScope(theme?.id, portfolio?.id);
   const analysisInProgress = isActiveAnalysisRun(scopedAnalysisRun);
 
   const companyProgress = companies.map(c => {
@@ -3666,7 +3693,7 @@ async function viewAnalysis() {
     else if (caseRec?.review_status === 'rejected')     { status = 'Rejected';         color = 'red'; }
     else if (hasSrc)                                    { status = 'Ready to analyse'; color = 'neutral'; }
     else                                                { status = 'No sources';       color = 'red'; }
-    const latestCompanyRun = latestAnalysisRunForCompany(theme?.id, portfolio?.id, c.id);
+    const latestCompanyRun = demoMode ? null : latestAnalysisRunForCompany(theme?.id, portfolio?.id, c.id);
     const rawAnalysisState = analysisCompanyProgress(latestCompanyRun, c.id);
     // Once a successful case has reached the workspace, its review state is
     // the useful per-company status. Keep terminal failures visible instead.
@@ -3678,7 +3705,7 @@ async function viewAnalysis() {
     // analysis. A recent completed fallback is suppressed until its retry
     // window expires so the bulk button does not immediately requeue it.
     const fallbackNeeded = needsExposureWebFallback(caseRec);
-    const readyForBulk = !rawAnalysisState?.active
+    const readyForBulk = !demoMode && !rawAnalysisState?.active
       && (retryable || fallbackNeeded || (status === 'Ready to analyse' && !rawAnalysisState));
     const companyAnalysisInProgress = rawAnalysisState?.active === true;
     return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState,
@@ -3698,7 +3725,8 @@ async function viewAnalysis() {
 
   $('#page-actions').innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      ${theme ? `
+      <label class="dashboard-demo-toggle"><input type="checkbox" id="analysis-demo-toggle" ${demoMode?'checked':''}><span>Demo data</span></label>
+      ${demoMode?'<span class="badge badge-amber">Illustrative</span>':theme ? `
         <button class="btn btn-primary" id="btn-analyze-all" ${!state.ai_configured || !readyCount || analysisInProgress ? 'disabled' : ''} style="box-shadow:0 2px 4px rgba(13,148,136,0.2)">
           ${analysisInProgress ? 'Analysing companies…' : `✦ Analyse all ready companies (${readyCount})`}
         </button>
@@ -3706,10 +3734,10 @@ async function viewAnalysis() {
           data-analysis-run-id="${esc(scopedAnalysisRun.id)}"
           onclick="cancelAnalysisRun('${esc(scopedAnalysisRun.id)}', this)"
           aria-label="Cancel current analysis">Cancel analysis</button>` : ''}` : ''}
-      <div class="text-muted text-small">${state.ai_configured
+      ${demoMode?'':`<div class="text-muted text-small">${state.ai_configured
         ? `${state.calls_used} AI calls used`
         : `<span style="color:var(--amber-600)">⚠ AI not configured</span>`}
-      </div>
+      </div>`}
       <div style="display:flex;gap:6px">
         ${pending.length > 0 ? `<span class="badge badge-amber">${pending.length} awaiting review</span>` : ''}
         ${approved.length > 0 ? `<span class="badge badge-green">${approved.length} approved</span>` : ''}
@@ -3722,19 +3750,19 @@ async function viewAnalysis() {
       <div class="dashboard-setup-header">
         <div>
           <div class="dashboard-setup-title">Analysis setup</div>
-          <div class="dashboard-setup-description">Choose a theme and portfolio for exposure analysis.</div>
+          <div class="dashboard-setup-description">${demoMode?'Illustrative sample only; your workspace data is unchanged.':'Choose a theme and portfolio for exposure analysis.'}</div>
         </div>
       </div>
       <label class="dashboard-selector">
         <span>Theme</span>
-        <select id="analysis-theme-select" ${themes.length ? '' : 'disabled'}>
+        <select id="analysis-theme-select" ${demoMode||!themes.length ? 'disabled' : ''}>
           <option value="">Select a theme</option>
           ${themes.map(t => `<option value="${esc(t.id)}" ${t.id === theme?.id ? 'selected' : ''}>${esc(t.theme_name)}</option>`).join('')}
         </select>
       </label>
       <label class="dashboard-selector">
         <span>Portfolio</span>
-        <select id="analysis-portfolio-select">
+        <select id="analysis-portfolio-select" ${demoMode?'disabled':''}>
           ${eligiblePortfolios.length ? '' : '<option value="">No portfolios available</option>'}
           ${eligiblePortfolios.map(p => `<option value="${esc(p.id)}" ${p.id === portfolio?.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
         </select>
@@ -3764,10 +3792,10 @@ async function viewAnalysis() {
               <thead>
                 <tr>
                   <th>Company</th>
-                  <th>Sources</th>
-                  <th class="td-num">Exposure</th>
-                  <th>AI confidence</th>
-                  <th style="text-align:right">Next step</th>
+                  <th style="text-align:center">Sources</th>
+                  <th style="text-align:center">Exposure</th>
+                  <th style="text-align:center">AI confidence</th>
+                  <th style="text-align:right">Action</th>
                 </tr>
               </thead>
               <tbody id="analysis-queue-rows">
@@ -3792,15 +3820,7 @@ async function viewAnalysis() {
                         : caseRec || terminalAnalysis
                           ? `0% display fallback: no verified numeric theme-revenue exposure is available${fallbackWasSearched ? ' after targeted web search' : ' after analysis'}. Retry remains available.`
                           : '0% display fallback until exposure analysis is completed.';
-                  const confidence = exposure.basis === 'fallback_zero'
-                    ? (companyAnalysisInProgress
-                        ? sourceConfidenceDot('', 'Exposure analysis is still running.')
-                        : caseRec || terminalAnalysis
-                          ? sourceConfidenceDot('red', exposureTitle)
-                          : sourceConfidenceDot('', 'Run the company analysis to calculate source confidence.'))
-                    : caseRec
-                      ? sourceConfidenceDot(caseRec.source_confidence_light, caseRec.source_confidence_basis)
-                      : sourceConfidenceDot('', 'Run the company analysis to calculate source confidence.');
+                  const confidence = confidencePill(caseRec);
                   const rowClass = caseRec?.review_status === 'needs_review' ? 'pending-row' : (caseRec?.review_status === 'approved' ? 'approved-row' : (hasSrc && !caseRec ? 'ready-row' : 'other-row'));
                   const readyClass = readyForBulk && rowClass !== 'ready-row' ? ' ready-row' : '';
 
@@ -3810,20 +3830,20 @@ async function viewAnalysis() {
                         <div style="font-weight:650;color:var(--slate-900)">${esc(c.name)}</div>
                         <div class="ticker" style="font-size:10.5px">${esc(c.bloomberg_ticker || c.id)}</div>
                       </td>
-                      <td>
+                      <td style="text-align:center">
                         <span class="badge ${hasSrc ? 'neutral' : 'amber'}" style="font-size:11px">
                           ${sourceCount} docs
                         </span>
                         ${analysisState ? `<div style="margin-top:4px;font-size:10.5px">${statusDot(analysisState.color, analysisState.error ? `${analysisState.label}: ${analysisState.error}` : analysisState.label)}</div>` : ''}
                       </td>
-                      <td class="td-num" style="font-weight:700" data-exposure-basis="${exposure.basis}" title="${exposureTitle}">
+                      <td style="text-align:center;font-weight:700" data-exposure-basis="${exposure.basis}" title="${exposureTitle}">
                         ${pt}
                       </td>
-                      <td>
+                      <td style="text-align:center">
                         ${confidence}
                       </td>
                       <td style="text-align:right" onclick="event.stopPropagation()">
-                        ${companyAnalysisInProgress ? `
+                        ${demoMode && caseRec ? `<button class="btn btn-sm btn-secondary" style="min-width:104px" onclick="openCase('${esc(caseRec.id)}')">Review →</button>` : companyAnalysisInProgress ? `
                             <button class="btn btn-sm btn-danger"
                               data-analysis-run-id="${esc(companyAnalysisRun.id)}"
                               onclick="cancelAnalysisRun('${esc(companyAnalysisRun.id)}', this)"
@@ -3832,11 +3852,11 @@ async function viewAnalysis() {
                               ${(companyAnalysisRun.company_ids || []).length > 1 ? 'Cancel batch' : 'Cancel'}
                             </button>
                           ` : `
-                            <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}"
+                            <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}" style="min-width:104px"
                               onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme ? 'disabled' : ''}>
-                              ${analysisState?.error ? '↻ Retry' : (caseRec ? '↻ Re-run' : '✧ Analyse')}
+                              ${analysisState?.error ? 'Retry →' : (caseRec ? 'Re-run →' : 'Analyse →')}
                             </button>
-                            ${!hasSrc ? `<button class="btn btn-sm" onclick="openManualUploadForCompany('${esc(c.id)}')">Upload</button>` : ''}
+                            ${!hasSrc ? `<button class="btn btn-sm btn-secondary" style="min-width:104px" onclick="openManualUploadForCompany('${esc(c.id)}')">Upload →</button>` : ''}
                           `}
                       </td>
                     </tr>`;
@@ -3849,7 +3869,13 @@ async function viewAnalysis() {
             <h3>No companies yet</h3>
             <p><a href="#" data-goto="portfolio">Import a portfolio</a> to add companies for analysis.</p>
           </div>`}
-    </div>`;
+    </div>
+    ${demoMode?'<div id="case-detail-panel"></div>':''}`;
+
+  $('#analysis-demo-toggle')?.addEventListener('change', event => {
+    analysisDemoEnabled = event.target.checked;
+    viewAnalysis();
+  });
 
   $('#analysis-theme-select')?.addEventListener('change', event => {
     selectedDashboardThemeId = event.target.value;
@@ -4011,9 +4037,9 @@ window.openManualUploadForCompany = function(companyId) {
 // VIEW: REVIEW CASES  (YTP-21, YTP-22)
 // ══════════════════════════════════════════════════════
 window.openCase = function(caseId) {
-  const c = (state.cases||[]).find(x=>x.id===caseId);
+  const c = [...(state.cases||[]),...analysisDemoCases].find(x=>x.id===caseId);
   if (!c) return;
-  const companies = state.companies || [];
+  const companies = [...(state.companies || []),...analysisDemoCompanies];
   const compName  = companies.find(x=>x.id===c.company_id)?.name || c.company_id;
   const sources   = state.sources || [];
   const evidence  = sources.flatMap(s=>s.evidence||[]);
@@ -4346,75 +4372,71 @@ function portfolioContributionsPanel(rows, companies, hasSources) {
   </div>`;
 }
 
-function dashboardDemoFixture() {
-  const nodes = [
-    {node_id: 'compute', parent_id: null, name: 'Compute & Semiconductors'},
-    {node_id: 'accelerators', parent_id: 'compute', name: 'AI Accelerators'},
-    {node_id: 'memory', parent_id: 'compute', name: 'High-bandwidth Memory'},
-    {node_id: 'platforms', parent_id: null, name: 'AI Platforms'},
-    {node_id: 'cloud', parent_id: 'platforms', name: 'Cloud Services'},
-    {node_id: 'software', parent_id: 'platforms', name: 'Enterprise Software'},
+function analysisDemoData() {
+  const groups = [
+    ['compute-silicon','Compute Silicon',['accelerators-processors','high-bandwidth-memory','wafers-foundry','advanced-packaging-testing-substrates']],
+    ['networking-interconnect','Networking & Interconnect',['scale-out-networking','optical-interconnect','scale-up-interconnect']],
+    ['systems-hardware','Systems & Hardware Platforms',['server-rack-systems','storage-systems','server-subsystem-components']],
+    ['data-centre-facilities','Data Centre Facilities',['data-centre-capacity','power-delivery-backup','thermal-management']],
+    ['cloud-software','Cloud & Software Infrastructure',['compute-cloud-services','platforms-systems-software']],
   ];
-  const theme = {id: 'demo-ai-theme', theme_name: 'AI Infrastructure (demo)', approved: true, nodes};
+  const leafNames = ['Accelerators & Processors','High-Bandwidth Memory','Wafers & Foundry','Advanced Packaging, Semiconductor Testing & Substrates','Scale-Out Networking','Optical Interconnect','Scale-Up Interconnect & Connectivity Silicon','Server & Rack-Scale Systems','Storage Systems','Server Subsystem Components','Data Centre Capacity','Power Delivery & Backup','Thermal Management','Compute Cloud Services','Platforms & Systems Software'];
+  const leafIds = groups.flatMap(group => group[2]);
+  const nodes = groups.flatMap(([node_id,name,children]) => [
+    {node_id,parent_id:null,name},
+    ...children.map((id,index) => ({node_id:id,parent_id:node_id,name:leafNames[leafIds.indexOf(id)]})),
+  ]);
+  const theme = {id:'demo-ai-theme',theme_name:'AI Infrastructure (demo)',approved:true,nodes};
   const holdings = [
-    ['Demo Semiconductor Co.', 0.20, 0.18, 0.82, [0.65, 0.25, 0.05, 0.05]],
-    ['Demo Memory Co.', 0.15, 0.17, 0.74, [0.20, 0.70, 0.05, 0.05]],
-    ['Demo Cloud Co.', 0.12, 0.10, 0.68, [0.05, 0.05, 0.75, 0.15]],
-    ['Demo Chip Design Co.', 0.10, 0.12, 0.63, [0.70, 0.15, 0.10, 0.05]],
-    ['Demo Network Co.', 0.09, 0.08, 0.52, [0.20, 0.10, 0.50, 0.20]],
-    ['Demo Equipment Co.', 0.08, 0.10, 0.48, [0.60, 0.15, 0.15, 0.10]],
-    ['Demo Data Center Co.', 0.07, 0.08, 0.41, [0.10, 0.10, 0.60, 0.20]],
-    ['Demo Software Co.', 0.06, 0.05, 0.36, [0.05, 0.05, 0.30, 0.60]],
-    ['Demo Power Systems Co.', 0.05, 0.05, 0.29, [0.25, 0.10, 0.45, 0.20]],
-    ['Demo Analytics Co.', 0.08, 0.07, 0.24, [0.10, 0.10, 0.25, 0.55]],
+    ['TAIWAN SEMICONDUCTOR MFG','2330 TT Equity','6889106',.1811427770452738,.15846209524838697,.25,.04528569426131845,.039615523812096744,.005670170449221704,'medium',[0,0,.2,.05,0,0,0,0,0,0,0,0,0,0,0]],
+    ['SAMSUNG ELECTRONICS CO','005930 KS Equity','6771720',.10972936385438903,.0856881555357479,.13,.014264817301070574,.011139460219647228,.003125357081423346,'low',[0,.06,.02,0,0,0,0,0,.05,0,0,0,0,0,0]],
+    ['SK HYNIX','000660 KS Equity','6450267',.08526833917248577,.060003628542123294,.55,.04689758654486718,.033001995698167814,.013895590846699363,'medium',[0,.45,0,0,0,0,0,0,.1,0,0,0,0,0,0]],
+    ['COMMONWEALTH BANK OF AUS','CBA AU Equity','6215035',.05094249058933781,.01398764127142287,0,0,0,0,'high',Array(15).fill(0)],
+    ['TENCENT HOLDINGS LI (CN)','700 HK Equity','BMMV2K8',.04583610326945405,.026245726590055155,.03,.0013750830980836216,.0007873717977016547,.0005877113003819669,'low',[0,0,0,0,0,0,0,0,0,0,0,0,0,.02,.01]],
+    ['ALIBABA GRP HLDG (HK)','9988 HK Equity','BK6YZP5',.04122814518883049,.017879231174776335,.063,.0025973731468963207,.0011263915640109092,.0014709815828854115,'medium',[0,0,0,0,0,0,0,0,0,0,0,0,0,.038,.025]],
+    ['BHP GROUP (AU)','BHP AU Equity','6144690',.03802412717916912,.0173829091811839,0,0,0,0,'high',Array(15).fill(0)],
+    ['WISETECH GLOBAL','WTC AU Equity','BZ8GX83',.034392009341568594,.0003496337109107115,0,0,0,0,'high',Array(15).fill(0)],
+    ['DELTA ELECTRONICS','2308 TT Equity','6260734',.031146826835602263,.009757099432387647,.38,.01183579419752886,.0037076977843073055,.008128096413221554,'medium',[0,0,0,0,0,0,0,0,0,0,0,.25,.13,0,0]],
+    ['NATIONAL AUSTRALIA BANK','NAB AU Equity','6624608',.029609042230152694,.0066166716272407534,0,0,0,0,'high',Array(15).fill(0)],
+    ['MEDIATEK INC','2454 TT Equity','6372480',.02885538543793863,.018623925420114026,.095,.00274126161660417,.0017692729149108325,.0009719887016933376,'low',[.095,0,0,0,0,0,0,0,0,0,0,0,0,0,0]],
+    ['ICBC H','1398 HK Equity','B1G1QD8',.0276607913880751,.005275810959751366,0,0,0,0,'high',Array(15).fill(0)],
+    ['WESTPAC BANKING','WBC AU Equity','6076146',.02757874868743358,.006510990578411249,0,0,0,0,'high',Array(15).fill(0)],
+    ['HON HAI PRECISION IND CO','2317 TT Equity','6438564',.025806914358418222,.007788251225262619,.29,.007484005163941284,.002258592855326159,.005225412308615125,'medium',[0,0,0,0,0,0,0,.29,0,0,0,0,0,0,0]],
+    ['CHINA CONSTRUCTION BK H','939 HK Equity','B0LMTQ3',.025605575464370457,.008256252504205601,0,0,0,0,'high',Array(15).fill(0)],
+    ['DBS GROUP HOLDINGS','DBS SP Equity','6175203',.02422128590636045,.009948143093870461,0,0,0,0,'high',Array(15).fill(0)],
+    ['BANK OF CHINA H','3988 HK Equity','B154564',.023281695319944017,.004193711755546368,0,0,0,0,'high',Array(15).fill(0)],
+    ['SAMSUNG ELECTRO-MECH. CO','009150 KS Equity','6771689',.022547603959979436,.005226258729788511,.2,.004509520791995888,.0010452517459577022,.0034642690460381853,'low',[0,0,0,.15,0,0,0,0,0,.05,0,0,0,0,0]],
+    ['MACQUARIE GROUP','MQG AU Equity','B28YTC2',.020375259757296642,.004996240491010251,0,0,0,0,'high',Array(15).fill(0)],
+    ['RELIANCE INDUSTRIES','RELIANCE IN Equity','6099626',.020309491213965716,.005621023307567729,0,0,0,0,'medium',Array(15).fill(0)],
+    ['XIAOMI CORP B','1810 HK Equity','BG0ZMJ9',.019884557843361714,.00412196269670719,0,0,0,0,'high',Array(15).fill(0)],
+    ['ICICI BANK','ICICIBC IN Equity','BSZ2BY7',.017662706219477343,.005825361659618134,0,0,0,0,'high',Array(15).fill(0)],
+    ['OCBC BANK','OCBC SP Equity','B0F9V20',.017584280399328772,.006469491725184806,0,0,0,0,'high',Array(15).fill(0)],
+    ['HYUNDAI MOTOR CO','005380 KS Equity','6451055',.01744333826210241,.0033057808335284836,0,0,0,0,'high',Array(15).fill(0)],
+    ['CHROMA ATE','2360 TT Equity','6212100',.017023684680927277,.002099250191412255,.2665,.004536811967467119,.0005594501760113659,.003977361791455754,'medium',[0,0,0,.2665,0,0,0,0,0,0,0,0,0,0,0]],
+    ['TATA CONSULTANCY','TCS IN Equity','B01NPJ1',.01683945639475694,.0014179625984166526,0,0,0,0,'high',Array(15).fill(0)],
   ];
-  const companies = holdings.map(([name], index) => ({
-    id: `demo-company-${index + 1}`, name, bloomberg_ticker: `DEMO${index + 1}`,
+  const titleCase = value => value.toLowerCase().replace(/\b[a-z]/g, char => char.toUpperCase());
+  const companies = holdings.map((row,index) => ({id:`demo-company-${index+1}`,name:titleCase(row[0]),bloomberg_ticker:row[1],sedol:row[2]}));
+  const companyRows = holdings.map((row,index) => ({
+    company_id:companies[index].id,assessed:true,
+    weights:{portfolio:row[3],benchmark:row[4],active:row[3]-row[4]},
+    exposure:{point:row[5],lower:row[5],upper:row[5]},
+    contributions:{portfolio:{point:row[6]},benchmark:{point:row[7]},active:{point:row[8]}},
   }));
-  const companyRows = holdings.map(([name, portfolio, benchmark, exposure, allocations], index) => {
-    const company_id = companies[index].id;
-    const active = portfolio - benchmark;
-    return {
-      company_id, assessed: true,
-      weights: {portfolio, benchmark, active},
-      exposure: {point: exposure, lower: exposure, upper: exposure},
-      contributions: {
-        portfolio: {point: portfolio * exposure},
-        benchmark: {point: benchmark * exposure},
-        active: {point: active * exposure},
-      },
-    };
+  const score = {high:92,medium:70,low:35};
+  const light = {high:'green',medium:'amber',low:'red'};
+  const cases = holdings.map((row,index) => {
+    const subthemes = Object.fromEntries(leafIds.map((id,i) => [id,{point:row[10][i]}]));
+    const units = leafIds.flatMap((id,i) => row[10][i] ? [{unit_id:`demo-unit-${index+1}-${i+1}`,activity:leafNames[i],node_ids:[id],relationship_type:'direct',point:row[10][i],lower:row[10][i],upper:row[10][i],revenue:row[10][i]*100,currency:'',scale:'% of revenue'}] : []);
+    return {id:`demo-case-${index+1}`,company_id:companies[index].id,theme_id:theme.id,review_status:'approved',classification_confidence:row[9],confidence_percent:score[row[9]],source_confidence_light:light[row[9]],source_confidence_basis:`${titleCase(row[9])} confidence in the illustrative workbook`,source_count:score[row[9]]===92?3:score[row[9]]===70?2:1,exposure_percent:row[5]*100,estimate:{point:row[5],lower:row[5],upper:row[5],subthemes},case:{period:'FY2026',units}};
   });
-  const cases = holdings.map(([, , , exposure, allocations], index) => {
-    const subthemes = Object.fromEntries(nodes.filter(node => node.parent_id).map((node, i) => [
-      node.node_id, {point: exposure * allocations[i]},
-    ]));
-    const units = nodes.filter(node => node.parent_id).map((node, i) => ({
-      node_ids: [node.node_id], allocations: {[node.node_id]: allocations[i]},
-    }));
-    return {
-      company_id: companies[index].id, theme_id: theme.id, review_status: 'approved',
-      estimate: {subthemes}, case: {units},
-    };
-  });
-  const portfolioExposure = companyRows.reduce((sum, row) =>
-    sum + row.weights.portfolio * row.exposure.point, 0);
-  const benchmarkExposure = companyRows.reduce((sum, row) =>
-    sum + row.weights.benchmark * row.exposure.point, 0);
-  return {
-    theme, companies, cases,
-    portfolio: {id: 'demo-portfolio', theme_id: theme.id, name: 'Illustrative portfolio', snapshot_id: 'demo-snapshot'},
-    snapshot: {id: 'demo-snapshot', benchmark_name: 'Illustrative benchmark', portfolio: [{as_of_date: '2026-10-31'}]},
-    dashboard: {
-      summary: {
-        portfolio: {point: portfolioExposure},
-        benchmark: {point: benchmarkExposure},
-        active: {point: portfolioExposure - benchmarkExposure},
-      },
-      coverage: {portfolio: 0.82, benchmark: 0.76},
-      companies: companyRows,
-    },
-  };
+  const portfolio = {id:'demo-portfolio',theme_id:theme.id,name:'Illustrative 26-company portfolio',snapshot_id:'demo-snapshot',rows:companies.map(company=>({company_id:company.id}))};
+  const snapshot = {id:'demo-snapshot',benchmark_name:'Reference benchmark',portfolio:[{as_of_date:'2026-11-04'}]};
+  return {theme,companies,cases,companyRows,portfolio,snapshot,dashboard:{summary:{portfolio:{point:.14152794808977343},benchmark:{point:.0950110085681377},active:{point:.04651693952163573}},coverage:{portfolio:1,benchmark:1},companies:companyRows}};
+}
+
+function dashboardDemoFixture() {
+  return analysisDemoData();
 }
 
 async function viewDashboard() {
@@ -4621,10 +4643,9 @@ async function viewDashboard() {
   renderDashboardBody(`
     <!-- Top-level exposure metrics -->
     <div class="metric-grid dashboard-summary-metrics">
-      ${metricTile('Benchmark exposure', pct(s.benchmark.point), '', '')}
+      ${metricTile('Portfolio exposure', pct(s.portfolio.point), '', '')}
+      ${metricTile('Reference exposure', pct(s.benchmark.point), '', '')}
       ${metricTile('Active exposure', pct(s.active.point, true), '', 'accent')}
-      ${metricTile('Delta', pct(s.benchmark.point == null || s.active.point == null
-        ? null : s.benchmark.point - s.active.point), 'Benchmark exposure − active exposure', '')}
     </div>
 
     <div class="grid-2 dashboard-breakdown-grid">
@@ -4669,24 +4690,26 @@ async function viewDashboard() {
             <tr>
               <th>Company</th>
               <th class="td-num">Portfolio wt</th>
-              <th class="td-num">Reference wt</th>
+              <th class="td-num">Ref wt</th>
               <th class="td-num">Active wt</th>
-              <th class="td-num">Exposure</th>
-              <th class="td-num">Active contrib</th>
+              <th class="td-num">Portfolio exposure</th>
+              <th class="td-num">Ref exposure</th>
+              <th class="td-num">Active exposure</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody id="dashboard-company-rows">
             ${d.companies.map(row => {
-              const name = companyName(row.company_id);
+              const name = companyName(row.company_id).toUpperCase();
               const ap = row.contributions.active.point;
               return `<tr data-dashboard-company="${esc(row.company_id)}">
-                <td class="td-company">${esc(name)}<span class="ticker">${esc(row.company_id)}</span></td>
-                <td class="td-num">${pct(row.weights.portfolio)}</td>
-                <td class="td-num">${pct(row.weights.benchmark)}</td>
-                <td class="td-num ${row.weights.active>=0?'positive':'negative'}">${pct(row.weights.active,true)}</td>
-                <td class="td-num">${pct(row.exposure.point)}</td>
-                <td class="td-num ${ap===null?'':ap>=0?'positive':'negative'}">${pct(ap,true)}</td>
+                <td class="td-company">${esc(name)}</td>
+                <td class="td-num">${pct(row.weights.portfolio,false,2)}</td>
+                <td class="td-num">${pct(row.weights.benchmark,false,2)}</td>
+                <td class="td-num ${row.weights.active>=0?'positive':'negative'}">${pct(row.weights.active,true,2)}</td>
+                <td class="td-num">${pct(row.contributions.portfolio.point,false,2)}</td>
+                <td class="td-num">${pct(row.contributions.benchmark?.point,false,2)}</td>
+                <td class="td-num ${ap===null?'':ap>=0?'positive':'negative'}">${pct(ap,true,2)}</td>
                 <td>${row.assessed ? badge('Assessed','green') : badge('Unassessed','amber')}</td>
               </tr>`;
             }).join('')}

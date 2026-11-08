@@ -289,8 +289,8 @@ test('Dashboard shows a loading spinner until its data request completes',async(
   await render;
   assert.doesNotMatch(node('#page-content').innerHTML,/dashboard-loading/);
   assert.match(node('#page-content').innerHTML,/Company-level exposure/);
-  assert.doesNotMatch(node('#page-content').innerHTML,/class="label">Portfolio exposure</);
-  assert.match(node('#page-content').innerHTML,/class="label">Benchmark exposure</);
+  assert.match(node('#page-content').innerHTML,/class="label">Portfolio exposure</);
+  assert.match(node('#page-content').innerHTML,/class="label">Reference exposure</);
   assert.match(node('#page-content').innerHTML,/class="metric-grid dashboard-summary-metrics"/);
 });
 test('Dashboard charts top ten active contributions and filters the Tier-2 pie by Tier-1',async()=>{
@@ -328,7 +328,9 @@ test('Dashboard charts top ten active contributions and filters the Tier-2 pie b
   });`);
   await run('viewDashboard()');
   const html = node('#page-content').innerHTML;
-  assert.match(html,/<div class="label">Delta<\/div>\s*<div class="value">15\.0%<\/div>\s*<div class="meta">Benchmark exposure − active exposure<\/div>/);
+  assert.match(html,/<div class="label">Portfolio exposure<\/div>/);
+  assert.match(html,/<div class="label">Reference exposure<\/div>/);
+  assert.match(html,/<div class="label">Active exposure<\/div>/);
   assert.match(html,/Top 10 of 12/);
   assert.match(html,/Portfolio exposure contribution \(%\)/);
   assert.match(html,/TSMC/);
@@ -368,7 +370,7 @@ test('Dashboard demo toggle previews sample data without changing workspace data
   node('#dashboard-demo-toggle').change({target:{checked:true}});
   const demoHtml = node('#page-content').innerHTML;
   assert.match(demoHtml,/Illustrative sample only; your workspace data is unchanged/);
-  assert.match(demoHtml,/Demo Semiconductor Co\./);
+  assert.match(demoHtml,/Taiwan Semiconductor Mfg/);
   assert.match(demoHtml,/Portfolio exposure contributions/);
   assert.equal(run('dashboardApiCalls'),1);
   assert.equal(run('JSON.stringify(state)'),initialWorkspace);
@@ -379,7 +381,7 @@ test('Dashboard demo toggle previews sample data without changing workspace data
   node('#dashboard-demo-toggle').change({target:{checked:false}});
   await run('new Promise(resolve=>setTimeout(resolve,0))');
   assert.match(node('#page-content').innerHTML,/Real Theme/);
-  assert.doesNotMatch(node('#page-content').innerHTML,/Demo Semiconductor Co\./);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Taiwan Semiconductor Mfg/);
   assert.equal(run('dashboardApiCalls'),2);
   assert.equal(run('JSON.stringify(state)'),initialWorkspace);
 });
@@ -389,7 +391,7 @@ test('Dashboard demo toggle works when the workspace has no approved theme or po
   api=async()=>{dashboardApiCalls++;return null;};`);
   await run('viewDashboard()');
   node('#dashboard-demo-toggle').change({target:{checked:true}});
-  assert.match(node('#page-content').innerHTML,/Demo Semiconductor Co\./);
+  assert.match(node('#page-content').innerHTML,/Taiwan Semiconductor Mfg/);
   assert.match(node('#page-content').innerHTML,/id="dashboard-tier1-select"/);
   assert.equal(run('dashboardApiCalls'),0);
 });
@@ -948,7 +950,7 @@ test('Analysis view omits manual AI analysis and stage pipeline cards',async()=>
   const html = node('#page-content').innerHTML;
   assert.doesNotMatch(html,/Run AI analysis|Evidence passages|Stage pipeline|Fact<br>Extraction|Awaiting<br>Review/);
   assert.match(node('#page-actions').innerHTML,/Analyse all ready companies/);
-  assert.match(html,/✧ Analyse/);
+  assert.match(html,/Analyse →/);
 });
 test('Per-stock Analyse queues a fresh theme exposure and confidence calculation',async()=>{
   const {run,node,context} = setup();
@@ -958,12 +960,12 @@ test('Per-stock Analyse queues a fresh theme exposure and confidence calculation
     state.source_summaries=[{company_id:'a',count:3}];
     state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core'; currentView='analysis';`);
   await run('viewAnalysis()');
-  assert.match(node('#page-content').innerHTML,/onclick="rerunCompanyAnalysis\('a', this\)"[\s\S]*✧ Analyse/);
+  assert.match(node('#page-content').innerHTML,/onclick="rerunCompanyAnalysis\('a', this\)"[\s\S]*Analyse →/);
   run(`let rerunRequest; api=async(path,data)=>{
     rerunRequest={path,data};
     return {analysis_run:{id:'analysis-a',job_type:'analysis',status:'running',phase:'queued',theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],companies_completed:[]}};
   };`);
-  await run("window.rerunCompanyAnalysis('a', {disabled:false,textContent:'✧ Analyse'})");
+  await run("window.rerunCompanyAnalysis('a', {disabled:false,textContent:'Analyse →'})");
   assert.equal(run('rerunRequest.path'),'analysis/start');
   assert.deepEqual(JSON.parse(run('JSON.stringify(rerunRequest.data)')),
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],force_recalculate:true});
@@ -1090,9 +1092,9 @@ test('Active batch locks only its companies and lets an unrelated failed stock r
   const retryRow=html.slice(retryStart,html.indexOf('</tr>',retryStart));
   assert.match(node('#page-actions').innerHTML,/Analysing companies/);
   assert.match(activeRow,/Analysing…[\s\S]*data-analysis-run-id="active-a"[\s\S]*Cancel/);
-  assert.match(retryRow,/↻ Retry/);
+  assert.match(retryRow,/Retry →/);
   assert.doesNotMatch(retryRow,/onclick="rerunCompanyAnalysis\('b', this\)" disabled/);
-  await run("window.rerunCompanyAnalysis('b', {disabled:false,textContent:'↻ Retry'})");
+  await run("window.rerunCompanyAnalysis('b', {disabled:false,textContent:'Retry →'})");
   assert.equal(run('unrelatedRetryRequest.path'),'analysis/start');
   assert.deepEqual(JSON.parse(run('JSON.stringify(unrelatedRetryRequest.data)')),
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['b'],force_recalculate:true});
@@ -1182,7 +1184,7 @@ test('Analysis polling refreshes terminal results and keeps per-company failures
   assert.equal(run('statusRequest'),'analysis/run?id=analysis-poll');
   assert.match(node('#page-actions').innerHTML,/Analysis finished incompletely.*2 of 2 companies processed.*1 failed/);
   assert.match(node('#page-content').innerHTML,/30\.0%/);
-  assert.match(node('#page-content').innerHTML,/Analysis failed: Provider quota reached[\s\S]*↻ Retry/);
+  assert.match(node('#page-content').innerHTML,/Analysis failed: Provider quota reached[\s\S]*Retry →/);
   assert.equal(run("trackedAnalysisRuns.has('analysis-poll')"),false);
 });
 test('Analysis jobs are excluded from source-search polling and use an analysis-specific timeout message',async()=>{
@@ -1210,7 +1212,7 @@ test('Per-stock rerun uses the latest case result in the queue',async()=>{
     ]; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/90\.0%[\s\S]*dot-green[\s\S]*AI confidence: green[\s\S]*↻ Re-run/);
+  assert.match(html,/90\.0%[\s\S]*>92%<\/span>[\s\S]*Re-run →/);
   assert.doesNotMatch(html,/20\.0%/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%/);
 });
@@ -1232,9 +1234,9 @@ test('Calculate Exposure shows a point percentage and source-confidence dots',as
     selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/50\.0%[\s\S]*dot-green[\s\S]*AI confidence: green/);
-  assert.match(html,/25\.0%[\s\S]*dot-amber[\s\S]*AI confidence: amber/);
-  assert.match(html,/75\.0%[\s\S]*dot-red[\s\S]*AI confidence: red/);
+  assert.match(html,/50\.0%[\s\S]*>92%<\/span>/);
+  assert.match(html,/25\.0%[\s\S]*>70%<\/span>/);
+  assert.match(html,/75\.0%[\s\S]*>35%<\/span>/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
 test('Calculate Exposure uses the range upper bound when no point estimate exists',async()=>{
@@ -1267,8 +1269,7 @@ test('Calculate Exposure uses the range upper bound when no point estimate exist
   assert.match(row('Legacy point'),/50\.0%/);
   assert.match(row('Missing estimate'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
   assert.match(row('Missing estimate'),/0% display fallback: no verified numeric theme-revenue exposure is available after analysis/);
-  assert.match(row('Missing estimate'),/dot-red[\s\S]*AI confidence: red/);
-  assert.doesNotMatch(row('Missing estimate'),/—/);
+  assert.match(row('Missing estimate'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,upper:.5666},exposure_percent:null}))")),
     {value:.5666,basis:'upper'});
 });
@@ -1296,14 +1297,14 @@ test('Calculate Exposure shows bounded fallback zeroes without turning them into
   const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
   assert.match(row('Failed search'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
   assert.match(row('Failed search'),/after targeted web search/);
-  assert.match(row('Failed search'),/dot-red[\s\S]*AI confidence: red/);
-  assert.match(row('Failed search'),/↻ Retry/);
+  assert.match(row('Failed search'),/AI confidence is not available">—<\/span>/);
+  assert.match(row('Failed search'),/Retry →/);
   assert.match(row('Active search'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
   assert.match(row('Active search'),/0% temporary display while exposure analysis is running/);
-  assert.match(row('Active search'),/dot-grey[\s\S]*AI confidence: not calculated/);
+  assert.match(row('Active search'),/AI confidence is not available">—<\/span>/);
   assert.match(row('Not analysed'),/data-exposure-basis="fallback_zero"[\s\S]*0\.0%/);
   assert.match(row('Not analysed'),/0% display fallback until exposure analysis is completed/);
-  assert.match(row('Not analysed'),/dot-grey[\s\S]*AI confidence: not calculated/);
+  assert.match(row('Not analysed'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue(null))')),
     {value:0,basis:'fallback_zero'});
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:3,upper:4}}))')),
