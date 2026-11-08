@@ -970,11 +970,11 @@ test('Case tiles show point, bounds and rubric percentage; unknown point stays a
   html=node('#case-detail-panel').innerHTML; assert.match(html,/font-size:26px">—/);
 });
 
-test('Case detail omits the deprecated AI checker card',()=>{
+test('Case detail omits deprecated AI checker and confidence rubric cards',()=>{
   const {run,node}=setup();
   run(`state.cases=[{id:'case',company_id:'a',classification_confidence:'high',case:{units:[]},estimate:{point:.5,lower:.5,upper:.5}}]; state.companies=[{id:'a',name:'TSMC'}]; window.openCase('case')`);
   const html=node('#case-detail-panel').innerHTML;
-  assert.doesNotMatch(html,/AI Checker Verification|Run AI Checker|Claude Sonnet 5/);
+  assert.doesNotMatch(html,/AI Checker Verification|Run AI Checker|Claude Sonnet 5|AI Confidence Score & Rubric|Rubric Evaluation & Evidence Basis/);
 });
 
 test('Banners clear when changing views and stay cleared on return',()=>{

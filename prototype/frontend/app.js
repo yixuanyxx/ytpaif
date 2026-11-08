@@ -3786,43 +3786,6 @@ window.openCase = function(caseId) {
             </div>`).join('')}
         </div>` : ''}
 
-      <!-- Dedicated Confidence Score & Calibration Card (Requirement 7) -->
-      <div class="confidence-score-card mt-16" style="background:${confMeta.bg};border:1.5px solid ${confMeta.border};border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
-          <div>
-            <div style="font-size:10.5px;font-weight:700;color:var(--slate-500);text-transform:uppercase;letter-spacing:0.8px">
-              AI Confidence Score &amp; Rubric
-            </div>
-            <div style="display:flex;align-items:center;gap:10px;margin-top:3px">
-              <span style="font-size:18px;font-weight:750;color:${confMeta.color}">${confMeta.label}</span>
-              <span class="badge ${confMeta.badge}" style="font-size:12px;font-weight:700">${confMeta.pct}% Score</span>
-            </div>
-          </div>
-          <div style="text-align:right">
-            <div style="font-size:12px;font-weight:700;color:var(--slate-800)">Rubric Score: ${confMeta.points}</div>
-            <div class="text-muted text-small">Display score mapped from rubric; not a calibrated probability</div>
-          </div>
-        </div>
-
-        <!-- Visual Score Gauge -->
-        <div style="height:8px;width:100%;background:rgba(0,0,0,0.08);border-radius:4px;overflow:hidden;margin-bottom:12px">
-          <div style="height:100%;width:${confMeta.pct}%;background:${confMeta.color};border-radius:4px;transition:width 0.4s ease"></div>
-        </div>
-
-        <!-- Rubric Basis & Criteria Checklist -->
-        <div style="background:#ffffff;border:1px solid ${confMeta.border};border-radius:6px;padding:12px;margin-top:8px">
-          <div style="font-weight:700;font-size:12px;color:var(--slate-800);margin-bottom:4px">
-            Rubric Evaluation &amp; Evidence Basis:
-          </div>
-          <div style="font-size:12.5px;color:var(--slate-700);line-height:1.5;margin-bottom:8px">
-            ${esc(c.confidence_basis || 'Direct segment disclosure and substantiated classification.')}
-          </div>
-          <div style="display:grid;gap:4px;font-size:11.5px;color:var(--slate-600)">
-            ${confMeta.criteria.map(crit => `<div>${crit}</div>`).join('')}
-          </div>
-        </div>
-      </div>
-
       <!-- Review form -->
       ${c.review_status === 'needs_review' ? `
         <div class="form-section">
