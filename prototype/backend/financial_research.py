@@ -5,7 +5,7 @@ import os
 import re
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, build_opener, urlopen
@@ -14,20 +14,69 @@ import gemini_fallback
 
 DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions'
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+DOCUMENT_TEXT_VERSION = '2'
 FINANCIAL_TERMS = re.compile(r'market\s+cap(?:itali[sz]ation)?|revenue|sales|營業收入|营业收入|營收|市值|매출|시가총액', re.I)
 
 
 def _financial_text(passages):
-    """Keep document identity and the pages most likely to contain financial tables."""
-    ranked = sorted(passages, key=lambda row: (
-        -8 * len(re.findall(r'market\s+cap(?:itali[sz]ation)?|市值|시가총액', row['passage'], re.I))
-        -4 * len(re.findall(r'consolidated\s+(?:statements?|income)|statement\s+of\s+(?:profit|income)', row['passage'], re.I))
-        -len(FINANCIAL_TERMS.findall(row['passage']))
-    ))
-    selected = [f"Page {row.get('page', 1)}\n{row['passage'][:6000]}" for row in ranked
-                if FINANCIAL_TERMS.search(row['passage'])]
+    """Search complete pages before selecting bounded financial excerpts.
+
+    HTML reports can be one very long page. Taking its first 6,000 characters
+    loses financial tables appearing later, so rank overlapping sections of
+    every page while preserving their original page citations.
+    """
+    candidates = []
+    for row in passages:
+        text = row['passage']
+        for start in range(0, len(text), 5000):
+            section = text[start:start + 6000]
+            if FINANCIAL_TERMS.search(section):
+                candidates.append({'page': row.get('page', 1), 'passage': section})
+
+    def rank(row):
+        text = row['passage']
+        return (
+            -16 * len(re.findall(r'(?:total|net|consolidated|group|external)\s+(?:net\s+)?(?:revenue|sales)', text, re.I))
+            -8 * len(re.findall(r'market\s+cap(?:itali[sz]ation)?|市值|시가총액', text, re.I))
+            -4 * len(re.findall(r'consolidated\s+(?:statements?|income)|statement\s+of\s+(?:profit|income)', text, re.I))
+            -3 * len(re.findall(r'(?:revenue|sales)[\s\S]{0,100}?\d', text, re.I))
+            -len(FINANCIAL_TERMS.findall(text))
+        )
+
+    ranked = sorted(candidates, key=rank)
+    selected = [f"Page {row['page']}\n{row['passage']}" for row in ranked]
     identity = passages[0]['passage'][:1500] if passages else ''
     return (identity + '\n' + '\n'.join(selected))[:24000].strip()
+
+
+def _visible_html(selector):
+    """Remove hidden XBRL metadata and navigation, retaining financial tables."""
+    root = selector.root
+    for element in list(root.iter()):
+        if not isinstance(element.tag, str):
+            continue
+        raw_tag = element.tag.lower()
+        tag = raw_tag.rsplit('}', 1)[-1]
+        style = re.sub(r'\s+', '', element.get('style', '').lower())
+        hidden = ('hidden' in element.attrib or element.get('aria-hidden', '').lower() == 'true'
+                  or re.search(r'(?:^|;)(?:display:none|visibility:hidden)(?:[;!]|$)', style))
+        xbrl_metadata = (tag in ('ix:header', 'ix:resources', 'ix:references', 'xbrli:context', 'xbrli:unit')
+                         or tag in ('context', 'unit', 'resources', 'references')
+                         or ('xbrl' in raw_tag and tag in ('header', 'context', 'unit', 'resources', 'references')))
+        if hidden or xbrl_metadata or tag in ('script', 'style', 'noscript', 'nav', 'footer', 'aside', 'template', 'form'):
+            parent = element.getparent()
+            if parent is not None:
+                # Text following a hidden inline element remains visible.
+                if element.tail:
+                    previous = element.getprevious()
+                    if previous is not None:
+                        previous.tail = (previous.tail or '') + element.tail
+                    else:
+                        parent.text = (parent.text or '') + element.tail
+                parent.remove(element)
+    text = '\n'.join(root.xpath('//text()'))
+    text = re.sub(r'[\t\r\f\v ]+', ' ', text)
+    return re.sub(r'\n\s*\n+', '\n', text).strip()
 
 
 def _read_document(url, timeout):
@@ -75,7 +124,7 @@ def _read_document(url, timeout):
         if report and report != url:
             url = report
             continue
-        visible = '\n'.join(selector.xpath('//text()[not(ancestor::script or ancestor::style or ancestor::noscript)]').getall())
+        visible = _visible_html(selector)
         return _financial_text([{'page': 1, 'passage': visible}])
     raise ValueError('Document viewer did not resolve to a readable report')
 
@@ -191,12 +240,32 @@ def populate(companies, sources_by_company):
     return dict(iter_results(companies, sources_by_company))
 
 
-def iter_results(companies, sources_by_company):
-    """Yield completed companies so a background job can checkpoint each result."""
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(research_company, company, sources_by_company.get(company['id'], [])): company for company in companies}
-        for future in as_completed(futures):
-            company = futures[future]
+def iter_results(companies, sources_by_company, should_cancel=None):
+    """Bound pending work and check cancellation even while requests are blocked."""
+    pool = ThreadPoolExecutor(max_workers=4)
+    futures = {}
+    remaining = iter(companies)
+    cancelled = should_cancel or (lambda: False)
+
+    def fill_workers():
+        while len(futures) < 4 and not cancelled():
+            company = next(remaining, None)
+            if company is None:
+                break
+            futures[pool.submit(research_company, company, sources_by_company.get(company['id'], []))] = company
+
+    try:
+        fill_workers()
+        while futures:
+            if cancelled():
+                return
+            completed, _ = wait(futures, timeout=.1, return_when=FIRST_COMPLETED)
+            if not completed:
+                continue
+            future = next(iter(completed))
+            company = futures.pop(future)
+            if cancelled():
+                return
             try:
                 result = future.result()
             except gemini_fallback.ModelsExhausted as error:
@@ -214,3 +283,10 @@ def iter_results(companies, sources_by_company):
             except Exception as error:
                 result = {'error': type(error).__name__}
             yield company['id'], result
+            fill_workers()
+    finally:
+        for future in futures:
+            future.cancel()
+        # The supervisor terminates the cancelled job's child process, closing
+        # any requests already in flight. Do not block the coordinator here.
+        pool.shutdown(wait=not futures, cancel_futures=True)

@@ -1,7 +1,9 @@
 import io
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -11,6 +13,14 @@ import gemini_fallback
 
 class GeminiFallbackTest(unittest.TestCase):
     def setUp(self):
+        budget_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(budget_dir.cleanup)
+        budget_env = patch.dict(os.environ, {
+            'GEMINI_BUDGET_DB': str(Path(budget_dir.name) / 'budget.sqlite3'),
+            'GEMINI_DAILY_CALL_CAP': '100',
+        })
+        budget_env.start()
+        self.addCleanup(budget_env.stop)
         self.blocked_patch = patch.dict(gemini_fallback._blocked, {}, clear=True)
         self.blocked_patch.start()
         self.addCleanup(self.blocked_patch.stop)

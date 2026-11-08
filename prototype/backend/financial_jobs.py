@@ -28,6 +28,21 @@ def start(app, data):
     return {'financial_run': run}
 
 
+def cancel(app, data):
+    """Cancel a durable financial lookup without allowing a worker to revive it."""
+    run_id = data.get('id')
+    if not run_id:
+        raise ValueError('Financial lookup run ID is required')
+    run, _ = source_jobs.Queue().job(run_id)
+    if run.get('job_type') != 'financials':
+        raise ValueError('Financial lookup run not found')
+    run = source_jobs.Queue().cancel(run_id, 'Financial lookup cancelled by user.')
+    # Queue storage is durable and takes precedence over its remote mirror in
+    # state(). A slow/unavailable remote store must not delay cancellation.
+    source_jobs.ensure_worker()
+    return {'financial_run': run}
+
+
 def apply_result(app, company_id, result):
     if result.get('error'):
         return 'failed'
@@ -50,6 +65,10 @@ def worker(app, run, companies):
     run.setdefault('outcomes', {})
     run['phase'] = 'researching'
 
+    def cancelled():
+        checker = getattr(app, 'is_cancelled', None)
+        return bool(checker and checker(run['id']))
+
     def checkpoint():
         run['companies_completed'] = list(run['outcomes'])
         for outcome in ('updated', 'failed', 'unresolved'):
@@ -58,14 +77,22 @@ def worker(app, run, companies):
         app.put('search_runs', run)
 
     def save_result(company_id, result):
+        if cancelled():
+            return
         run['results'][company_id] = result
         checkpoint()  # Preserve the AI result before writing company data.
+        if cancelled():
+            return
         run['outcomes'][company_id] = apply_result(app, company_id, result)
         checkpoint()
 
     try:
         checkpoint()
+        if cancelled():
+            return
         for company in companies:
+            if cancelled():
+                return
             company_id = company['id']
             if company_id in run['results'] and company_id not in run['outcomes']:
                 save_result(company_id, run['results'][company_id])
@@ -79,8 +106,20 @@ def worker(app, run, companies):
             for source in sources.values():
                 if source.get('company_id') in by_company:
                     by_company[source['company_id']].append(source)
-            for company_id, result in financial_research.iter_results(pending, by_company):
-                save_result(company_id, result)
+            results = financial_research.iter_results(pending, by_company, should_cancel=cancelled)
+            try:
+                for company_id, result in results:
+                    if cancelled():
+                        return
+                    save_result(company_id, result)
+                    if cancelled():
+                        return
+            finally:
+                close = getattr(results, 'close', None)
+                if close:
+                    close()
+        if cancelled():
+            return
         run['status'] = 'completed'
         if run['failed'] or run['unresolved']:
             run['status'] = 'failed' if run['failed'] == len(companies) else 'incomplete'

@@ -266,12 +266,17 @@ def get_sources_for_stock(company_id=None, ticker=None):
 
 
 def get_source_summaries():
-    """Return compact per-company/per-type counts for the workspace landing view."""
+    """Return compact per-company summaries for the workspace landing view.
+
+    Financial facts are included without document text so the source-library
+    table can show market data before its expandable document rows are loaded.
+    """
     sources = get_all_sources_from_redis()
     if sources is None:
         return []
     counts = {}
     coverage = {}
+    financial_sources = {}
     today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
     for source in sources:
         company_id = source.get('company_id')
@@ -280,6 +285,13 @@ def get_source_summaries():
             continue
         by_type = counts.setdefault(company_id, {})
         by_type[source_type] = by_type.get(source_type, 0) + 1
+        facts = [
+            {**fact, 'publication_date': fact.get('publication_date') or source.get('publication_date', '')}
+            for fact in (source.get('financial_facts') or [])
+            if fact.get('metric') in ('market_cap', 'revenue') and fact.get('display')
+        ]
+        if facts:
+            financial_sources.setdefault(company_id, []).append({'id': source.get('id', ''), 'financial_facts': facts})
         if source.get('link_status') == 'verified' and source.get('url') and source.get('publication_date', '9999') <= today:
             year = str(source.get('period', ''))
             identity = hashlib.sha256(urldefrag(source['url'])[0].rstrip('/').encode()).hexdigest()
@@ -287,7 +299,8 @@ def get_source_summaries():
     return [
         {'company_id': company_id, 'types': types, 'count': sum(types.values()),
          'verified': {kind: {year: sorted(urls) for year, urls in years.items()}
-                      for kind, years in coverage.get(company_id, {}).items()}}
+                      for kind, years in coverage.get(company_id, {}).items()},
+         'financial_sources': financial_sources.get(company_id, [])}
         for company_id, types in counts.items()
     ]
 

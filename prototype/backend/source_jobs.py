@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from concurrent.futures import CancelledError
 
 ROOT = Path(__file__).resolve().parent
 
@@ -115,6 +116,10 @@ class Queue:
     def cancel(self, job_id, reason='Search cancelled by user.'):
         """Durably stop a queued/running job without letting a late worker revive it."""
         with self.connect() as db:
+            # Read and transition under the same write lock. Otherwise a worker
+            # could finish between SELECT and UPDATE and cancel() would return
+            # a cancelled payload even though the stored job is completed.
+            db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT payload FROM jobs WHERE id=?', (job_id,)).fetchone()
             if not row:
                 raise ValueError('Source-search run not found')
@@ -136,8 +141,13 @@ class Queue:
 
     def stage_source(self, job_id, record):
         with self.connect() as db:
-            db.execute('INSERT OR REPLACE INTO pending_sources VALUES (?, ?, ?)',
-                       (job_id, record['id'], json.dumps(record)))
+            # Retain existing journals on cancellation, but never add a late
+            # network result after the job has become terminal.
+            inserted = db.execute('''INSERT OR REPLACE INTO pending_sources
+                SELECT ?, ?, ? WHERE EXISTS
+                (SELECT 1 FROM jobs WHERE id=? AND state IN ('queued','running'))''',
+                (job_id, record['id'], json.dumps(record), job_id))
+            return bool(inserted.rowcount)
 
     def pending_sources(self, job_id):
         with self.connect() as db:
@@ -146,6 +156,10 @@ class Queue:
 
     def acknowledge_sources(self, job_id, records):
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT state FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row or row[0] not in ('queued', 'running'):
+                return
             db.executemany('INSERT INTO source_updates (id) VALUES (?)', [(record['id'],) for record in records])
             db.executemany('DELETE FROM pending_sources WHERE job_id=? AND id=?',
                            [(job_id, record['id']) for record in records])
@@ -226,7 +240,24 @@ def supervise(queue, command=None, idle_seconds=None):
             args = command or [sys.executable, str(Path(__file__).resolve()), 'execute', job_id]
             with open(queue.path.parent / 'source-worker.log', 'ab') as log:
                 child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-            child.wait()
+            while child.poll() is None:
+                current, _ = queue.job(job_id)
+                cancellable = current.get('job_type') == 'financials' or current.get('search_mode') in ('short', 'long')
+                if cancellable and current.get('status') == 'cancelled':
+                    # This is the exact process launched for this job. Killing
+                    # it also closes discovery/lookup threads blocked in HTTP;
+                    # a cancelled job must not occupy the queue until timeout.
+                    child.terminate()
+                    try:
+                        child.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=2)
+                    break
+                try:
+                    child.wait(timeout=.1)
+                except subprocess.TimeoutExpired:
+                    pass
             # A crash leaves the checkpoint running: resume without a time limit.
             time.sleep(.2)
 
@@ -260,9 +291,11 @@ def execute(job_id):
 
             def put(self, kind, record):
                 import app
+                if kind == 'companies' and self.is_cancelled(job_id):
+                    return record
                 if kind == 'search_runs':
                     current, _ = queue.job(job_id)
-                    if current.get('status') == 'cancelled' and record.get('status') == 'running':
+                    if current.get('status') == 'cancelled' and record.get('status') != 'cancelled':
                         return current
                     queue.save(record)  # Durable before the remote mirror is attempted.
                     if record['status'] == 'running' and time.monotonic() - self.last_mirror < 10:
@@ -270,19 +303,28 @@ def execute(job_id):
                     self.last_mirror = time.monotonic()
                 return app.put(kind, record)
 
+            def is_cancelled(self, run_id):
+                current, _ = queue.job(run_id)
+                return current.get('status') == 'cancelled'
+
             def put_many(self, kind, records):
                 import app
                 if kind == 'sources':
+                    if self.is_cancelled(job_id):
+                        raise CancelledError()
                     return persist_discovered_sources(app, records)
                 return app.put_many(kind, records)
 
             def stage_source(self, record):
-                queue.stage_source(job_id, record)
+                if not queue.stage_source(job_id, record):
+                    raise CancelledError()
 
             def pending_sources(self):
                 return queue.pending_sources(job_id)
 
             def acknowledge_sources(self, records):
+                if self.is_cancelled(job_id):
+                    raise CancelledError()
                 queue.acknowledge_sources(job_id, records)
 
         if run.get('job_type') == 'financials':

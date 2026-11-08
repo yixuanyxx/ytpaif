@@ -8,6 +8,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request
 
+import gemini_budget
+
 
 DEFAULT_MODELS = (
     'gemini-3.8-flash',
@@ -90,6 +92,7 @@ def _request_models(request, timeout, *, open_request):
     body = json.loads(request.data)
     primary = body['model']
     if urlparse(request.full_url).hostname != 'generativelanguage.googleapis.com':
+        gemini_budget.reserve()
         with open_request(request, timeout=timeout) as response:
             return json.load(response), {'model': primary, 'models_attempted': [primary], 'fallback_used': False}
 
@@ -114,6 +117,7 @@ def _request_models(request, timeout, *, open_request):
                             headers=dict(request.header_items()), method=request.get_method())
         try:
             # Reserve time for another model if an overloaded model stops responding.
+            gemini_budget.reserve()
             with open_request(candidate, timeout=min(20, remaining)) as response:
                 output = json.load(response)
             return output, {'model': model, 'models_attempted': [row['model'] for row in attempts] + [model],

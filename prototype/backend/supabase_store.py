@@ -1,6 +1,7 @@
 """Server-side Supabase REST and Storage access."""
 import json
 import os
+import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
@@ -38,30 +39,43 @@ def request(path, method='GET', payload=None, headers=None, query=None, raw=None
         json.dumps(payload, allow_nan=False).encode() if payload is not None else None
     )
     req = Request(target, data=body, headers=request_headers, method=method)
-    try:
-        with urlopen(req, timeout=30) as response:
-            data = response.read()
-    except HTTPError as error:
+    # A brief connection interruption can occur during the dashboard's many
+    # independent reads. Retry safe GETs only; repeating a write could create
+    # duplicate external effects when its response was lost.
+    attempts = 3 if method.upper() == 'GET' else 1
+    for attempt in range(attempts):
         try:
-            error_payload = json.loads(error.read()) if error.fp else {}
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            error_payload = {}
-        if not isinstance(error_payload, dict):
-            error_payload = {}
-        error_code = error_payload.get('code')
-        error_message = error_payload.get('message', '')
-        if error_code == '42P01' and 'audit_events' in error_message:
+            with urlopen(req, timeout=30) as response:
+                data = response.read()
+            break
+        except HTTPError as error:
+            try:
+                error_payload = json.loads(error.read()) if error.fp else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                error_payload = {}
+            if not isinstance(error_payload, dict):
+                error_payload = {}
+            error_code = error_payload.get('code')
+            error_message = error_payload.get('message', '')
+            if error_code == '42P01' and 'audit_events' in error_message:
+                raise SupabaseError(
+                    f'Supabase request failed: {method} {path} (HTTP {error.code}, {error_code}). '
+                    'A stale database trigger still references public.audit_events; '
+                    'remove the trigger function or trigger that writes to the deleted audit table.'
+                ) from None
+            suffix = f', {error_code}' if error_code else ''
             raise SupabaseError(
-                f'Supabase request failed: {method} {path} (HTTP {error.code}, {error_code}). '
-                'A stale database trigger still references public.audit_events; '
-                'remove the trigger function or trigger that writes to the deleted audit table.'
+                f'Supabase request failed: {method} {path} (HTTP {error.code}{suffix})'
             ) from None
-        suffix = f', {error_code}' if error_code else ''
-        raise SupabaseError(
-            f'Supabase request failed: {method} {path} (HTTP {error.code}{suffix})'
-        ) from None
-    except (URLError, TimeoutError, OSError) as error:
-        raise SupabaseError(f'Supabase request failed ({type(error).__name__})') from None
+        except (URLError, TimeoutError, OSError) as error:
+            if attempt + 1 < attempts:
+                time.sleep(0.25 * 2 ** attempt)
+                continue
+            cause = getattr(error, 'reason', None)
+            detail = type(cause).__name__ if cause is not None else type(error).__name__
+            raise SupabaseError(
+                f'Supabase request failed: {method} {path} ({type(error).__name__}: {detail})'
+            ) from None
     if not data:
         return None
     try:
@@ -136,9 +150,10 @@ class SupabaseStore:
         except KeyError:
             raise ValueError(f'No Supabase table configured for {kind}') from None
 
-    def _rows(self, kind):
+    def _rows(self, kind, filters=None):
         table = self._table(kind)
         query = {'select': 'payload,created_at', 'order': 'created_at.asc,id.asc'}
+        query.update(filters or {})
         result = []
         offset = 0
         while True:
@@ -155,6 +170,10 @@ class SupabaseStore:
 
     def all_records(self, kind):
         return self._rows(kind)
+
+    def company_records(self, kind, company_id):
+        """Read one company's records without downloading the entire library."""
+        return self._rows(kind, {'company_id': 'eq.' + str(company_id)})
 
     def find(self, kind, record_id):
         if not record_id:

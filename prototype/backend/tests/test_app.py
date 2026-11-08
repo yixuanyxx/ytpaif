@@ -4,12 +4,14 @@ import importlib
 import io
 import json
 import os
+import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 import zipfile
 from urllib.error import HTTPError
 from test_fixtures import MemoryStore, demo
+from test_source_cache import FakeRedis
 
 class AppFlowTest(unittest.TestCase):
     def test_general_ai_falls_back_and_records_the_model_used(self):
@@ -146,6 +148,11 @@ class AppFlowTest(unittest.TestCase):
                 self.app.portfolio_import({'name': name, 'rows': []})
 
     def setUp(self):
+        budget_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(budget_dir.cleanup)
+        budget_env = patch.dict(os.environ, {'GEMINI_BUDGET_DB': str(Path(budget_dir.name) / 'gemini-budget.sqlite')})
+        budget_env.start()
+        self.addCleanup(budget_env.stop)
         # Add prototype to sys.path so app is imported from prototype
         import sys
         proto_dir = str(Path(__file__).resolve().parent)
@@ -157,6 +164,14 @@ class AppFlowTest(unittest.TestCase):
         blocked.start()
         self.addCleanup(blocked.stop)
         self.app.store = MemoryStore()
+        source_cache_connection = patch.object(self.app.source_cache, '_connection', return_value=FakeRedis())
+        source_cache_connection.start()
+        self.addCleanup(source_cache_connection.stop)
+        source_confidence_call = patch.object(self.app.source_confidence, 'claude_assess',
+            return_value=({'light': 'yellow', 'basis': 'One cited document is not corroborated by three sources.',
+                           'agreeing_source_ids': [], 'divergent_source_ids': []}, 'claude-test'))
+        source_confidence_call.start()
+        self.addCleanup(source_confidence_call.stop)
         self.source_upload_mock = patch.object(self.app.supabase_store, 'upload_source')
         self.source_upload_mock.start()
         self.addCleanup(self.source_upload_mock.stop)
@@ -252,6 +267,17 @@ class AppFlowTest(unittest.TestCase):
         })
         self.assertNotEqual(fresh['id'], self.theme['id'])
         self.assertEqual(len(self.app.all_records('themes')), count_before + 1)
+
+    def test_theme_taxonomy_is_persisted_as_nested_json(self):
+        saved = self.app.theme_create({
+            'theme_name': 'Nested', 'theme_description': 'Nested taxonomy',
+            'nodes': [
+                {'node_id': 'parent', 'parent_id': None, 'name': 'Parent', 'definition': 'Parent', 'examples': []},
+                {'node_id': 'child', 'parent_id': 'parent', 'name': 'Child', 'definition': 'Child', 'examples': []},
+            ],
+        })
+        self.assertNotIn('parent_id', saved['nodes'][0])
+        self.assertEqual(saved['nodes'][0]['children'][0]['node_id'], 'child')
 
     def test_theme_definition_inputs_without_values_are_stored_as_null(self):
         theme = self.app.theme_create({
@@ -446,8 +472,9 @@ class AppFlowTest(unittest.TestCase):
         with patch.object(self.app, 'analyze', side_effect=analyze) as mocked:
             res = self.app.analyze_all({'theme_id': self.theme['id']})
         self.assertEqual(mocked.call_count, 2)
-        self.assertEqual(res['analysed_count'], 1)
-        self.assertEqual({e['company_id'] for e in res['errors']}, {'READY_B', 'TOO_LONG'})
+        self.assertEqual(res['calculated_count'], 1)
+        self.assertEqual(res['reused_count'], 3)
+        self.assertEqual({e['company_id'] for e in res['errors']}, {'READY_B', 'TOO_LONG', 'NO_EVIDENCE', 'FUTURE'})
 
         self.app.put('portfolio_imports', {'id': 'scoped', 'theme_id': 'unrelated-theme',
                                           'rows': [{'company_id': 'READY_A'},
@@ -523,7 +550,227 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(c['review_status'], 'needs_review')
         self.assertEqual(c['classification_score'], 3)
         self.assertEqual(self.app.get('runs', c['run_id'])['status'], 'needs_review')
-        self.assertEqual(len(self.app.all_records('model_outputs')), 2)
+        self.assertEqual(len(self.app.all_records('model_outputs')), 3)
+
+    def test_indirect_leaf_match_with_unknown_share_does_not_become_zero(self):
+        source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
+        eid = source['evidence'][0]['evidence_id']
+        facts = {'total_revenue': 100, 'denominator_evidence_ids': [eid], 'period': 'FY2025',
+                 'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': [{
+                    'unit_id': 'mixed', 'activity': 'Mixed computing', 'revenue': 100, 'period': 'FY2025',
+                    'currency': 'USD', 'scale': 'millions', 'external': True, 'evidence_ids': [eid]}]}
+        classified = {'classifications': [{'unit_id': 'mixed', 'node_ids': ['compute_fab'],
+            'relationship_type': 'indirect', 'whole_unit_supported': False, 'rationale': 'AI share undisclosed',
+            'scope_check': 'Mixed AI/non-AI fabrication', 'evidence_ids': [eid],
+            'unresolved_questions': ['Exact AI share of mixed computing revenue is undisclosed.']}],
+            'confidence_band': 'medium', 'confidence_basis': 'Allocation not disclosed'}
+        with patch.object(self.app, 'llm', side_effect=[facts, classified]) as model:
+            saved = self.app.analyze({'theme_id': self.theme['id'], 'company_id': 'DEMO_A', 'evidence_ids': [eid]})
+        self.assertEqual(model.call_count, 2)
+        self.assertIsNone(saved['estimate']['point'])
+        self.assertEqual(saved['estimate']['upper'], 1)
+        self.assertEqual(saved['case']['units'][0]['relationship_type'], 'insufficient_evidence')
+        self.assertEqual(saved['case']['units'][0]['original_relationship_type'], 'indirect')
+        self.assertIn('Exact AI share', saved['estimate']['issues'][0])
+        self.assertTrue(saved['estimate']['issues'])
+
+    def test_excluded_with_open_scope_question_preserves_unknown_range(self):
+        record = {'unit_id': 'u1', 'node_ids': [], 'relationship_type': 'excluded',
+                  'rationale': 'Unclear product scope', 'scope_check': 'May be outside theme',
+                  'evidence_ids': ['e1'], 'unresolved_questions': ['Does this product qualify?']}
+        facts = {'units': [{'unit_id': 'u1', 'activity': 'Mixed product'}]}
+        result = self.app._validate_classification_response(
+            {'classifications': [record], 'confidence_band': 'low', 'confidence_basis': 'Open scope question'},
+            facts, set(), {'e1'}, [{'evidence_id': 'e1', 'passage': 'Mixed product'}])
+        self.assertEqual(result['classifications'][0]['relationship_type'], 'insufficient_evidence')
+        self.assertEqual(result['classifications'][0]['original_relationship_type'], 'excluded')
+        self.assertEqual(record['relationship_type'], 'excluded')
+
+    def test_batch_calculates_example_exposure_and_persists_cited_rollup(self):
+        import engine
+        node = lambda nid, name, children: {'node_id': nid, 'name': name, 'definition': name,
+                                           'examples': [], 'children': children}
+        theme = self.app.theme_create({'theme_name': 'Clean Energy', 'nodes': [
+            node('clean_energy', 'Clean Energy', [
+                node('renewable', 'Renewable Generation', [node('solar', 'Solar', []), node('wind', 'Wind', [])]),
+                node('storage', 'Energy Storage', []),
+            ]),
+        ]})
+        self.app.company_create({'id': 'ABC', 'name': 'ABC', 'bloomberg_ticker': 'ABC SP'})
+        text = ('Total external revenue USD 1000 million. Solar panels revenue USD 200 million. '
+                'Wind turbines revenue USD 100 million. Integrated solar-and-battery systems revenue USD 50 million. '
+                'Standalone batteries revenue USD 150 million. Unrelated services revenue USD 500 million.')
+        source = self.app.source_ingest({'company_id': 'ABC', 'publication_date': '2026-01-01', 'period': 'FY2025',
+            'filename': 'ABC.txt', 'source_type': 'annual_report', 'content': base64.b64encode(text.encode()).decode()})
+        eid = source['evidence'][0]['evidence_id']
+        facts = {'total_revenue': 1000, 'denominator_evidence_ids': [eid], 'period': 'FY2025',
+                 'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': []}
+        classifications = []
+        segments = [
+            ('R1', 'Solar panels', 200, ['solar']), ('R2', 'Wind turbines', 100, ['wind']),
+            ('R3', 'Integrated solar-and-battery systems', 50, ['solar', 'storage']),
+            ('R4', 'Standalone batteries', 150, ['storage']), ('R5', 'Unrelated services', 500, []),
+        ]
+        for uid, activity, revenue, leaves in segments:
+            facts['units'].append({'unit_id': uid, 'activity': activity, 'revenue': revenue, 'period': 'FY2025',
+                'currency': 'USD', 'scale': 'millions', 'external': True, 'evidence_ids': [eid], 'overlap_group': None})
+            classifications.append({'unit_id': uid, 'node_ids': leaves, 'relationship_type': 'direct' if leaves else 'excluded',
+                'rationale': 'Supported product revenue', 'scope_check': '' if leaves else 'Services outside Clean Energy',
+                'evidence_ids': [eid], 'unresolved_questions': [], 'whole_unit_supported': bool(leaves),
+                'revenue_attribution_quote': f'{activity} revenue USD {revenue} million.'})
+        self.app.put('portfolio_imports', {'id': 'abc_portfolio', 'theme_id': theme['id'], 'rows': [{'company_id': 'ABC'}]})
+        response = {'classifications': classifications, 'confidence_band': 'high', 'confidence_percent': 87,
+                    'confidence_basis': 'Disclosed product revenue'}
+        with patch.object(self.app, 'llm', side_effect=[facts, response]) as model:
+            batch = self.app.analyze_all({'theme_id': theme['id'], 'portfolio_id': 'abc_portfolio', 'company_ids': ['ABC']})
+        self.assertEqual(batch['errors'], [])
+        case = batch['results'][0]['case']
+        self.assertEqual(case['review_status'], 'needs_review')
+        self.assertEqual(case['estimate']['calculation_status'], 'complete')
+        self.assertAlmostEqual(case['estimate']['point'], .5)
+        self.assertEqual(case['estimate']['main_theme_revenue'], 500)
+        for nid, expected in [('solar', .25), ('wind', .1), ('renewable', .35), ('storage', .2), ('clean_energy', .5)]:
+            self.assertAlmostEqual(case['estimate']['node_exposures'][nid]['point'], expected)
+        self.assertEqual(case['estimate']['node_exposures']['clean_energy']['revenue_unit_ids'], ['R1', 'R2', 'R3', 'R4'])
+        self.assertEqual(self.app.get('cases', case['id'])['estimate']['point'], .5)
+        self.assertEqual(self.app.get('cases', case['id'])['confidence_percent'], 87)
+        self.assertEqual(self.app.get('cases', case['id'])['exposure_percent'], 50)
+        self.assertEqual(case['estimate']['calculation_version'], engine.VERSION)
+        self.assertIn('children', model.call_args_list[1].args[1]['theme']['nodes'][0])
+        with self.assertRaisesRegex(ValueError, 'selected portfolio'):
+            self.app.analyze_all({'theme_id': theme['id'], 'portfolio_id': 'abc_portfolio', 'company_ids': ['DEMO_A']})
+        # The second portfolio receives the same persisted answer without a
+        # source fetch or AI call, even after the backend has been reloaded.
+        self.app.put('portfolio_imports', {'id': 'second_portfolio', 'theme_id': theme['id'],
+                                         'rows': [{'company_id': 'ABC'}]})
+        saved_store = self.app.store
+        self.app = importlib.reload(self.app)
+        self.app.store = saved_store
+        with patch.object(self.app, 'llm') as model, patch('exposure_sources.prepare_sources') as prepare:
+            reused = self.app.analyze_all({'theme_id': theme['id'], 'portfolio_id': 'second_portfolio', 'company_ids': ['ABC']})
+        model.assert_not_called()
+        prepare.assert_not_called()
+        self.assertEqual(reused['reused_count'], 1)
+        self.assertEqual(reused['calculated_count'], 0)
+        self.assertEqual(reused['results'][0]['case']['id'], case['id'])
+        self.assertEqual(reused['results'][0]['case']['exposure_percent'], 50)
+        self.assertEqual(reused['results'][0]['case']['confidence_percent'], 87)
+
+    def test_batch_reads_link_only_sources_with_missing_or_null_evidence_before_calculating(self):
+        self.app.company_create({'id': 'LINKED', 'name': 'Linked company', 'bloomberg_ticker': 'LINKED SP'})
+        source = {'id': 'linked_report', 'company_id': 'LINKED', 'publication_date': '2026-01-01',
+                  'period': 'FY2025', 'title': 'Annual report', 'url': 'https://issuer.test/report.pdf',
+                  'link_status': 'verified', 'storage_mode': 'url_only'}
+        # Real source-library metadata may omit evidence/sha256 altogether,
+        # while older saved records may explicitly contain evidence: null.
+        self.app.put('sources', source)
+        self.app.put('sources', {**source, 'id': 'unreadable_report',
+                                'url': 'https://issuer.test/unreadable.pdf', 'evidence': None})
+        self.app.put('sources', {**source, 'id': 'future_report',
+                                'url': 'https://issuer.test/future.pdf', 'publication_date': '2099-01-01'})
+        self.app.put('portfolio_imports', {'id': 'linked_portfolio', 'theme_id': self.theme['id'],
+                                         'rows': [{'company_id': 'LINKED'}]})
+        quote = 'Dedicated AI chips revenue USD 50 million.'
+        text = 'Page 12\nConsolidated external revenue USD 100 million. ' + quote + ' Unrelated services revenue USD 50 million.'
+
+        def read_document(url, timeout):
+            if 'unreadable' in url:
+                raise ValueError('Document site disallows automated access')
+            self.assertEqual(url, source['url'])
+            return text
+
+        def llm(task, payload, run):
+            if 'total_revenue' not in payload.get('facts', {}):
+                evidence_id = next(passage['evidence_id'] for passage in payload['passages']
+                                   if passage['source_id'] == 'linked_report')
+                return {'total_revenue': 100, 'denominator_evidence_ids': [evidence_id],
+                        'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [],
+                        'units': [{'unit_id': uid, 'activity': activity, 'revenue': 50, 'period': 'FY2025',
+                                   'currency': 'USD', 'scale': 'millions', 'external': True,
+                                   'evidence_ids': [evidence_id], 'overlap_group': None}
+                                  for uid, activity in [('chips', 'Dedicated AI chips'), ('other', 'Unrelated services')]]}
+            evidence_id = payload['facts']['denominator_evidence_ids'][0]
+            return {'confidence_band': 'high', 'confidence_percent': 87,
+                    'confidence_basis': 'Cited product revenue and unrelated services',
+                    'classifications': [
+                        {'unit_id': 'chips', 'node_ids': ['compute_fab'], 'relationship_type': 'direct',
+                         'rationale': 'Source identifies dedicated AI chip revenue', 'scope_check': '',
+                         'evidence_ids': [evidence_id], 'unresolved_questions': [],
+                         'whole_unit_supported': True, 'revenue_attribution_quote': quote},
+                        {'unit_id': 'other', 'node_ids': [], 'relationship_type': 'excluded',
+                         'rationale': 'Services are unrelated to AI infrastructure', 'scope_check': 'Unrelated services outside theme',
+                         'evidence_ids': [evidence_id], 'unresolved_questions': [], 'whole_unit_supported': False},
+                    ]}
+
+        with patch('financial_research._read_document', side_effect=read_document) as read, \
+                patch.object(self.app, 'llm', side_effect=llm) as model:
+            batch = self.app.analyze_all({'theme_id': self.theme['id'], 'portfolio_id': 'linked_portfolio',
+                                         'company_ids': ['LINKED']})
+        self.assertEqual(batch['errors'], [])
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(model.call_count, 2)
+        self.assertEqual(batch['calculated_count'], 1)
+        result = batch['results'][0]
+        self.assertEqual(result['company_id'], 'LINKED')
+        self.assertEqual(result['case']['exposure_percent'], 50)
+        self.assertEqual(result['case']['confidence_percent'], 87)
+        self.assertEqual(self.app.get('cases', result['case_id'])['estimate']['point'], .5)
+        self.assertTrue(self.app.get('sources', 'linked_report')['evidence'])
+        self.assertEqual(result['source_read_errors'][0]['source_id'], 'unreadable_report')
+        self.assertEqual(len([case for case in self.app.all_records('cases') if case['company_id'] == 'LINKED']), 1)
+
+    def test_evidence_lookup_accepts_missing_and_null_passages_and_keeps_cutoff(self):
+        self.app.company_create({'id': 'NO_TEXT', 'name': 'No text company', 'bloomberg_ticker': 'NO_TEXT SP'})
+        source = {'id': 'missing_evidence', 'company_id': 'NO_TEXT', 'publication_date': '2026-01-01'}
+        self.app.put('sources', source)
+        self.app.put('sources', {**source, 'id': 'null_evidence', 'evidence': None})
+        self.app.put('sources', {**source, 'id': 'future_evidence', 'publication_date': '2099-01-01'})
+        sources, valid = self.app.evidence_for('NO_TEXT', self.theme['id'])
+        self.assertEqual({row['id'] for row in sources}, {'missing_evidence', 'null_evidence'})
+        self.assertEqual(valid, set())
+
+    def test_full_match_with_an_invented_quote_is_rejected(self):
+        classification = {'relationship_type': 'direct', 'whole_unit_supported': True,
+                          'evidence_ids': ['e1'], 'revenue_attribution_quote': 'Invented revenue quote'}
+        with self.assertRaisesRegex(ValueError, 'supporting quote'):
+            self.app._classification_allocation(classification, [{'evidence_id': 'e1', 'passage': 'Actual disclosure'}])
+
+    def test_analysis_corrects_a_reformatted_quote_once_before_saving(self):
+        source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
+        evidence = source['evidence'][0]['evidence_id']
+        facts = {'total_revenue': 100, 'denominator_evidence_ids': [evidence], 'period': 'FY2025',
+                 'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': [
+            {'unit_id': uid, 'activity': uid, 'revenue': 50, 'period': 'FY2025', 'currency': 'USD',
+             'scale': 'millions', 'external': True, 'evidence_ids': [evidence], 'overlap_group': None}
+            for uid in ('hardware', 'unrelated')]}
+        bad = {'confidence_band': 'high', 'confidence_percent': 90, 'confidence_basis': 'Disclosed revenue', 'classifications': [
+            {'unit_id': 'hardware', 'node_ids': ['compute_fab'], 'relationship_type': 'direct', 'rationale': 'AI hardware',
+             'scope_check': '', 'evidence_ids': [evidence], 'unresolved_questions': [], 'whole_unit_supported': True,
+             'revenue_attribution_quote': 'Reformatted revenue sentence not in the source'},
+            {'unit_id': 'unrelated', 'node_ids': [], 'relationship_type': 'excluded', 'rationale': 'Consumer services',
+             'scope_check': 'Unrelated consumer services are outside the theme', 'evidence_ids': [evidence],
+             'unresolved_questions': [], 'whole_unit_supported': False, 'revenue_attribution_quote': ''},
+        ]}
+        corrected = json.loads(json.dumps(bad))
+        corrected['classifications'][0]['revenue_attribution_quote'] = source['evidence'][0]['passage']
+        with patch.object(self.app, 'llm', side_effect=[facts, bad, corrected]) as model:
+            result = self.app.analyze({'theme_id': self.theme['id'], 'company_id': 'DEMO_A', 'evidence_ids': [evidence]})
+        self.assertEqual(model.call_count, 3)
+        self.assertAlmostEqual(result['estimate']['point'], .5)
+        self.assertTrue(any(row['stage'] == 'classification_repair' for row in self.app.all_records('model_outputs')))
+
+    def test_extraction_validation_rejects_internal_sales_before_classification(self):
+        source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
+        evidence = source['evidence'][0]['evidence_id']
+        facts = {'total_revenue': 100, 'denominator_evidence_ids': [evidence], 'period': 'FY2025',
+                 'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': [
+            {'unit_id': 'sales', 'activity': 'sales', 'revenue': 100, 'period': 'FY2025',
+             'currency': 'USD', 'scale': 'millions', 'external': False, 'evidence_ids': [evidence]}]}
+        with self.assertRaisesRegex(ValueError, 'intersegment'):
+            self.app._validate_extracted_revenue(facts, self.theme['nodes'], {evidence})
+        self.assertNotIn('relationship_type', facts['units'][0])
+        facts['units'][0]['external'] = True
+        self.app._validate_extracted_revenue(facts, self.theme['nodes'], {evidence})
 
     def test_portfolio_import_and_snapshot_creation(self):
         rows = [

@@ -1,7 +1,7 @@
 """Deterministic, review-gated thematic revenue calculations."""
 import math
 
-VERSION = '1.0.0'
+VERSION = '1.2.2'
 
 def number(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -22,6 +22,59 @@ MAX_TIERS = 3  # Theme → Tier-1 → Tier-2 → Tier-3 (Tier-3 only via manual 
 #   Tier-3: up to 4 sub-nodes under a Tier-2 (only via manual "break down")
 MAX_CHILDREN = {1: 5, 2: 15, 3: 60}  # Global totals at each depth.
 
+
+def flatten_taxonomy(tree):
+    """Convert nested taxonomy JSON to the calculation-friendly node list.
+
+    Persisted taxonomies use ``children`` so their hierarchy is explicit. This
+    adapter also accepts legacy parent_id lists while older saved themes are
+    migrated naturally on their next save.
+    """
+    if isinstance(tree, dict):
+        tree = tree.get('children', [])
+    if not isinstance(tree, list):
+        raise ValueError('Taxonomy must be a JSON array of nodes')
+    flattened = []
+
+    def visit(node, parent_id=None):
+        if not isinstance(node, dict):
+            raise ValueError('Taxonomy nodes must be objects')
+        current = dict(node)
+        children = current.pop('children', None)
+        # Preserve parent_id for old flat input, but nested structure is the
+        # source of truth whenever children are present.
+        current['parent_id'] = parent_id if children is not None else current.get('parent_id', parent_id)
+        flattened.append(current)
+        if children is not None:
+            if not isinstance(children, list):
+                raise ValueError('Taxonomy children must be a list')
+            for child in children:
+                visit(child, current.get('node_id'))
+
+    for root in tree:
+        visit(root)
+    return flattened
+
+
+def nest_taxonomy(nodes):
+    """Return canonical nested JSON, omitting the internal parent_id field."""
+    flat = flatten_taxonomy(nodes)
+    by_id = {}
+    for node in flat:
+        copy = {key: value for key, value in node.items() if key != 'parent_id'}
+        copy['children'] = []
+        by_id[node.get('node_id')] = copy
+    roots = []
+    for node in flat:
+        target = by_id[node.get('node_id')]
+        parent_id = node.get('parent_id')
+        if parent_id is None:
+            roots.append(target)
+        elif parent_id in by_id:
+            by_id[parent_id]['children'].append(target)
+    return roots
+
+
 def taxonomy(nodes, require_leaves=False):
     """Validate the taxonomy and return the set of leaf node IDs.
 
@@ -31,7 +84,8 @@ def taxonomy(nodes, require_leaves=False):
     nodes that are not themselves a parent of another node (so they may sit at
     Tier-2 or Tier-3 depending on how far the taxonomy was broken down).
     """
-    if not isinstance(nodes, list) or not nodes:
+    nodes = flatten_taxonomy(nodes)
+    if not nodes:
         raise ValueError('At least one taxonomy node is required')
     if any(not isinstance(n, dict) or not isinstance(n.get('node_id'), str) or not n['node_id'].strip() for n in nodes):
         raise ValueError('Node IDs must be nonempty strings')
@@ -94,8 +148,31 @@ def taxonomy(nodes, require_leaves=False):
     leaf_ids = set(ids) - {p for p in parents.values() if p}
     return leaf_ids
 
+
+def _hierarchy(nodes):
+    """Return parent/child lookups and all leaf descendants for each node."""
+    nodes = flatten_taxonomy(nodes)
+    parents = {node['node_id']: node.get('parent_id') for node in nodes}
+    children = {node_id: [] for node_id in parents}
+    for node_id, parent_id in parents.items():
+        if parent_id is not None:
+            children[parent_id].append(node_id)
+
+    def descendants(node_id):
+        direct = children[node_id]
+        if not direct:
+            return {node_id}
+        result = set()
+        for child_id in direct:
+            result.update(descendants(child_id))
+        return result
+
+    return parents, children, {node_id: descendants(node_id) for node_id in parents}
+
 def estimate(case, nodes, evidence):
+    nodes = flatten_taxonomy(nodes)
     leaves = taxonomy(nodes)
+    parents, children, descendant_leaves = _hierarchy(nodes)
     total = number(case['total_revenue'], 'Total revenue')
     if total <= 0:
         raise ValueError('Consolidated external revenue must be positive')
@@ -107,7 +184,9 @@ def estimate(case, nodes, evidence):
     seen, groups, issues = set(), set(), []
     lower = upper = point = accounted = 0.0
     has_point = True
-    sub = {n: {'lower': 0.0, 'upper': 0.0, 'point': 0.0} for n in leaves}
+    # Keep underlying revenue identity through the roll-up. A revenue unit may
+    # match several leaves, but a common parent must include that unit once.
+    node_units = {node_id: {} for node_id in parents}
     for u in units:
         uid = u['unit_id']
         if uid in seen:
@@ -164,13 +243,19 @@ def estimate(case, nodes, evidence):
             has_point = False
         else:
             point += revenue * p
-        for node, share in shares.items():
-            sub[node]['lower'] += revenue * lo * share / total
-            sub[node]['upper'] += revenue * hi * share / total
-            if p is None and share:
-                sub[node]['point'] = None
-            elif sub[node]['point'] is not None:
-                sub[node]['point'] += revenue * (p or 0) * share / total
+        if relationship in ('direct', 'insufficient_evidence'):
+            # Allocations express an evidenced split where one is available.
+            # Otherwise node_ids records a supported match without inventing a
+            # split; it is intentionally allowed to overlap across leaves.
+            matched_leaves = set(shares) if shares else set(u.get('node_ids', []))
+            for leaf in matched_leaves:
+                share = shares.get(leaf, 1.0)
+                node_units[leaf][uid] = {
+                    'lower': revenue * lo * share,
+                    'upper': revenue * hi * share,
+                    'point': None if p is None else revenue * p * share,
+                    'explicit_allocation': bool(shares),
+                }
     if accounted > total + total * 1e-8:
         raise ValueError('Revenue units exceed consolidated external revenue')
     residual = max(0.0, total - accounted)
@@ -178,14 +263,68 @@ def estimate(case, nodes, evidence):
         issues.append('Unallocated residual revenue retained as unknown; reviewer must resolve reconciliation')
         upper += residual
         has_point = False
+    if case.get('unresolved_questions'):
+        issues.extend(str(question) for question in case['unresolved_questions'])
+        has_point = False
     if not units:
         issues.append('No revenue units assessed')
     lo, hi = lower / total, upper / total
-    sub_lo = sum(v['lower'] for v in sub.values())
-    sub_hi = sum(v['upper'] for v in sub.values())
-    return {'lower': lo, 'upper': hi, 'point': point / total if has_point else None,
+    node_exposures = {}
+    for node_id, leaf_set in descendant_leaves.items():
+        # Use each unit once within this node even when it occurs under several
+        # children. If a source supplies explicit leaf allocations, their sum
+        # remains bounded by the validation above.
+        records = {}
+        for leaf in leaf_set:
+            for unit_id, values in node_units[leaf].items():
+                current = records.get(unit_id)
+                if current is None:
+                    records[unit_id] = values.copy()
+                else:
+                    if current['explicit_allocation'] and values['explicit_allocation']:
+                        # Distinct evidenced leaf shares may be added; their
+                        # total is already bounded at one per revenue unit.
+                        current['lower'] += values['lower']
+                        current['upper'] += values['upper']
+                        current['point'] = (None if current['point'] is None or values['point'] is None
+                                            else current['point'] + values['point'])
+                    else:
+                        # An unsplit unit matched multiple leaves: it is the
+                        # same revenue, not extra revenue.
+                        current['lower'] = max(current['lower'], values['lower'])
+                        current['upper'] = max(current['upper'], values['upper'])
+                        current['point'] = (None if current['point'] is None or values['point'] is None
+                                            else max(current['point'], values['point']))
+                        current['explicit_allocation'] = False
+        node_exposures[node_id] = {
+            'lower': sum(v['lower'] for v in records.values()) / total,
+            'upper': sum(v['upper'] for v in records.values()) / total,
+            'point': (sum(v['point'] for v in records.values()) / total
+                      if records and all(v['point'] is not None for v in records.values()) else None),
+            'revenue_unit_ids': sorted(records),
+            'is_leaf': not children[node_id],
+        }
+    # The public leaf breakdown uses the same matching records as its parents.
+    # Overlapping sibling percentages are valid; unresolved revenue is computed
+    # from each unit's union of allocated shares rather than their summed leaves.
+    sub = {leaf: {key: node_exposures[leaf][key] for key in ('lower', 'upper', 'point')}
+           for leaf in leaves}
+    covered_lower = covered_upper = 0.0
+    for u in units:
+        if u['relationship_type'] != 'direct':
+            continue
+        share = sum(u.get('allocations', {}).values()) if u.get('allocations') else 1.0
+        covered_lower += u['revenue'] * u['lower'] * share / total
+        covered_upper += u['revenue'] * u['upper'] * share / total
+    final_point = point / total if has_point else None
+    return {'lower': lo, 'upper': hi, 'point': final_point,
+            'main_theme_revenue': point if has_point else None,
+            'identified_theme_revenue': lower,
+            'calculation_status': 'complete' if has_point else ('partial' if lower else 'undetermined'),
+            'revenue_unit_ids': sorted(u['unit_id'] for u in units if u['relationship_type'] == 'direct'),
             'residual_revenue': residual, 'issues': issues, 'subthemes': sub,
-            'unresolved_subtheme': {'lower': lo-sub_lo, 'upper': hi-sub_hi},
+            'node_exposures': node_exposures,
+            'unresolved_subtheme': {'lower': max(0.0, lo-covered_lower), 'upper': max(0.0, hi-covered_upper)},
             'calculation_version': VERSION}
 
 def holdings(rows):

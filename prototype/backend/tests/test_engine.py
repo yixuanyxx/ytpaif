@@ -123,6 +123,45 @@ class EngineCalculations(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.estimate(case([unit('a', 100, 1, 1, 1, 'indirect')]), NODES, {'e1'})
 
+    def test_leaf_matches_roll_up_without_double_counting(self):
+        nodes = [
+            {'node_id': 'theme', 'parent_id': None, 'name': 'Theme', 'definition': 'Theme', 'examples': []},
+            {'node_id': 'solar', 'parent_id': 'theme', 'name': 'Solar', 'definition': 'Solar', 'examples': []},
+            {'node_id': 'storage', 'parent_id': 'theme', 'name': 'Storage', 'definition': 'Storage', 'examples': []},
+        ]
+        shared = unit('integrated-system', 50, 1, 1, 1, leaf='solar')
+        shared['node_ids'] = ['solar', 'storage']
+        shared['allocations'] = {}
+        standalone = unit('battery', 20, 1, 1, 1, leaf='storage')
+        result = engine.estimate(case([shared, standalone]), nodes, {'e1'})
+        self.assertEqual(result['node_exposures']['solar']['revenue_unit_ids'], ['integrated-system'])
+        self.assertEqual(result['node_exposures']['storage']['revenue_unit_ids'], ['battery', 'integrated-system'])
+        self.assertEqual(result['node_exposures']['theme']['revenue_unit_ids'], ['battery', 'integrated-system'])
+        self.assertAlmostEqual(result['node_exposures']['theme']['point'], .7)
+
+    def test_evidenced_leaf_splits_add_once_at_parent(self):
+        nodes = [
+            {'node_id': 'theme', 'parent_id': None, 'name': 'Theme', 'definition': 'Theme', 'examples': []},
+            {'node_id': 'a', 'parent_id': 'theme', 'name': 'A', 'definition': 'A', 'examples': []},
+            {'node_id': 'b', 'parent_id': 'theme', 'name': 'B', 'definition': 'B', 'examples': []},
+        ]
+        mixed = unit('mixed', 80, 1, 1, 1, leaf='a')
+        mixed['allocations'] = {'a': .25, 'b': .75}
+        result = engine.estimate(case([mixed]), nodes, {'e1'})
+        self.assertAlmostEqual(result['node_exposures']['a']['point'], .2)
+        self.assertAlmostEqual(result['node_exposures']['b']['point'], .6)
+        self.assertAlmostEqual(result['node_exposures']['theme']['point'], .8)
+
+    def test_nested_taxonomy_is_accepted_and_preserves_hierarchy(self):
+        nested = [{
+            'node_id': 'theme', 'name': 'Theme', 'definition': 'Theme', 'examples': [],
+            'children': [{
+                'node_id': 'leaf', 'name': 'Leaf', 'definition': 'Leaf', 'examples': [], 'children': []
+            }],
+        }]
+        self.assertEqual(engine.taxonomy(nested), {'leaf'})
+        self.assertEqual(engine.nest_taxonomy(nested), nested)
+
     def test_taxonomy_cycles_and_nesting_limits(self):
         # Cycle
         n_cycle = copy.deepcopy(NODES)

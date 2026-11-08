@@ -22,6 +22,8 @@ import gemini_fallback
 import supabase_store
 import source_cache
 import app_auth
+import analysis_library
+import source_confidence
 
 ROOT = Path(__file__).resolve().parent
 
@@ -54,7 +56,7 @@ FRONTEND = (ROOT.parent / 'frontend') if (ROOT.parent / 'frontend').exists() els
 store = supabase_store.SupabaseStore()
 LOCK = threading.Lock()
 MAX_FILE = 20 * 1024 * 1024
-VERSIONS = {'prompt': '1.0.0', 'extraction': '1.0.0', 'calculation': engine.VERSION}
+VERSIONS = {'prompt': '1.3.0', 'extraction': '1.1.0', 'calculation': engine.VERSION}
 RUBRIC = {'low': 1, 'medium': 2, 'high': 3}
 
 DEFAULT_LLM_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
@@ -121,7 +123,10 @@ def theme_create(d):
         parse_date(d['cutoff'])
     nodes = d.get('nodes', [])
     if nodes:
+        # Accept legacy flat editor input, but persist only the canonical
+        # nested taxonomy JSON so parent/child relationships travel together.
         engine.taxonomy(nodes)
+        nodes = engine.nest_taxonomy(nodes)
     # Edit-in-place: if an existing theme id is supplied, update that record so
     # its id stays stable (keeps any linked cases/analysis attached). Otherwise
     # create a brand-new, independent theme. No versioning.
@@ -354,12 +359,37 @@ def populate_company_financials(d):
     return financial_jobs.start(sys.modules[__name__], d)
 
 
+def cancel_company_financials(d):
+    import financial_jobs
+    import sys
+    return financial_jobs.cancel(sys.modules[__name__], d)
+
+
+def company_source_records(company_id):
+    if hasattr(store, 'company_records'):
+        return store.company_records('sources', company_id)
+    return [source for source in all_records('sources') if source.get('company_id') == company_id]
+
+
 def evidence_for(company_id, theme_id):
     theme = get('themes', theme_id)
     cutoff = theme.get('cutoff') or date.today().isoformat()
-    sources = [s for s in all_records('sources')
-               if s['company_id'] == company_id and s['publication_date'] <= cutoff]
-    return sources, {e['evidence_id'] for s in sources for e in s['evidence']}
+    sources = []
+    for source in company_source_records(company_id):
+        if (source.get('company_id') != company_id or not source.get('publication_date')
+                or source['publication_date'] > cutoff):
+            continue
+        # Discovered links and older source payloads may have no extracted
+        # text yet. Normalize at the evidence boundary so preparation can read
+        # those links instead of failing before it reaches the document reader.
+        rows = source.get('evidence') or []
+        if not isinstance(rows, list):
+            raise ValueError('Saved source evidence must be a list of passages')
+        passages = [row for row in rows if isinstance(row, dict) and row.get('evidence_id')
+                    and isinstance(row.get('passage'), str) and row['passage'].strip()]
+        sources.append({**source, 'evidence': passages, 'sha256': source.get('sha256'),
+                        'period': source.get('period') or source.get('reporting_period') or ''})
+    return sources, {e['evidence_id'] for source in sources for e in source['evidence']}
 
 def source_search(d):
     if d.get('discover_web'):
@@ -449,6 +479,9 @@ def save_case(d):
     return put('cases', {
         'id': ident('case'), 'run_id': run['id'],
         'company_id': d['company_id'], 'theme_id': d['theme_id'],
+        'analysis_scope_key': analysis_library.scope_key(theme),
+        'source_signature': analysis_library.source_signature(sources),
+        **analysis_library.result_fields(result, d.get('confidence_percent')),
         'taxonomy_updated_at': theme.get('updated_at', theme.get('created_at')),
         'case': d['case'], 'estimate': result,
         'review_status': 'needs_review',
@@ -487,8 +520,9 @@ def review(d):
 
 def selected_estimates(theme_id):
     result = {}
-    for c in all_records('cases'):
-        if c['theme_id'] == theme_id and c['review_status'] == 'approved':
+    theme = get('themes', theme_id)
+    for c in analysis_library.current_results(all_records('cases'), [theme], source_link_records()):
+        if c['review_status'] == 'approved':
             result[c['company_id']] = {
                 **c['estimate'], 'review_status': c['review_status'], 'case_id': c['id']
             }
@@ -707,6 +741,73 @@ def generate(d):
 
 # ── Analyze ───────────────────────────────────────────────────────────────────
 
+def _classification_allocation(classification, passages):
+    """A complete unit match needs a source quote, not just a thematic label."""
+    if classification['relationship_type'] in ('excluded', 'indirect'):
+        if classification.get('unresolved_questions'):
+            raise ValueError('Resolve scope uncertainty before treating revenue as excluded or indirect')
+        return 0, 0, 0, 'derived'
+    if (classification['relationship_type'] != 'direct'
+            or classification.get('whole_unit_supported') is not True
+            or classification.get('unresolved_questions')):
+        return 0, 1, None, 'insufficient_evidence'
+    quote = ' '.join(str(classification.get('revenue_attribution_quote', '')).split())
+    cited = set(classification.get('evidence_ids', []))
+    if not quote or not any(
+            quote in ' '.join(p['passage'].split()) for p in passages if p['evidence_id'] in cited):
+        raise ValueError('A full revenue match requires a supporting quote from cited evidence')
+    return 1, 1, 1, 'disclosed'
+
+
+def _preserve_classification_uncertainty(record, activity):
+    """A possible thematic share or open scope question cannot mean exact zero."""
+    relationship = record['relationship_type']
+    questions = list(record.get('unresolved_questions') or [])
+    possible_leaf = (relationship == 'indirect' and bool(record.get('node_ids'))
+                     and record.get('whole_unit_supported') is not True)
+    if relationship in ('excluded', 'indirect') and (questions or possible_leaf):
+        if possible_leaf and not questions:
+            questions.append('The theme-attributable share of ' + str(activity) + ' is not established.')
+        return {**record, 'original_relationship_type': relationship,
+                'relationship_type': 'insufficient_evidence',
+                'unresolved_questions': questions}
+    return record
+
+
+def _validate_classification_response(classified, facts, leaves, selected, passages):
+    records = classified.get('classifications')
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise ValueError('Classification response requires a list of classifications')
+    ids = [record.get('unit_id') for record in records]
+    if len(set(ids)) != len(ids) or set(ids) != {unit['unit_id'] for unit in facts['units']}:
+        raise ValueError('Classification does not map exactly once to each fact')
+    if classified.get('confidence_band') not in RUBRIC or not classified.get('confidence_basis'):
+        raise ValueError('Classification confidence rubric is missing')
+    by_unit = {unit['unit_id']: unit for unit in facts['units']}
+    normalized = []
+    for record in records:
+        for field in ('node_ids', 'relationship_type', 'rationale', 'scope_check', 'evidence_ids', 'unresolved_questions'):
+            if field not in record:
+                raise ValueError('Classification missing ' + field)
+        if not set(record['node_ids']) <= leaves or not set(record['evidence_ids']) <= selected:
+            raise ValueError('Model cited an invalid taxonomy leaf or evidence ID')
+        if record['relationship_type'] == 'direct' and (not record['evidence_ids'] or not record['node_ids']):
+            raise ValueError('Direct classification needs a leaf and cited evidence')
+        safe_record = _preserve_classification_uncertainty(
+            record, by_unit[record['unit_id']].get('activity') or record['unit_id'])
+        _classification_allocation(safe_record, passages)
+        normalized.append(safe_record)
+    return {**classified, 'classifications': normalized}
+
+
+def _validate_extracted_revenue(facts, nodes, selected):
+    provisional = {**facts, 'units': [{**unit, 'relationship_type': 'insufficient_evidence',
+        'rationale': 'Classification pending', 'lower': 0, 'upper': 1, 'point': None,
+        'method': 'insufficient_evidence', 'node_ids': [], 'allocations': {}}
+        for unit in facts['units']]}
+    engine.estimate(provisional, nodes, selected)
+
+
 def analyze(d):
     theme   = get('themes', d['theme_id'])
     company = get('companies', d['company_id'])
@@ -714,7 +815,7 @@ def analyze(d):
     selected = set(d.get('evidence_ids', []))
     if not selected or not selected <= valid:
         raise ValueError('Select valid passages for analysis')
-    passages = [e for s in sources for e in s['evidence'] if e['evidence_id'] in selected]
+    passages = [{**e, 'source_id': s['id']} for s in sources for e in s['evidence'] if e['evidence_id'] in selected]
     if sum(len(e['passage']) for e in passages) > 60000:
         raise ValueError('Select no more than 60,000 characters of relevant passages')
     run_rec = {
@@ -726,6 +827,8 @@ def analyze(d):
         'source_hashes': {s['id']: s['sha256'] for s in sources},
         'selected_evidence_ids': sorted(selected), 'cost': None
     }
+    run_rec['evidence_selection_notes'] = d.get('evidence_selection_notes', [])
+    run_rec['source_read_errors'] = d.get('source_read_errors', [])
     put('runs', run_rec)
     try:
         facts = llm(
@@ -733,8 +836,19 @@ def analyze(d):
             '"period":"...","currency":"...","scale":"...","units":[{"unit_id":"...","activity":"...",'
             '"revenue":number,"period":"...","currency":"...","scale":"...","external":true,'
             '"evidence_ids":[],"overlap_group":null}],"unresolved_questions":[]}. '
-            'Use non-overlapping external revenue units. Preserve exact source IDs. Do not infer revenue shares.',
-            {'company': company, 'passages': passages}, run_rec
+            'Reuse revenue facts from the supplied saved source documents. Use the target reporting period if provided, otherwise the newest supported annual period. '
+            'Identify consolidated external total revenue and non-overlapping underlying revenue segments, including supported unrelated revenue for reconciliation. '
+            'external=true means sales to customers outside the consolidated group, not foreign/export sales. '
+            'Disaggregated consolidated net customer revenue is external revenue; exclude sales between group segments. '
+            'Preserve one unit_id for each underlying revenue across repeated disclosures; attach all supporting evidence IDs. '
+            'Never add an inclusive total to its components, or combine geographic and business breakdowns. '
+            'If overlaps cannot be resolved, record them in unresolved_questions and do not claim exact exposure. '
+            'Preserve exact evidence IDs. Do not infer unsupported revenue shares. '
+            'Search for revenue relevant to every leaf using its name, definition, examples, keywords and similar phrases; keep the nested taxonomy hierarchy intact as context.',
+            {'company': company, 'taxonomy': engine.nest_taxonomy(theme['nodes']),
+             'reporting_period': theme.get('reporting_period'),
+             'sources': [{key: source.get(key) for key in ('id', 'title', 'url', 'period', 'publication_date')}
+                         for source in sources], 'passages': passages}, run_rec
         )
         for key in ('total_revenue', 'denominator_evidence_ids', 'period', 'currency', 'scale', 'units', 'unresolved_questions'):
             if key not in facts:
@@ -743,23 +857,77 @@ def analyze(d):
             raise ValueError('Malformed extracted fact lists')
         put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
                                'stage': 'extracting', 'output': facts})
+        if facts['total_revenue'] is None or not facts['denominator_evidence_ids']:
+            raise ValueError('The readable documents did not establish a supported total revenue for the reporting period. '
+                             'Upload the annual report or choose relevant revenue passages before retrying.')
+        try:
+            _validate_extracted_revenue(facts, theme['nodes'], selected)
+        except ValueError as extraction_error:
+            facts = llm(
+                'Correct the rejected extracted revenue facts using only the supplied source passages. '
+                'Return the complete facts object with total_revenue, denominator_evidence_ids, period, currency, scale, units and unresolved_questions. '
+                'Each unit requires unit_id, activity, revenue, period, currency, scale, external, evidence_ids and overlap_group. '
+                'external means sales to customers outside the consolidated corporate group. It does not mean exports or foreign sales. '
+                'A disaggregation of consolidated net customer revenue is external revenue; remove intersegment sales. '
+                'Use the same reporting period, currency and scale as the supported denominator. Do not invent amounts, shares, units or source evidence. '
+                'Only correct external flags when the cited consolidated-revenue evidence supports this. Leave unsupported facts unresolved.',
+                {'validation_error': str(extraction_error), 'rejected_facts': facts,
+                 'company': company, 'passages': passages}, run_rec)
+            if not isinstance(facts.get('units'), list):
+                raise ValueError('Corrected extraction requires revenue units')
+            put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
+                                   'stage': 'extraction_repair', 'output': facts})
+            _validate_extracted_revenue(facts, theme['nodes'], selected)
         run_rec['status'] = 'classifying'
         put('runs', run_rec)
-        # Only Tier-2 (leaf) nodes are valid classification targets
+        # A searchable node is any leaf, including a leaf that sits above the
+        # deepest tier. Parent nodes are calculated from their leaf descendants.
         leaves = engine.taxonomy(theme['nodes'])
         classified = llm(
-            'Classify extracted units against approved Tier-2 taxonomy leaf nodes only, within the Asian equities excluding Japan scope (all Asian stocks outside Japan, including stocks outside any benchmark index). '
+            'Classify extracted units against approved taxonomy LEAF nodes only, regardless of tier, within the Asian equities excluding Japan scope (all Asian stocks outside Japan, including stocks outside any benchmark index). '
             'Return {"classifications":[{"unit_id":"...","node_ids":[],"relationship_type":"direct|indirect|excluded|insufficient_evidence",'
-            '"rationale":"...","scope_check":"...","evidence_ids":[],"unresolved_questions":[]}],'
-            '"confidence_band":"high|medium|low","confidence_basis":"rubric reason, not probability"}. '
-            'Every unit must appear exactly once. Positive labels require cited evidence. '
-            'Do not propose unsupported revenue percentages. Do not classify to Tier-1 nodes.',
-            {'theme': theme, 'facts': facts, 'passages': passages}, run_rec
+            '"rationale":"...","scope_check":"...","evidence_ids":[],"unresolved_questions":[],"whole_unit_supported":false,"revenue_attribution_quote":"..."}],'
+            '"confidence_band":"high|medium|low","confidence_percent":number or null,"confidence_basis":"rubric reason, not probability"}. '
+            'confidence_percent is your self-assessed confidence in the evidence and classification on a 0-100 scale, not a calibrated probability; use null if unavailable. '
+            'Every unit must appear exactly once. Positive labels require cited evidence. A unit may match more than one leaf; preserve every supported leaf match, but do not invent allocation shares. '
+            'Copy unit_id values exactly from facts.units. Never create a unit for the consolidated denominator or invent additional unit IDs. '
+            'Process the deepest leaves first, then leaves at higher tiers. At each tier consider all node details together to distinguish their meanings. '
+            'Match using names, definitions, examples, keywords, synonyms and similar phrases in the supplied documents. '
+            'Set whole_unit_supported=true ONLY if cited evidence establishes that the whole revenue unit qualifies for its matched leaves. '
+            'Supply an exact revenue_attribution_quote from the cited passage supporting that attribution. A keyword hit or broad mixed segment is insufficient; keep whole_unit_supported=false for unsupported shares. '
+            'Use insufficient_evidence for an unspecified Others segment; no supported classification is not proof of exclusion. '
+            'Business scope_check must address the activity and theme exclusions, not merely state the company country. '
+            'The deterministic calculation will count that underlying unit once when rolling up to a shared parent. Do not search or classify to non-leaf nodes. '
+            'Revenue reported only at a non-leaf tier remains insufficient_evidence unless leaf attribution is supported.',
+            {'theme': {**theme, 'nodes': engine.nest_taxonomy(theme['nodes'])},
+             'leaf_node_ids': sorted(leaves), 'facts': facts, 'passages': passages}, run_rec
         )
         put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
                                'stage': 'classifying', 'output': classified})
         run_rec['status'] = 'validating'
         put('runs', run_rec)
+        try:
+            classified = _validate_classification_response(classified, facts, leaves, selected, passages)
+        except ValueError as validation_error:
+            # Correct the response once using the same facts and evidence.
+            # This never relaxes citation checks or accepts fabricated units.
+            classified = llm(
+                'Correct the rejected classification response and return the complete classifications JSON object with confidence_band, confidence_percent and confidence_basis. '
+                'Copy every facts.units unit_id exactly once; invent no additional units or revenue amounts. '
+                'Any revenue_attribution_quote must be an EXACT contiguous substring of a cited passage, allowing whitespace normalization only. '
+                'Do not rewrite a table row into a sentence, add currency/units/percentages absent from that quote, or join noncontiguous text. '
+                'A keyword match does not justify assigning an entire mixed revenue segment. Broad platforms such as high-performance computing may contain both AI and non-AI activities; '
+                'set whole_unit_supported=false if the documents do not establish the whole amount as qualifying. '
+                'Use insufficient_evidence for unspecified Others or an unsupported allocation; missing information is not excluded revenue. '
+                'A scope_check must address business activity, not just the company country. '
+                'Use only approved leaf IDs from leaf_node_ids. For unsupported shares retain uncertainty instead of inventing a split. '
+                'Return all original required fields, including relationship_type, rationale, scope_check, evidence_ids, node_ids, unresolved_questions, whole_unit_supported and revenue_attribution_quote.',
+                {'validation_error': str(validation_error), 'rejected_response': classified, 'facts': facts,
+                 'theme': {**theme, 'nodes': engine.nest_taxonomy(theme['nodes'])},
+                 'leaf_node_ids': sorted(leaves), 'passages': passages}, run_rec)
+            put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
+                                   'stage': 'classification_repair', 'output': classified})
+            classified = _validate_classification_response(classified, facts, leaves, selected, passages)
         records = classified['classifications']
         byid = {c['unit_id']: c for c in records}
         if len(byid) != len(records) or set(byid) != {u['unit_id'] for u in facts['units']}:
@@ -772,30 +940,45 @@ def analyze(d):
                 if field not in c:
                     raise ValueError('Classification missing ' + field)
             if not set(c['node_ids']) <= leaves or not set(c['evidence_ids']) <= selected:
-                raise ValueError('Model cited an invalid Tier-2 leaf or evidence ID')
+                raise ValueError('Model cited an invalid taxonomy leaf or evidence ID')
             if c['relationship_type'] == 'direct' and (not c['evidence_ids'] or not c['node_ids']):
                 raise ValueError('Direct classification needs a leaf and cited evidence')
+            if c.get('original_relationship_type'):
+                u['original_relationship_type'] = c['original_relationship_type']
             u.update(
                 relationship_type=c['relationship_type'], rationale=c['rationale'],
                 scope_check=c['scope_check'], classification_evidence_ids=c['evidence_ids'],
                 node_ids=c['node_ids'], unresolved_questions=c['unresolved_questions']
             )
-            excluded = c['relationship_type'] in ('excluded', 'indirect')
-            u.update(lower=0, upper=0 if excluded else 1,
-                     point=0 if excluded else None,
-                     method='derived' if excluded else 'insufficient_evidence',
+            lower, upper, point, method = _classification_allocation(c, passages)
+            u.update(lower=lower, upper=upper, point=point, method=method,
+                     whole_unit_supported=c.get('whole_unit_supported') is True,
+                     revenue_attribution_quote=c.get('revenue_attribution_quote', ''),
                      assumption='', allocations={})
-        facts.pop('unresolved_questions', None)
+        facts['unresolved_questions'] = list(dict.fromkeys([
+            *facts.get('unresolved_questions', []),
+            *(question for unit in facts['units'] for question in unit.get('unresolved_questions', []))]))
         result = engine.estimate(facts, theme['nodes'], selected)
+        run_rec['status'] = 'assessing_source_confidence'
+        put('runs', run_rec)
+        source_confidence_result = source_confidence.evaluate(sources, company, facts, passages)
+        put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
+                               'stage': 'source_confidence', 'output': source_confidence_result})
+        run_rec['usage'].append({'stage': 'source_confidence',
+                                 'model': source_confidence_result['source_confidence_model']})
         case = put('cases', {
             'id': ident('case'), 'run_id': run_rec['id'],
             'company_id': company['id'], 'theme_id': theme['id'],
+            'analysis_scope_key': analysis_library.scope_key(theme),
+            'source_signature': analysis_library.source_signature(sources),
+            **analysis_library.result_fields(result, classified.get('confidence_percent')),
             'taxonomy_updated_at': theme.get('updated_at', theme.get('created_at')),
             'case': facts, 'estimate': result,
             'review_status': 'needs_review',
             'classification_confidence': classified['confidence_band'],
             'exposure_quality': 'low',
             'confidence_basis': classified['confidence_basis'],
+            **source_confidence_result,
             'created_at': now()
         })
         case.update(
@@ -819,7 +1002,211 @@ def analyze(d):
 
 # ── Batch Analysis (Analyse All) ──────────────────────────────────────────────
 
+def unresolved_search_batch_limit():
+    try:
+        return max(0, min(10, int(os.environ.get('UNRESOLVED_SEARCH_BATCH_LIMIT', '3'))))
+    except ValueError:
+        return 3
+
+
+def _recent_fallback_search(record, hours):
+    searched_at = record.get('searched_at')
+    if not searched_at:
+        return False
+    try:
+        timestamp = datetime.fromisoformat(searched_at.replace('Z', '+00:00'))
+        return datetime.now(timezone.utc) - timestamp < timedelta(hours=hours)
+    except (TypeError, ValueError):
+        return False
+
+
+def _fallback_evidence_ids(sources, theme, new_source_ids):
+    """Keep new web citations and the existing denominator within the LLM limit."""
+    import exposure_sources
+
+    new_sources = [source for source in sources if source['id'] in new_source_ids]
+    old_sources = [source for source in sources if source['id'] not in new_source_ids]
+    new_passages = [passage for source in new_sources for passage in source.get('evidence', [])]
+    selected_new = []
+    new_size = 0
+    for passage in new_passages:
+        size = len(passage.get('passage', ''))
+        if passage.get('evidence_id') and size and new_size + size <= 15000:
+            selected_new.append(passage['evidence_id'])
+            new_size += size
+    if not selected_new:
+        raise ValueError('Web search did not return a readable numeric passage')
+    old_ids = []
+    notes = []
+    if any(source.get('evidence') for source in old_sources):
+        old_ids, notes = exposure_sources.select_evidence(old_sources, theme, limit=60000-new_size)
+    return sorted(set(old_ids + selected_new)), [
+        *notes, 'Included cited numeric evidence from the unresolved-company web search.']
+
+
+def _fallback_analysis_budget_available():
+    provider_host = (urlparse(os.environ.get('LLM_ENDPOINT') or DEFAULT_LLM_ENDPOINT).hostname or '').lower()
+    if provider_host != 'generativelanguage.googleapis.com':
+        return True
+    import gemini_budget
+    return gemini_budget.status()['calls_remaining_24h'] >= 2
+
+
+def _analyse_found_web_sources(case, company, theme, metadata):
+    import exposure_sources
+    import sys
+
+    prepared, _, read_errors = exposure_sources.prepare_sources(
+        sys.modules[__name__], company['id'], theme['id'])
+    selected, notes = _fallback_evidence_ids(prepared, theme, set(metadata['source_ids']))
+    try:
+        revised = analyze({
+            'theme_id': theme['id'], 'company_id': company['id'],
+            'evidence_ids': selected,
+            'evidence_selection_notes': notes,
+            'source_read_errors': read_errors,
+        })
+    except Exception:
+        # Keep the old unresolved case visible with the newly found documents.
+        case['source_signature'] = analysis_library.source_signature(prepared)
+        raise
+    resolved = revised.get('estimate', {}).get('point') is not None
+    metadata.update(
+        status='resolved' if resolved else 'still_unresolved',
+        message=('New cited evidence produced an exposure estimate.' if resolved else
+                 'New numeric sources were analysed, but a supported single exposure estimate remains unavailable.'),
+    )
+    revised['fallback_web_search'] = metadata
+    put('cases', revised)
+    return revised, metadata
+
+
+def _search_unresolved_case(case, company, theme, *, allow_search=True):
+    """Search once for a missing theme share; analyse again only with new evidence."""
+    estimate = case.get('estimate')
+    if (not isinstance(estimate, dict) or 'point' not in estimate
+            or estimate.get('calculation_status') not in ('partial', 'undetermined')
+            or estimate['point'] is not None):
+        return case, {'status': 'not_needed', 'message': ''}, False, False
+
+    previous = case.get('fallback_web_search') or {}
+    if previous.get('status') == 'analysis_deferred':
+        if not _fallback_analysis_budget_available():
+            return case, {'status': 'deferred',
+                          'message': 'Web evidence is saved. Follow-up analysis is waiting for the Gemini daily budget.'}, False, False
+        try:
+            revised, metadata = _analyse_found_web_sources(case, company, theme, dict(previous))
+            return revised, metadata, True, False
+        except Exception as error:
+            budget_reached = 'Gemini safety budget reached' in str(error)
+            metadata = {**previous, 'status': 'analysis_deferred' if budget_reached else 'search_failed',
+                        'message': ('Follow-up analysis is waiting for the Gemini daily budget.' if budget_reached
+                                    else 'Follow-up analysis of saved web evidence failed: ' + str(error))}
+            case['fallback_web_search'] = metadata
+            put('cases', case)
+            return case, metadata, False, False
+    if (previous.get('status') == 'search_failed' and previous.get('source_ids')
+            and not _recent_fallback_search(previous, 1)):
+        if not _fallback_analysis_budget_available():
+            return case, {'status': 'deferred',
+                          'message': 'Saved web evidence is waiting for the Gemini daily budget.'}, False, False
+        try:
+            revised, metadata = _analyse_found_web_sources(case, company, theme, dict(previous))
+            return revised, metadata, True, False
+        except Exception as error:
+            budget_reached = 'Gemini safety budget reached' in str(error)
+            metadata = {**previous, 'status': 'analysis_deferred' if budget_reached else 'search_failed',
+                        'searched_at': now(),
+                        'message': ('Follow-up analysis is waiting for the Gemini daily budget.' if budget_reached
+                                    else 'Follow-up analysis of saved web evidence failed: ' + str(error))}
+            case['fallback_web_search'] = metadata
+            put('cases', case)
+            return case, metadata, False, False
+    if previous.get('status') in ('not_found', 'still_unresolved') and _recent_fallback_search(previous, 24):
+        return case, {'status': 'already_searched',
+                      'message': previous.get('message') or 'Recent web search found no supported exposure estimate.'}, False, False
+    if previous.get('status') == 'search_failed' and _recent_fallback_search(previous, 1):
+        return case, {'status': 'already_searched',
+                      'message': previous.get('message') or 'Recent web search failed; retry later.'}, False, False
+    if not allow_search:
+        return case, {'status': 'deferred',
+                      'message': 'Web evidence search deferred by the batch search limit. Analyse this company individually to search now.'}, False, False
+
+    import unresolved_web_search
+    import sys
+
+    existing_sources = company_source_records(company['id'])
+    attempted_at = now()
+    try:
+        discovery = unresolved_web_search.discover(
+            sys.modules[__name__], company, theme, existing_sources=existing_sources)
+        if not isinstance(discovery, dict):
+            raise ValueError('Web evidence search returned an invalid result')
+        existing_ids = {source['id'] for source in existing_sources}
+        target = str(theme.get('reporting_period') or '').strip()
+        cutoff = theme.get('cutoff') or date.today().isoformat()
+        new_sources = []
+        for source in discovery.get('sources') or []:
+            if (not isinstance(source, dict) or not source.get('id') or source['id'] in existing_ids
+                    or source.get('company_id') != company['id']
+                    or source.get('theme_numeric_evidence') is not True
+                    or source.get('link_status') != 'verified'
+                    or not source.get('publication_date') or source['publication_date'] > cutoff
+                    or not source.get('evidence')):
+                continue
+            source_period = str(source.get('period') or source.get('reporting_period') or '').strip()
+            if target and re.sub(r'[^a-z0-9]', '', source_period.lower()).removeprefix('fy') != re.sub(r'[^a-z0-9]', '', target.lower()).removeprefix('fy'):
+                continue
+            new_sources.append(source)
+            existing_ids.add(source['id'])
+            if len(new_sources) == 3:
+                break
+        metadata = {
+            'searched_at': attempted_at,
+            'queries': discovery.get('queries') or [],
+            'diagnostics': discovery.get('diagnostics') or {},
+            'source_ids': [source['id'] for source in new_sources],
+        }
+        if not new_sources:
+            metadata.update(status='not_found',
+                            message='No new, period-matched numeric theme revenue evidence was found in approved sources.')
+            case['fallback_web_search'] = metadata
+            put('cases', case)
+            return case, metadata, False, True
+
+        put_many('sources', new_sources)
+        current_sources, _ = evidence_for(company['id'], theme['id'])
+        case['source_signature'] = analysis_library.source_signature(current_sources)
+        if all(source.get('theme_numeric_evidence_kind') == 'approximate_share' for source in new_sources):
+            metadata.update(status='still_unresolved',
+                            message='Found an approximate theme revenue share, but it does not support a single exact exposure estimate.')
+            case['fallback_web_search'] = metadata
+            put('cases', case)
+            return case, metadata, False, True
+        if not _fallback_analysis_budget_available():
+            metadata.update(status='analysis_deferred',
+                            message='New cited web evidence is saved; follow-up analysis is waiting for the Gemini daily budget.')
+            case['fallback_web_search'] = metadata
+            put('cases', case)
+            return case, metadata, False, True
+        revised, metadata = _analyse_found_web_sources(case, company, theme, metadata)
+        return revised, metadata, True, True
+    except Exception as error:
+        metadata = locals().get('metadata', {
+            'searched_at': attempted_at, 'queries': [], 'diagnostics': {}, 'source_ids': []})
+        budget_reached = bool(metadata.get('source_ids')) and 'Gemini safety budget reached' in str(error)
+        metadata.update(
+            status='analysis_deferred' if budget_reached else 'search_failed',
+            message=('New cited web evidence is saved; follow-up analysis is waiting for the Gemini daily budget.'
+                     if budget_reached else 'Web evidence follow-up failed: ' + str(error)))
+        case['fallback_web_search'] = metadata
+        put('cases', case)
+        return case, metadata, False, True
+
+
 def analyze_all(d):
+    import exposure_sources
+    import sys
     theme_id = d.get('theme_id')
     if not theme_id:
         theme = (all_records('themes') or [{}])[-1]
@@ -833,42 +1220,69 @@ def analyze_all(d):
         company_ids = {row['company_id'] for row in portfolio.get('rows', [])
                        if not row.get('excluded') and row.get('company_id') not in (None, '', 'CASH')}
         companies = [company for company in companies if company['id'] in company_ids]
-    sources = all_records('sources')
+    if 'company_ids' in d:
+        requested = d['company_ids']
+        if not isinstance(requested, list) or not requested or any(not isinstance(cid, str) for cid in requested):
+            raise ValueError('company_ids must be a nonempty list of company IDs')
+        if not set(requested) <= {company['id'] for company in companies}:
+            raise ValueError('Requested companies must belong to the selected portfolio')
+        companies = [company for company in companies if company['id'] in requested]
+    sources = ([source for company in companies for source in company_source_records(company['id'])]
+               if 'company_ids' in d else all_records('sources'))
     cases = all_records('cases')
 
-    existing_cids = {c['company_id'] for c in cases if c.get('theme_id') == theme_id}
-    ready_companies = [c for c in companies if c['id'] not in existing_cids and any(s['company_id'] == c['id'] for s in sources)]
+    reusable = {case['company_id']: case for case in analysis_library.current_results(cases, [theme], sources)}
+    ready_companies = [c for c in companies if 'company_ids' in d or c['id'] in reusable
+                       or any(s['company_id'] == c['id'] for s in sources)]
 
     results = []
     errors = []
+    fallback_searches = 0
+    search_limit = unresolved_search_batch_limit()
+    search_enabled = d.get('allow_unresolved_web_search') is not False
     for comp in ready_companies:
-        comp_sources, valid_eids = evidence_for(comp['id'], theme_id)
-        if not valid_eids:
-            continue
-        if sum(len(e.get('passage', '')) for s in comp_sources for e in s.get('evidence', [])) > 60000:
-            errors.append({'company_id': comp['id'], 'company_name': comp['name'],
-                           'error': 'Evidence exceeds 60,000 characters; select passages manually.'})
-            continue
-        selected = []
-        char_count = 0
-        for s in comp_sources:
-            for e in s.get('evidence', []):
-                if char_count + len(e.get('passage', '')) <= 60000:
-                    selected.append(e['evidence_id'])
-                    char_count += len(e.get('passage', ''))
-        if not selected:
-            continue
         try:
+            # Results belong to the company/theme, not to a particular
+            # portfolio. Return a persisted answer before reading documents or
+            # making any AI calls, including when no sources are loaded here.
+            if comp['id'] in reusable:
+                case = reusable[comp['id']]
+                case, fallback, recalculated, searched = _search_unresolved_case(
+                    case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit)
+                fallback_searches += int(searched)
+                results.append({'company_id': comp['id'], 'company_name': comp['name'],
+                                'case_id': case['id'], 'status': 'success' if recalculated else 'reused',
+                                'reused': not recalculated, 'case': case,
+                                'fallback_status': fallback['status'], 'fallback_message': fallback['message'],
+                                'fallback_search_attempted': searched,
+                                'source_read_errors': []})
+                continue
+            comp_sources, valid_eids, read_errors = exposure_sources.prepare_sources(
+                sys.modules[__name__], comp['id'], theme_id)
+            if not valid_eids:
+                raise ValueError('No readable evidence is available within the theme cutoff. Check saved document links or upload a report.')
+            selected, selection_notes = exposure_sources.select_evidence(comp_sources, theme)
             case = analyze({
                 'theme_id': theme_id,
                 'company_id': comp['id'],
-                'evidence_ids': selected
+                'evidence_ids': selected,
+                'evidence_selection_notes': selection_notes,
+                'source_read_errors': read_errors,
             })
-            results.append({'company_id': comp['id'], 'company_name': comp['name'], 'case_id': case['id'], 'status': 'success'})
+            case, fallback, _, searched = _search_unresolved_case(
+                case, comp, theme, allow_search=search_enabled and fallback_searches < search_limit)
+            fallback_searches += int(searched)
+            results.append({'company_id': comp['id'], 'company_name': comp['name'], 'case_id': case['id'],
+                            'status': 'success', 'reused': False, 'case': case,
+                            'fallback_status': fallback['status'], 'fallback_message': fallback['message'],
+                            'fallback_search_attempted': searched,
+                            'source_read_errors': read_errors})
         except Exception as e:
             errors.append({'company_id': comp['id'], 'company_name': comp['name'], 'error': str(e)})
 
-    return {'analysed_count': len(results), 'results': results, 'errors': errors}
+    reused_count = sum(row['reused'] for row in results)
+    return {'analysed_count': len(results), 'calculated_count': len(results) - reused_count,
+            'reused_count': reused_count, 'results': results, 'errors': errors}
 
 # ── AI Checker Model (Claude Sonnet) ──────────────────────────────────────────
 
@@ -897,7 +1311,7 @@ def check_case(d):
         passages = [e for s in sources for e in s.get('evidence', [])][:4]
 
     tax_summary = [{'node_id': n['node_id'], 'name': n.get('name'), 'definition': n.get('definition', '')}
-                   for n in theme.get('nodes', [])]
+                   for n in engine.flatten_taxonomy(theme.get('nodes', []))]
 
     audit_payload = {
         'company': {'name': company.get('name'), 'ticker': company.get('bloomberg_ticker'), 'sedol': company.get('sedol')},
@@ -1379,6 +1793,7 @@ def stock_sources(d):
 
 def state():
     import source_discovery
+    import gemini_budget
     import sys
     source_discovery.recover_stale_runs(sys.modules[__name__])
     key = os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()
@@ -1395,10 +1810,19 @@ def state():
         mark_source_updates_seen()
     refresh_worker_sources()
     source_summaries = source_cache.get_source_summaries()
+    workspace = {k: all_records(k) for k in
+                 ('themes', 'companies', 'cases', 'reviews', 'runs', 'snapshots', 'portfolio_imports')}
+    workspace['themes'] = [{**theme, 'analysis_scope_key': analysis_library.scope_key(theme)}
+                           for theme in workspace['themes']]
+    company_analysis_library = analysis_library.current_results(
+        workspace['cases'], workspace['themes'], source_link_records())
+    reusable_case_ids = {case['id'] for case in company_analysis_library}
+    workspace['cases'] = [{**case, 'analysis_reusable': case['id'] in reusable_case_ids}
+                          for case in workspace['cases']]
+    budget = gemini_budget.status()
     return {
-        **{k: all_records(k) for k in
-           ('themes', 'companies', 'cases', 'reviews', 'runs', 'snapshots',
-            'portfolio_imports')},
+        **workspace,
+        'company_analysis_library': company_analysis_library,
         'search_runs': search_runs,
         'sources': [],
         'source_summaries': source_summaries,
@@ -1407,9 +1831,13 @@ def state():
         'checker_configured': bool(checker_key),
         'checker_model': checker_model if checker_key else '',
         'financials_ai_configured': bool(os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()),
-        'call_cap': None,
+        'call_cap': budget['call_cap'],
         'calls_used': len(all_records('model_calls')),
+        'calls_used_24h': budget['calls_used_24h'],
+        'calls_remaining_24h': budget['calls_remaining_24h'],
+        'unresolved_search_batch_limit': unresolved_search_batch_limit(),
         'max_tiers': engine.MAX_TIERS,
+        'calculation_version': engine.VERSION,
         'max_children': engine.MAX_CHILDREN
     }
 
@@ -1439,6 +1867,7 @@ def _dispatch(path, d):
     if path == '/api/source/update': return source_update(d)
     if path == '/api/source/delete': return source_delete(d)
     if path == '/api/financials/populate': return populate_company_financials(d)
+    if path == '/api/financials/cancel': return cancel_company_financials(d)
     raise ValueError('Unknown API endpoint')
 
 def dispatch(path, d):

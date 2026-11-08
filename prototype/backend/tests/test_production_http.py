@@ -9,10 +9,14 @@ from unittest.mock import patch
 
 import app
 from test_fixtures import MemoryStore, demo
+from test_source_cache import FakeRedis
 
 
 class ProductionHttpTest(unittest.TestCase):
     def setUp(self):
+        source_cache_patch = patch.object(app.source_cache, '_connection', return_value=FakeRedis())
+        source_cache_patch.start()
+        self.addCleanup(source_cache_patch.stop)
         self.store_patch = patch.object(app, 'store', MemoryStore())
         self.store_patch.start()
         self.addCleanup(self.store_patch.stop)

@@ -8,12 +8,14 @@ import socket
 import time
 import threading
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 from html.parser import HTMLParser
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import CancelledError, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urldefrag, parse_qs, unquote
 from urllib.request import Request, build_opener, HTTPRedirectHandler, urlopen
 import gemini_fallback
+import engine
 
 TYPES = ('annual_report', 'regulatory_filing', 'earnings_call',
          'investor_presentation', 'sustainability_report', 'company_website', 'other')
@@ -896,8 +898,9 @@ def start(app, data):
     portfolio = app.get('portfolio_imports', data['portfolio_id'])
     theme_id = portfolio.get('theme_id')
     theme = app.find('themes', theme_id) if theme_id else None
+    theme_nodes = engine.flatten_taxonomy((theme or {}).get('nodes', [])) if theme else []
     theme_terms = list(dict.fromkeys(term.strip()[:80] for term in
-        [(theme or {}).get('theme_name'), *(node.get('name') for node in ((theme or {}).get('nodes') or []))]
+        [(theme or {}).get('theme_name'), *(node.get('name') for node in theme_nodes)]
         if isinstance(term, str) and len(term.strip()) >= 3))
     if 'other' in types and not theme_terms:
         raise ValueError('Select a portfolio with a named theme to search for Other sources')
@@ -943,13 +946,14 @@ def start(app, data):
 
 
 def cancel(app, data):
-    """Cancel a durable source search. In-flight network work finishes safely but cannot revive it."""
+    """Cancel durably without waiting for an optional remote-state mirror."""
     run_id = data.get('id')
     if not run_id:
         raise ValueError('Search run ID is required')
     import source_jobs
     run = source_jobs.Queue().cancel(run_id)
-    app.put('search_runs', run)
+    # state() merges this persistent queue over the remote mirror. Returning
+    # must not depend on Supabase responding while the supervisor stops work.
     source_jobs.ensure_worker()
     return run
 
@@ -1011,6 +1015,27 @@ def worker(app, run, companies):
     run['storage_mode'] = 'url_only'
     stop = threading.Event()
 
+    def cancelled():
+        checker = getattr(app, 'is_cancelled', None)
+        return run.get('status') == 'cancelled' or bool(checker and checker(run['id']))
+
+    def ensure_active():
+        if cancelled():
+            stop.set()
+            run['status'] = 'cancelled'
+            raise CancelledError()
+
+    @contextmanager
+    def worker_pool(max_workers):
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            yield pool
+        finally:
+            stopped = cancelled()
+            if stopped:
+                stop.set()
+            pool.shutdown(wait=not stopped, cancel_futures=stopped)
+
     def seconds_remaining():
         return max(0, run['deadline_unix'] - time.time())
 
@@ -1024,6 +1049,7 @@ def worker(app, run, companies):
         run['time_limit_reached_at'] = app.now()
 
     def checkpoint():
+        ensure_active()
         run['results_count'] = len(run['results'])
         run['companies_completed'] = sorted(completed_companies)
         run['missing'] = coverage_gaps(run, companies, sources)
@@ -1032,8 +1058,10 @@ def worker(app, run, companies):
     def flush():
         nonlocal last_save
         while pending:
+            ensure_active()
             batch = pending[:SAVE_BATCH_SIZE]
             app.put_many('sources', batch)
+            ensure_active()
             # Stable IDs make replay after a crash safe, including a lost response.
             known = {r.get('source_id') for r in run['results']}
             for source in batch:
@@ -1049,7 +1077,7 @@ def worker(app, run, companies):
         last_save = time.monotonic()
 
     def search(company, types, search_period, broad, known_urls, sites_by_type, timeout, general=False):
-        if stop.is_set() or time_limit_reached():
+        if stop.is_set() or cancelled() or time_limit_reached():
             return []
         try:
             timeout = max(1, min(timeout, int(seconds_remaining())))
@@ -1066,13 +1094,17 @@ def worker(app, run, companies):
             raise
 
     def verify(company, row, timeout):
+        if cancelled():
+            raise CancelledError()
         if stop.is_set() or time_limit_reached():
             raise TimeoutError('Source-search time limit reached')
         timeout = max(1, min(timeout, int(seconds_remaining())))
         return save_document(app, run, company, row, timeout)
 
     try:
+        ensure_active()
         sources = source_link_records(app)
+        ensure_active()
         pending.extend(app.pending_sources())
         flush()  # Replay uploaded metadata that had not been committed before restart.
         seen = {source_identity(s) for s in sources if s.get('url') and s.get('link_status') == 'verified'}
@@ -1107,9 +1139,9 @@ def worker(app, run, companies):
             phases.extend((year, phase) for phase in ('theme_evidence', 'general_company_evidence')
                           for year in years_to_search)
 
-        with ThreadPoolExecutor(max_workers=COMPANY_WORKERS) as searches, \
-                ThreadPoolExecutor(max_workers=LINK_WORKERS) as downloads:
+        with worker_pool(COMPANY_WORKERS) as searches, worker_pool(LINK_WORKERS) as downloads:
             for current_year, phase in phases:
+                ensure_active()
                 thematic = phase != 'filings'
                 general = phase == 'general_company_evidence'
                 if timed_out or time_limit_reached():
@@ -1130,6 +1162,7 @@ def worker(app, run, companies):
                 # A completed year is not searched again after worker recovery.
                 passes = () if not thematic and current_year in preferred_periods else (False,)
                 for broad in passes:
+                    ensure_active()
                     if time_limit_reached():
                         timed_out = True
                         break
@@ -1144,9 +1177,11 @@ def worker(app, run, companies):
                     quota_blocked = False
 
                     def collect(future):
+                        ensure_active()
                         company, row, identity = documents.pop(future)
                         try:
                             record = future.result()
+                            ensure_active()
                             score = record.get('ai_confidence')
                             if type(score) in (int, float) and 0 <= score <= 70:
                                 fallback_candidates.append(record)
@@ -1169,6 +1204,7 @@ def worker(app, run, companies):
                         gaps_by_company.setdefault(g['company_id'], []).append(g['source_type'])
 
                     for company in companies:
+                        ensure_active()
                         if time_limit_reached():
                             timed_out = True
                             break
@@ -1185,12 +1221,15 @@ def worker(app, run, companies):
                                               known_urls, sites_by_type, timeout, general)] = (company, types)
 
                     while tasks or documents:
+                        ensure_active()
                         remaining = seconds_remaining()
                         if remaining <= 0:
                             timed_out = True
                             break
                         done, _ = wait([*tasks, *documents], timeout=min(1, remaining), return_when=FIRST_COMPLETED)
+                        ensure_active()
                         for future in done:
+                            ensure_active()
                             if future in documents:
                                 collect(future)
                                 continue
@@ -1234,6 +1273,7 @@ def worker(app, run, companies):
                                     fatal = ProviderError('Source provider failed three consecutive attempts for a company. Please try again later.')
                                     stop.set()
                             for row in rows:
+                                ensure_active()
                                 try:
                                     if row.get('source_type') not in types: continue
                                     app.parse_date(row['publication_date'])
@@ -1277,10 +1317,17 @@ def worker(app, run, companies):
                 run['status'] = 'incomplete'
                 run['completion_reason'] = ('collection_incomplete' if run.get('collection_incomplete')
                                             else 'coverage_window_exhausted')
+    except CancelledError:
+        stop.set()
+        run['status'] = 'cancelled'
     except Exception as error:
         run['status'] = 'failed'
         run['errors'].append({'reason': str(error) if isinstance(error, ProviderError) else type(error).__name__})
     finally:
+        if cancelled():
+            stop.set()
+            run['status'] = 'cancelled'
+            return
         if run['status'] in ('completed', 'incomplete'):
             selected = select_fallback_sources(run, companies, sources, fallback_candidates)
             if selected:
@@ -1289,6 +1336,7 @@ def worker(app, run, companies):
                     # Keep the queue resumable until every selected batch is durable.
                     run['status'] = 'running'
                     for record in selected:
+                        ensure_active()
                         app.stage_source(record)
                         pending.append(record)
                     flush()
@@ -1296,11 +1344,18 @@ def worker(app, run, companies):
                     if not coverage_gaps(run, companies, sources) and run.get('completion_reason') != 'time_limit_reached':
                         run['status'] = 'completed'
                         run.pop('completion_reason', None)
+                except CancelledError:
+                    stop.set()
+                    run['status'] = 'cancelled'
                 except Exception as error:
                     run['status'] = 'failed'
                     run['errors'].append({'reason': f'Could not save fallback sources: {type(error).__name__}'})
         run['finished_at'] = app.now()
-        checkpoint()
+        if cancelled():
+            stop.set()
+            run['status'] = 'cancelled'
+        else:
+            checkpoint()
 
 
 def coverage_gaps(run, companies, sources, target_period=None):

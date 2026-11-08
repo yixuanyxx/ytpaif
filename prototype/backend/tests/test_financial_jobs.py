@@ -93,6 +93,44 @@ class FinancialJobsTest(unittest.TestCase):
         self.assertEqual(self.queue.enqueue(other, self.companies)['id'], self.run['id'])
         self.assertEqual(len(self.queue.records()), 1)
 
+    def test_cancel_marks_financial_lookup_terminal(self):
+        self.app.put = lambda *args: self.fail('Remote store must not delay the durable cancel response')
+        with patch.object(financial_jobs.source_jobs, 'Queue', return_value=self.queue), \
+                patch.object(financial_jobs.source_jobs, 'ensure_worker'):
+            result = financial_jobs.cancel(self.app, {'id': self.run['id']})
+        saved, _ = self.queue.job(self.run['id'])
+        self.assertEqual(result['financial_run']['status'], 'cancelled')
+        self.assertEqual(saved['status'], 'cancelled')
+        self.assertEqual(saved['cancel_reason'], 'Financial lookup cancelled by user.')
+
+    def test_worker_stops_when_lookup_is_cancelled(self):
+        calls = []
+        self.app.is_cancelled = lambda run_id: len(calls) >= 1
+
+        def results(companies, sources, should_cancel=None):
+            calls.append('started')
+            yield 'a', self.fact
+            self.fail('No further company should be processed after cancellation')
+
+        with patch.object(financial_jobs.financial_research, 'iter_results', side_effect=results):
+            financial_jobs.worker(self.app, self.run, self.companies)
+        self.assertEqual(self.queue.job(self.run['id'])[0]['status'], 'running')
+
+    def test_cancel_during_result_checkpoint_does_not_write_company_financials(self):
+        original_put = self.app.put
+        self.app.is_cancelled = lambda run_id: self.queue.job(run_id)[0]['status'] == 'cancelled'
+
+        def cancel_at_checkpoint(kind, record):
+            original_put(kind, record)
+            if kind == 'search_runs' and record.get('results'):
+                self.queue.cancel(self.run['id'])
+
+        self.app.put = cancel_at_checkpoint
+        with patch.object(financial_jobs.financial_research, 'iter_results', return_value=iter([('a', self.fact)])):
+            financial_jobs.worker(self.app, self.run, self.companies)
+        self.assertNotIn('net_revenue', self.store.get('companies', 'a'))
+        self.assertEqual(self.queue.job(self.run['id'])[0]['status'], 'cancelled')
+
     def test_execute_dispatches_financial_job_to_financial_worker(self):
         def complete(app, run, companies):
             self.queue.save({**run, 'status': 'completed'})
@@ -130,7 +168,7 @@ app.store=MemoryStore()
 app.store.put('companies', {'id':'a','name':'Company A'})
 app.store.put('companies', {'id':'b','name':'Company B'})
 app.source_link_records=lambda: []
-financial_research.iter_results=lambda companies,sources: iter((company['id'],{'market_cap':None,'net_revenue':None}) for company in companies)
+financial_research.iter_results=lambda companies,sources,should_cancel=None: iter((company['id'],{'market_cap':None,'net_revenue':None}) for company in companies)
 source_notifications.send=lambda channel,run: 'submitted'
 source_jobs.database_path=lambda: __import__('pathlib').Path(sys.argv[1])
 source_jobs.execute('financial-test')

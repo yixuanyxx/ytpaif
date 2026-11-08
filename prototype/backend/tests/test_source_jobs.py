@@ -1,10 +1,12 @@
 """Queue recovery tests use real processes and temporary databases, no providers."""
 from pathlib import Path
+from contextlib import contextmanager
 import json
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -127,6 +129,101 @@ q.save(r)
         self.assertEqual(cancelled['cancel_reason'], 'Search cancelled by user.')
         self.assertIsNone(self.queue.next_job())
         self.assertEqual(self.queue.cancel('test-job')['status'], 'cancelled')
+
+    def test_cancel_retains_journal_but_rejects_new_staged_source_results(self):
+        self.queue.enqueue(self.run, [])
+        original = {'id': 'saved-before-cancel', 'company_id': 'a'}
+        self.assertTrue(self.queue.stage_source('test-job', original))
+        self.queue.cancel('test-job')
+        self.assertFalse(self.queue.stage_source('test-job', {'id': 'late-result', 'company_id': 'a'}))
+        self.queue.acknowledge_sources('test-job', [original])
+        self.assertEqual(self.queue.pending_sources('test-job'), [original])
+
+    def test_cancel_serializes_its_read_and_transition_against_worker_completion(self):
+        self.queue.enqueue(self.run, [])
+        worker_queue = source_jobs.Queue(self.path)
+        original_connect = self.queue.connect
+        completing = threading.Event()
+
+        def complete():
+            completing.set()
+            worker_queue.save({**self.run, 'status': 'completed'})
+
+        writer = threading.Thread(target=complete)
+
+        class PauseAfterRead:
+            def __init__(self, db):
+                self.db = db
+
+            def execute(self, sql, *args):
+                cursor = self.db.execute(sql, *args)
+                if sql == 'SELECT payload FROM jobs WHERE id=?':
+                    # Give a real second connection a deterministic chance to
+                    # finish after cancel reads the old payload. Its write must
+                    # stay blocked until cancellation commits.
+                    row = cursor.fetchone()
+                    writer.start()
+                    completing.wait(1)
+                    writer.join(timeout=.1)
+                    return SimpleNamespace(fetchone=lambda: row)
+                return cursor
+
+        @contextmanager
+        def paused_connect():
+            with original_connect() as db:
+                yield PauseAfterRead(db)
+
+        with patch.object(self.queue, 'connect', paused_connect):
+            cancelled = self.queue.cancel('test-job')
+        writer.join(timeout=3)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(cancelled['status'], 'cancelled')
+        self.assertEqual(self.queue.job('test-job')[0]['status'], cancelled['status'])
+
+    def test_cancel_terminates_owned_worker_and_unblocks_next_job(self):
+        for mode in ('financials', 'short', 'long'):
+            with self.subTest(mode=mode):
+                self.assert_cancel_terminates_owned_worker(mode)
+
+    def assert_cancel_terminates_owned_worker(self, mode):
+        queue = source_jobs.Queue(Path(self.temp.name) / f'{mode}.sqlite3')
+        run = {**self.run, **({'job_type': 'financials', 'portfolio_id': 'p'} if mode == 'financials'
+                             else {'search_mode': mode})}
+        queue.enqueue(run, [])
+        queue.enqueue({**self.run, 'id': 'next-job'}, [])
+        child = '''import sys,time
+from source_jobs import Queue
+q=Queue(sys.argv[1])
+job_id,r,_=q.next_job()
+r['started']=True
+q.save(r)
+if job_id=='test-job':
+    time.sleep(15)
+    raise AssertionError('Cancelled job continued working')
+r['status']='completed'
+q.save(r)
+'''
+        cancelled = threading.Event()
+
+        def cancel_started_job():
+            until = time.monotonic() + 5
+            while time.monotonic() < until:
+                if queue.job('test-job')[0].get('started'):
+                    queue.cancel('test-job')
+                    cancelled.set()
+                    return
+                time.sleep(.01)
+
+        canceller = threading.Thread(target=cancel_started_job)
+        canceller.start()
+        started = time.monotonic()
+        with patch('source_notifications.send', return_value='submitted'):
+            source_jobs.supervise(queue, [sys.executable, '-c', child, str(queue.path)], idle_seconds=.1)
+        canceller.join(timeout=5)
+        self.assertTrue(cancelled.is_set())
+        self.assertLess(time.monotonic() - started, 5, 'A cancelled worker must not wait for its HTTP timeout')
+        self.assertEqual(queue.job('test-job')[0]['status'], 'cancelled')
+        self.assertEqual(queue.job('next-job')[0]['status'], 'completed')
 
     def test_only_one_supervisor_can_own_queue(self):
         with source_jobs.process_lock(str(self.path)+'.worker.lock') as acquired:

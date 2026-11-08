@@ -2,6 +2,8 @@ import io
 import json
 import copy
 import threading
+import tempfile
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -31,6 +33,12 @@ def saved_document(app, run, company, row, timeout=20):
 
 class DiscoveryTest(unittest.TestCase):
     def setUp(self):
+        budget_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(budget_dir.cleanup)
+        budget_env = patch.dict(discovery.os.environ, {
+            'GEMINI_BUDGET_DB': str(Path(budget_dir.name) / 'gemini-budget.sqlite')})
+        budget_env.start()
+        self.addCleanup(budget_env.stop)
         blocked = patch.dict(discovery.gemini_fallback._blocked, {}, clear=True)
         blocked.start()
         self.addCleanup(blocked.stop)
@@ -414,6 +422,73 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(run['status'], 'incomplete')
         self.assertEqual(run['completion_reason'], 'time_limit_reached')
         self.assertEqual(len(sources), 1)
+
+    def test_cancel_returns_durable_status_without_waiting_for_remote_storage(self):
+        import source_jobs
+        with tempfile.TemporaryDirectory() as directory:
+            queue = source_jobs.Queue(Path(directory) / 'jobs.sqlite3')
+            queue.enqueue({'id': 'job', 'status': 'running', 'search_mode': 'short'}, [])
+            app = SimpleNamespace(put=lambda *args: self.fail('Cancellation must not wait for a remote store'))
+            with patch.object(source_jobs, 'Queue', return_value=queue), patch.object(source_jobs, 'ensure_worker'):
+                cancelled = discovery.cancel(app, {'id': 'job'})
+            self.assertEqual(cancelled['status'], 'cancelled')
+            self.assertEqual(queue.job('job')[0]['status'], 'cancelled')
+
+    def test_short_and_long_workers_stop_while_network_is_blocked(self):
+        for mode in ('short', 'long'):
+            with self.subTest(mode=mode):
+                cancelled, entered, release = threading.Event(), threading.Event(), threading.Event()
+                run = {'id': 'job', 'search_mode': mode, 'source_types': ['annual_report'],
+                       'period': '2026', 'cutoff': '2026-11-02', 'results': [], 'errors': [], 'status': 'running'}
+                sources, snapshots, calls = [], [], []
+                app = worker_app(sources, snapshots)
+                app.is_cancelled = lambda job_id: cancelled.is_set()
+
+                def blocked_search(*args, **kwargs):
+                    calls.append(args[0]['id'])
+                    entered.set()
+                    release.wait(5)
+                    return []
+
+                with patch.object(discovery, 'grounded_search', side_effect=blocked_search):
+                    runner = threading.Thread(target=discovery.worker, args=(app, run, [{'id': 'a', 'name': 'A'}]))
+                    runner.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        cancelled.set()
+                        runner.join(timeout=2)
+                        self.assertFalse(runner.is_alive(), 'Cancel must not wait for the network timeout')
+                        self.assertEqual(run['status'], 'cancelled')
+                        self.assertEqual(calls, ['a'])
+                        self.assertEqual(sources, [])
+                        self.assertEqual(app.pending_sources(), [])
+                        self.assertFalse(any(record['status'] in ('completed', 'incomplete', 'failed') for record in snapshots))
+                    finally:
+                        release.set()
+                        runner.join(timeout=3)
+
+    def test_cancel_after_verification_does_not_stage_or_save_late_document(self):
+        cancelled = threading.Event()
+        run = {'id': 'job', 'search_mode': 'short', 'source_types': ['annual_report'], 'period': '2026',
+               'cutoff': '2026-11-02', 'results': [], 'errors': [], 'status': 'running'}
+        sources = [{'id': 'existing', 'company_id': 'a', 'source_type': 'annual_report',
+                    'url': 'https://example.com/existing', 'publication_date': '2026-01-01',
+                    'period': '2026', 'link_status': 'verified'}]
+        app = worker_app(sources, [])
+        app.is_cancelled = lambda job_id: cancelled.is_set()
+        row = {'url': 'https://example.com/late', 'source_type': 'annual_report',
+               'publication_date': '2026-01-01', 'period': '2026'}
+
+        def verify(*args, **kwargs):
+            cancelled.set()
+            return saved_document(*args, **kwargs)
+
+        with patch.object(discovery, 'grounded_search', return_value=[row]), \
+                patch.object(discovery, 'save_document', side_effect=verify):
+            discovery.worker(app, run, [{'id': 'a', 'name': 'A'}])
+        self.assertEqual(run['status'], 'cancelled')
+        self.assertEqual([record['id'] for record in sources], ['existing'])
+        self.assertEqual(app.pending_sources(), [])
 
     def test_subsequent_search_skips_a_company_type_already_covered_by_two_verified_links(self):
         run = {'id': 'job', 'source_types': ['annual_report'], 'period': None, 'cutoff': '2026-11-02',

@@ -503,7 +503,9 @@ tr:hover td { background: var(--slate-50); }
 .status-dot-sm {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
 }
+.confidence-light-dot { width: 10px; height: 10px; }
 .dot-green  { background: var(--teal-500); }
+.dot-yellow { background: #eab308; }
 .dot-amber  { background: #f5a623; }
 .dot-red    { background: var(--red-600); }
 .dot-grey   { background: var(--slate-300); }
@@ -786,6 +788,9 @@ tr:hover td { background: var(--slate-50); }
   border-radius: 50%;
   animation: spin .9s linear infinite;
 }
+#btn-cancel-financials[hidden],
+#btn-cancel-source-search[hidden],
+#financial-lookup-spinner[hidden] { display: none; }
 
 /* ===== DOCUMENT VIEWER MODAL ===== */
 #doc-modal-overlay {

@@ -72,18 +72,18 @@ Use `docs/Example 80 Stock Portfolio.xlsx` as the working portfolio. Demo loadin
 
 ```sh
 cp .env.example .env
-# Set LLM_API_KEY in .env (endpoint, model, and call budget have built-in defaults).
+# Set FINANCIALS_LLM_API_KEY and TAVILY_API_KEY in .env.
 python app.py
 ```
 
-The adapter defaults to Google AI Studio Gemini (`gemini-3.5-flash-lite`) with a 100-call budget, and supports configurable overrides via `LLM_ENDPOINT`, `LLM_MODEL`, and `LLM_MAX_CALLS`. Manual analysis remains available without AI configuration.
+Exposure extraction and classification default to Gemini (`gemini-3.8-flash`). `GEMINI_DAILY_CALL_CAP` defaults to 60 actual HTTP attempts in a rolling 24 hours, including model fallbacks. The counter uses `prototype/backend/data/gemini-budget.sqlite3` by default; put `GEMINI_BUDGET_DB` on persistent shared storage for a multi-process installation. The budget counts requests from the time this version starts recording; check Google AI Studio for the project's actual quota. A cached model response uses no provider request.
 
 ## Workflow additions
 
 - Step 1 offers a standalone SVG mind-map export. The Excel holdings template is available in Step 2.
 - Step 2 provides a portfolio-only Excel template with the expected headers on its first worksheet, ready to fill and import.
 - Step 3 groups sources by company in a table. Expand a company to see all six source categories, edit document names/URLs/categories, and view source-derived market cap and revenue with document/page citations. Extraction recognises explicit currency-qualified market-cap and total/consolidated/group revenue statements; ambiguous tables and missing figures remain unresolved. Weight is aggregated by company from the latest saved portfolio snapshot. Exposure arithmetic still uses reviewed revenue evidence.
-- Step 4 combines Analysis and Review tabs. Analyze all processes companies with eligible sources sequentially under the configured AI call cap. Companies with over 60,000 evidence characters require manual passage selection; failures are reported per company.
+- Step 4 provides batch and individual company exposure calculation. Each completed company's exposure and AI confidence are saved in the shared company/theme analysis library in Supabase (`analysis_cases`). Other portfolios holding the same company under the same theme automatically show the saved result without another AI call. If the result is unresolved, a bounded Tavily web search uses the company name, ticker, reporting year and nested taxonomy leaf terms to look for approved, dated revenue evidence. It runs at most two queries, checks up to four candidate documents, and reuses recent search results for 24 hours. This fallback's search and document reading use no Gemini grounding; only a new, source-backed exact numeric finding may trigger one more exposure analysis. Approximate language is retained as evidence without fabricating a point estimate. Analyse All searches at most three unresolved companies per run by default (`UNRESOLVED_SEARCH_BATCH_LIMIT`). The separate Source Documents AI search still uses its existing Gemini-grounded path. Changed theme scope, reporting period, source documents or calculation version requires recalculation. Approval is still required before results feed portfolio aggregates.
 - Dashboard sub-theme buttons show classified companies in the current holdings universe using approved cases for the selected theme. The reference button opens benchmark constituents and uses the saved benchmark name where available.
 
 ## Supabase setup
@@ -92,7 +92,7 @@ The adapter defaults to Google AI Studio Gemini (`gemini-3.5-flash-lite`) with a
 2. Ensure the existing `themes`, `portfolios`, and `source_documents` tables and private `source-documents` / `portfolio-files` buckets are configured.
 3. If a database error reports `42P01` for `public.audit_events`, remove any remaining public-schema trigger that references the obsolete audit table. This does not remove analyst reviews or the AI Checker feature.
 
-The app uses Supabase for runtime persistence and does not require a local SQLite database. Request/model audit-event logging has been removed. New portfolio imports keep their original Excel file in the private `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in `portfolios`.
+The app uses Supabase for company, source and analysis records. Local SQLite files hold the source-job queue and Gemini safety budget; keep them on persistent storage when running on a server. New portfolio imports keep their original Excel file in the private `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in `portfolios`.
 
 ## Tests
 

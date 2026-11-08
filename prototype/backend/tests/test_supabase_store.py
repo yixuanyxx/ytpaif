@@ -3,12 +3,18 @@ import json
 import os
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import supabase_store
 
 
 class SupabasePersistenceTest(unittest.TestCase):
+    def test_company_records_filters_the_library_on_the_server(self):
+        with patch.object(supabase_store, 'request', return_value=[{'payload': {'id': 'source'}}]) as send:
+            rows = supabase_store.SupabaseStore().company_records('sources', 'company_abc')
+        self.assertEqual(rows, [{'id': 'source'}])
+        self.assertEqual(send.call_args.kwargs['query']['company_id'], 'eq.company_abc')
+
     def test_bulk_source_upsert_uses_one_request_and_same_mapping(self):
         store = supabase_store.SupabaseStore()
         records = [{'id': str(i), 'company_id': 'a', 'source_type': 'annual_report',
@@ -55,6 +61,20 @@ class SupabasePersistenceTest(unittest.TestCase):
         self.assertNotIn('name', row)
         self.assertEqual(row['payload'], record)
         self.assertEqual(request.call_args.args[0], '/rest/v1/analysis_runs')
+
+    def test_shared_analysis_values_survive_supabase_payload_roundtrip(self):
+        record = {'id': 'case-shared', 'company_id': 'company', 'theme_id': 'theme',
+                  'exposure_percent': 50, 'confidence_percent': 87, 'classification_confidence': 'high',
+                  'confidence_basis': 'Cited segment revenue', 'analysis_scope_key': 'scope',
+                  'estimate': {'point': .5}, 'case': {'period': 'FY2025'}}
+        with patch.object(supabase_store, 'request', return_value=[]) as request:
+            supabase_store.SupabaseStore().put('cases', record)
+        saved = request.call_args.kwargs['payload']
+        self.assertEqual(saved['payload']['exposure_percent'], 50)
+        self.assertEqual(saved['payload']['confidence_percent'], 87)
+        with patch.object(supabase_store, 'request', return_value=[saved]):
+            restored = supabase_store.SupabaseStore().all_records('cases')[0]
+        self.assertEqual(restored, record)
 
     def test_unnamed_tables_never_receive_a_name_column(self):
         store = supabase_store.SupabaseStore()
@@ -174,6 +194,28 @@ class SupabasePersistenceTest(unittest.TestCase):
                 r'GET /rest/v1/themes \(HTTP 503\)',
             ):
                 supabase_store.request('/rest/v1/themes')
+
+    def test_transient_get_connection_error_is_retried(self):
+        with patch.object(supabase_store, 'urlopen', side_effect=[
+                URLError(TimeoutError('temporary')), io.BytesIO(b'[]')]) as send, \
+                patch.object(supabase_store.time, 'sleep') as pause:
+            self.assertEqual(supabase_store.request('/rest/v1/themes'), [])
+        self.assertEqual(send.call_count, 2)
+        pause.assert_called_once_with(0.25)
+
+    def test_persistent_get_error_names_table_but_write_is_not_retried(self):
+        with patch.object(supabase_store, 'urlopen', side_effect=URLError(TimeoutError('temporary'))) as send, \
+                patch.object(supabase_store.time, 'sleep') as pause:
+            with self.assertRaisesRegex(supabase_store.SupabaseError,
+                                        r'GET /rest/v1/themes \(URLError: TimeoutError\)'):
+                supabase_store.request('/rest/v1/themes')
+        self.assertEqual(send.call_count, 3)
+        self.assertEqual(pause.call_count, 2)
+        with patch.object(supabase_store, 'urlopen', side_effect=URLError('temporary')) as send:
+            with self.assertRaisesRegex(supabase_store.SupabaseError,
+                                        r'POST /rest/v1/themes \(URLError: str\)'):
+                supabase_store.request('/rest/v1/themes', method='POST', payload={})
+        send.assert_called_once()
 
     def test_missing_audit_table_from_trigger_points_to_cleanup_migration(self):
         body = io.BytesIO(json.dumps({
