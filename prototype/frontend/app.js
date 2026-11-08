@@ -3619,8 +3619,8 @@ async function viewAnalysis() {
     else if (caseRec?.review_status === 'rejected')     { status = 'Rejected';         color = 'red'; }
     else if (hasSrc)                                    { status = 'Ready to analyse'; color = 'neutral'; }
     else                                                { status = 'No sources';       color = 'red'; }
-    const rawAnalysisState = analysisCompanyProgress(
-      latestAnalysisRunForCompany(theme?.id, portfolio?.id, c.id), c.id);
+    const latestCompanyRun = latestAnalysisRunForCompany(theme?.id, portfolio?.id, c.id);
+    const rawAnalysisState = analysisCompanyProgress(latestCompanyRun, c.id);
     // Once a successful case has reached the workspace, its review state is
     // the useful per-company status. Keep terminal failures visible instead.
     const analysisState = caseRec && !rawAnalysisState?.error ? null : rawAnalysisState;
@@ -3629,7 +3629,9 @@ async function viewAnalysis() {
     // A failed or deferred calculation is ready again when source evidence is
     // present, even if an older case is still visible for that company.
     const readyForBulk = hasSrc && (retryable || (status === 'Ready to analyse' && !rawAnalysisState));
-    return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState, retryable, readyForBulk };
+    const companyAnalysisInProgress = rawAnalysisState?.active === true;
+    return { c, hasSrc, status, color, caseRec, sourceCount, analysisState, rawAnalysisState,
+      retryable, readyForBulk, companyAnalysisInProgress };
   });
 
   // Send new and retryable source-ready companies. An active job is never
@@ -3713,7 +3715,8 @@ async function viewAnalysis() {
                 </tr>
               </thead>
               <tbody id="analysis-queue-rows">
-                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState, readyForBulk }) => {
+                ${companyProgress.map(({ c, hasSrc, status, color, caseRec, sourceCount, analysisState,
+                  readyForBulk, companyAnalysisInProgress }) => {
                   // A case's single point estimate is the exposure shown in
                   // this queue. `exposure_percent` preserves the same result
                   // for older saved cases that do not include nested estimate.
@@ -3745,7 +3748,7 @@ async function viewAnalysis() {
                       <td style="text-align:right" onclick="event.stopPropagation()">
                         ${hasSrc ? `
                           <button class="btn btn-sm ${caseRec ? 'btn-secondary' : 'btn-primary'}"
-                            onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme || analysisInProgress ? 'disabled' : ''}>
+                            onclick="rerunCompanyAnalysis('${esc(c.id)}', this)" ${!state.ai_configured || !theme || companyAnalysisInProgress ? 'disabled' : ''}>
                             ${analysisState?.active ? analysisState.label : (analysisState?.error ? '↻ Retry' : (caseRec ? '↻ Re-run' : '✧ Analyse'))}
                           </button>
                         ` : `
@@ -3825,8 +3828,9 @@ window.rerunCompanyAnalysis = async function(companyId, button) {
   if (!state.ai_configured) {
     return notice('Configure the AI provider before running exposure analysis.', 'error');
   }
-  if (isActiveAnalysisRun(latestAnalysisRunForScope(themeId, portfolioId))) {
-    return notice('An exposure analysis is already running for this theme and portfolio.', 'info');
+  const companyRun = latestAnalysisRunForCompany(themeId, portfolioId, companyId);
+  if (analysisCompanyProgress(companyRun, companyId)?.active) {
+    return notice(`${companyName} is already being analysed.`, 'info');
   }
   const originalLabel = button?.textContent;
   if (button) {

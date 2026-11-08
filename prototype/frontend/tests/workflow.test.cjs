@@ -1032,6 +1032,43 @@ test('Bulk analysis includes source-ready failures and deferred companies for re
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['a','b','d'],force_recalculate:true});
   assert.match(node('#page-actions').innerHTML,/id="btn-analyze-all" disabled/);
 });
+test('Active batch locks only its companies and lets an unrelated failed stock retry',async()=>{
+  const {run,node,context}=setup();
+  context.setTimeout=()=>1;
+  run(`state.companies=[{id:'a',name:'Active stock'},{id:'b',name:'Retry stock'}];
+    state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
+    state.portfolio_imports=[{id:'core',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'}]}];
+    state.source_summaries=[{company_id:'a',count:2},{company_id:'b',count:2}];
+    state.cases=[{id:'old-b',theme_id:'theme-a',company_id:'b',review_status:'needs_review',estimate:{point:.1}}];
+    state.search_runs=[
+      {id:'failed-b',job_type:'analysis',status:'failed',theme_id:'theme-a',portfolio_id:'core',
+       company_ids:['b'],companies_completed:['b'],outcomes:{b:'failed'},
+       results:{b:{company_id:'b',status:'failed',error:'Provider quota reached'}}},
+      {id:'active-a',job_type:'analysis',status:'running',phase:'analysing',theme_id:'theme-a',portfolio_id:'core',
+       company_ids:['a'],companies_completed:[],outcomes:{},results:{}}
+    ];
+    state.ai_configured=true; selectedDashboardThemeId='theme-a';
+    selectedDashboardPortfolioId='core'; currentView='analysis';
+    let unrelatedRetryRequest; api=async(path,data)=>{
+      unrelatedRetryRequest={path,data};
+      return {analysis_run:{id:'retry-b',job_type:'analysis',status:'running',phase:'queued',
+        theme_id:'theme-a',portfolio_id:'core',company_ids:['b'],companies_completed:[]}};
+    };`);
+  await run('viewAnalysis()');
+  const html=node('#page-content').innerHTML;
+  const activeStart=html.indexOf('Active stock');
+  const activeRow=html.slice(activeStart,html.indexOf('</tr>',activeStart));
+  const retryStart=html.indexOf('Retry stock');
+  const retryRow=html.slice(retryStart,html.indexOf('</tr>',retryStart));
+  assert.match(node('#page-actions').innerHTML,/Analysing companies/);
+  assert.match(activeRow,/disabled[\s\S]*Analysing…/);
+  assert.match(retryRow,/↻ Retry/);
+  assert.doesNotMatch(retryRow,/onclick="rerunCompanyAnalysis\('b', this\)" disabled/);
+  await run("window.rerunCompanyAnalysis('b', {disabled:false,textContent:'↻ Retry'})");
+  assert.equal(run('unrelatedRetryRequest.path'),'analysis/start');
+  assert.deepEqual(JSON.parse(run('JSON.stringify(unrelatedRetryRequest.data)')),
+    {theme_id:'theme-a',portfolio_id:'core',company_ids:['b'],force_recalculate:true});
+});
 test('Analysis polling refreshes terminal results and keeps per-company failures visible',async()=>{
   const {run,node,context} = setup();
   let poll;
