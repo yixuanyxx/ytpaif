@@ -966,6 +966,8 @@ def _validate_classification_response(classified, facts, leaves, selected, passa
 
 
 def _validate_extracted_revenue(facts, nodes, selected):
+    if not facts.get('units'):
+        raise ValueError('Extraction requires at least one non-overlapping revenue segment; no exposure can be calculated from a denominator alone')
     provisional = {**facts, 'units': [{**unit, 'relationship_type': 'insufficient_evidence',
         'rationale': 'Classification pending', 'lower': 0, 'upper': 1, 'point': None,
         'method': 'insufficient_evidence', 'node_ids': [], 'allocations': {}}
@@ -1006,7 +1008,8 @@ def analyze(d):
             '"revenue":number,"period":"...","currency":"...","scale":"...","external":true,'
             '"evidence_ids":[],"overlap_group":null}],"unresolved_questions":[]}. '
             'Reuse revenue facts from the supplied saved source documents. Use the target reporting period if provided, otherwise the newest supported annual period. '
-            'Identify consolidated external total revenue and non-overlapping underlying revenue segments, including supported unrelated revenue for reconciliation. '
+            'Identify consolidated external total revenue and every disclosed non-overlapping underlying revenue segment, including supported unrelated revenue for reconciliation. '
+            'Do not return an empty units list when the documents disclose product, service, business, customer or geographic revenue segments. '
             'external=true means sales to customers outside the consolidated group, not foreign/export sales. '
             'Disaggregated consolidated net customer revenue is external revenue; exclude sales between group segments. '
             'Preserve one unit_id for each underlying revenue across repeated disclosures; attach all supporting evidence IDs. '
@@ -1075,21 +1078,15 @@ def analyze(d):
                     _validate_extracted_revenue(retried_facts, theme['nodes'], selected)
                     facts = retried_facts
                 except ValueError as retry_error:
-                    # Do not discard a supported denominator just because all
-                    # extraction responses are malformed. An empty set of units
-                    # yields a conservative 0% point (never an uncertainty
-                    # ceiling) and makes this case eligible for approved-source
-                    # follow-up search below.
-                    facts = {
-                        **rejected_facts,
-                        'units': [],
-                        'unresolved_questions': list(dict.fromkeys([
-                            *(rejected_facts.get('unresolved_questions') or []),
-                            'Revenue-unit extraction could not be reconciled from the supplied documents: '
-                            + str(retry_error),
-                        ])),
-                    }
-                    _validate_extracted_revenue(facts, theme['nodes'], selected)
+                    # A denominator without revenue segments cannot support a
+                    # thematic numerator.  Do not persist that as 0%: fail the
+                    # company cleanly so it remains retryable with better
+                    # documents/evidence.
+                    raise ValueError(
+                        'Revenue segments could not be reconciled from the supplied documents; '
+                        'no exposure was saved. Upload or select a filing with a revenue-segment breakdown before retrying. '
+                        + str(retry_error)
+                    ) from None
         run_rec['status'] = 'classifying'
         put('runs', run_rec)
         # A searchable node is any leaf, including a leaf that sits above the
@@ -1108,11 +1105,12 @@ def analyze(d):
             'Process the deepest leaves first, then leaves at higher tiers. At each tier consider all node details together to distinguish their meanings. '
             'Match using names, definitions, examples, keywords, synonyms and similar phrases in the supplied documents. '
             'Set whole_unit_supported=true ONLY if cited evidence establishes that the whole revenue unit qualifies for its matched leaves. '
-            'For a broad mixed revenue unit, estimate only the qualifying fraction: allocation shares are fractions of that extracted unit, not percentages of total company revenue. '
+            'For every direct thematic revenue unit, return the best evidence-grounded point allocation: allocation shares are fractions of that extracted unit, not percentages of total company revenue. '
+            'For a broad mixed revenue unit, estimate only the qualifying fraction; for a segment whose activity directly matches a taxonomy leaf, count the whole disclosed segment. '
             'Use disclosed for an explicit share, derived for arithmetic from cited figures, estimated only for a bounded and documented assumption grounded in cited evidence, and insufficient_evidence when no defensible share exists. '
             'Never set a mixed segment to 100% merely because its growth is AI-driven or it contains an AI product. '
             'When the qualifying share is split across multiple leaves, leaf_allocations gives the non-overlapping relative split of that qualifying share and must sum to at most 1. '
-            'Supply an exact revenue_attribution_quote from the cited passage supporting that attribution. A keyword hit or broad mixed segment is insufficient; keep whole_unit_supported=false for unsupported shares. '
+            'Supply an exact revenue_attribution_quote from the cited passage supporting that attribution. A taxonomy match uses names, definitions, examples, keywords, synonyms and similar phrases; a keyword hit alone does not justify counting an unrelated broad segment. '
             'Use insufficient_evidence for an unspecified Others segment; no supported classification is not proof of exclusion. '
             'Business scope_check must address the activity and theme exclusions, not merely state the company country. '
             'The deterministic calculation will count that underlying unit once when rolling up to a shared parent. Do not search or classify to non-leaf nodes. '

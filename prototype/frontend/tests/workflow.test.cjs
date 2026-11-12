@@ -1429,8 +1429,8 @@ test('Calculate Exposure never presents an upper bound as a comparable percentag
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,lower:0,upper:.5666},exposure_percent:null}))")),
     {value:null,basis:'not_calculated'});
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:0,upper:.5966,calculation_status:'undetermined'}}))")),
-    {value:0,basis:'point'});
-  run("state.calculation_version='1.5.0'");
+    {value:null,basis:'not_calculated'});
+  run("state.calculation_version='1.6.0'");
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:.5,calculation_version:'1.4.0'}}))")),
     {value:null,basis:'stale'});
 });

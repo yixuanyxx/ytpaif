@@ -33,7 +33,7 @@ def holding(cid, w, sid=None):
     }
 
 class EngineCalculations(unittest.TestCase):
-    def test_spec_mixed_business_uses_conservative_evidence_point(self):
+    def test_spec_mixed_business_uses_best_segment_point(self):
         e = engine.estimate(case([
             unit('ai', 20, 1, 1, 1),
             unit('mixed', 40, 0, 1, None),
@@ -42,7 +42,8 @@ class EngineCalculations(unittest.TestCase):
         self.assertAlmostEqual(e['lower'], 0.2)
         self.assertAlmostEqual(e['upper'], 0.6)
         self.assertAlmostEqual(e['point'], 0.2)
-        self.assertEqual(e['point_basis'], 'conservative_evidence')
+        self.assertEqual(e['point_basis'], 'segment_estimate')
+        self.assertEqual(e['calculation_status'], 'partial')
 
     def test_spec_portfolio_example(self):
         estimates = {
@@ -117,13 +118,20 @@ class EngineCalculations(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 engine.estimate(case([u]), NODES, {'e1'})
 
-    def test_residual_keeps_a_conservative_point_and_audit_issue(self):
-        e = engine.estimate(case([unit('a', 20, 1, 1, 1)]), NODES, {'e1'})
-        self.assertEqual(e['lower'], 0.2)
+    def test_residual_keeps_a_segment_estimate_and_audit_issue(self):
+        e = engine.estimate(case([unit('a', 20, .5, 1, .7)]), NODES, {'e1'})
+        self.assertEqual(e['lower'], 0.1)
         self.assertEqual(e['upper'], 1.0)
-        self.assertAlmostEqual(e['point'], .2)
-        self.assertEqual(e['point_basis'], 'conservative_evidence')
+        self.assertAlmostEqual(e['point'], .14)
+        self.assertEqual(e['point_basis'], 'segment_estimate')
+        self.assertEqual(e['calculation_status'], 'partial')
         self.assertTrue(e['issues'])
+
+    def test_no_revenue_units_is_unavailable_not_zero(self):
+        e = engine.estimate(case([]), NODES, {'e1'})
+        self.assertIsNone(e['point'])
+        self.assertEqual(e['point_basis'], 'unavailable')
+        self.assertEqual(e['calculation_status'], 'unavailable')
 
     def test_indirect_does_not_enter_revenue(self):
         with self.assertRaises(ValueError):

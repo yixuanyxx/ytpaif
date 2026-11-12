@@ -459,6 +459,13 @@ function caseExposureValue(caseRecord) {
     return parsed === null ? null : Math.max(0, Math.min(1, parsed));
   };
   const point = boundedFraction(caseRecord?.estimate?.point);
+  const calculationStatus = String(caseRecord?.estimate?.calculation_status || '');
+  // A denominator without reconciled revenue segments is not a zero numerator.
+  // The backend preserves it as unavailable; retain that protection for older
+  // records as well.
+  if (['undetermined', 'unavailable'].includes(calculationStatus)) {
+    return {value: null, basis: 'not_calculated'};
+  }
   if (point !== null) return {value: point, basis: 'point'};
   return {value: null, basis: 'not_calculated'};
 }

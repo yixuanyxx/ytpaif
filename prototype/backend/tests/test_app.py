@@ -666,7 +666,8 @@ class AppFlowTest(unittest.TestCase):
         with patch.object(self.app, 'llm', side_effect=[facts, classification]):
             c = self.app.analyze({'theme_id': self.theme['id'],
                                   'company_id': 'DEMO_A', 'evidence_ids': [evidence]})
-        self.assertEqual(c['estimate']['point'], 0)
+        self.assertIsNone(c['estimate']['point'])
+        self.assertEqual(c['estimate']['calculation_status'], 'undetermined')
         self.assertEqual(c['review_status'], 'needs_review')
         self.assertEqual(c['classification_score'], 3)
         self.assertEqual(self.app.get('runs', c['run_id'])['status'], 'needs_review')
@@ -687,7 +688,8 @@ class AppFlowTest(unittest.TestCase):
         with patch.object(self.app, 'llm', side_effect=[facts, classified]) as model:
             saved = self.app.analyze({'theme_id': self.theme['id'], 'company_id': 'DEMO_A', 'evidence_ids': [eid]})
         self.assertEqual(model.call_count, 2)
-        self.assertEqual(saved['estimate']['point'], 0)
+        self.assertIsNone(saved['estimate']['point'])
+        self.assertEqual(saved['estimate']['calculation_status'], 'undetermined')
         self.assertEqual(saved['estimate']['upper'], 1)
         self.assertEqual(saved['case']['units'][0]['relationship_type'], 'insufficient_evidence')
         self.assertEqual(saved['case']['units'][0]['original_relationship_type'], 'indirect')

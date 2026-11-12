@@ -1,7 +1,7 @@
 """Deterministic, review-gated thematic revenue calculations."""
 import math
 
-VERSION = '1.5.0'
+VERSION = '1.6.0'
 
 def number(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -184,6 +184,10 @@ def estimate(case, nodes, evidence):
     seen, groups, issues = set(), set(), []
     lower = upper = point = accounted = 0.0
     has_point = True
+    # A partial set of classified revenue segments can still produce the best
+    # available thematic-revenue estimate.  Keep this separate from ``has_point``:
+    # the latter means every company revenue unit reconciles exactly.
+    has_direct_segment_point = False
     # Keep underlying revenue identity through the roll-up. A revenue unit may
     # match several leaves, but a common parent must include that unit once.
     node_units = {node_id: {} for node_id in parents}
@@ -243,6 +247,8 @@ def estimate(case, nodes, evidence):
             has_point = False
         else:
             point += revenue * p
+            if relationship == 'direct':
+                has_direct_segment_point = True
         if relationship in ('direct', 'insufficient_evidence'):
             # Allocations express an evidenced split where one is available.
             # Otherwise node_ids records a supported match without inventing a
@@ -316,17 +322,39 @@ def estimate(case, nodes, evidence):
         share = sum(u.get('allocations', {}).values()) if u.get('allocations') else 1.0
         covered_lower += u['revenue'] * u['lower'] * share / total
         covered_upper += u['revenue'] * u['upper'] * share / total
-    # Step 4 presents the comparable numerator/denominator result: qualifying
-    # segment revenue divided by consolidated external revenue. For a partial
-    # analysis, only evidenced qualifying segment revenue enters the numerator;
-    # an unknown segment is never promoted to its theoretical upper bound.
-    final_point = point / total if has_point else lo
-    point_basis = 'complete' if has_point else 'conservative_evidence'
+    # Step 4 presents one best comparable estimate: the sum of the taxonomy-
+    # mapped revenue segments (using each segment's evidenced/derived point
+    # allocation) divided by consolidated external revenue.  An unallocated
+    # *other* segment does not erase an otherwise supported thematic segment
+    # estimate.  It makes the result partial and keeps the issue trail.
+    #
+    # Crucially, a failed extraction has no segment numerator at all. It is
+    # unavailable, not 0%.
+    if not units:
+        final_point = None
+        point_basis = 'unavailable'
+        calculation_status = 'unavailable'
+        main_theme_revenue = None
+    elif has_point:
+        final_point = point / total
+        point_basis = 'complete'
+        calculation_status = 'complete'
+        main_theme_revenue = point
+    elif has_direct_segment_point:
+        final_point = point / total
+        point_basis = 'segment_estimate'
+        calculation_status = 'partial'
+        main_theme_revenue = point
+    else:
+        final_point = None
+        point_basis = 'unavailable'
+        calculation_status = 'undetermined'
+        main_theme_revenue = None
     return {'lower': lo, 'upper': hi, 'point': final_point,
             'point_basis': point_basis,
-            'main_theme_revenue': point if has_point else lower,
+            'main_theme_revenue': main_theme_revenue,
             'identified_theme_revenue': lower,
-            'calculation_status': 'complete' if has_point else ('partial' if lower else 'undetermined'),
+            'calculation_status': calculation_status,
             'revenue_unit_ids': sorted(u['unit_id'] for u in units if u['relationship_type'] == 'direct'),
             'residual_revenue': residual, 'issues': issues, 'subthemes': sub,
             'node_exposures': node_exposures,

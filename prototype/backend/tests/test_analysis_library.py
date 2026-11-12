@@ -55,7 +55,7 @@ class AnalysisLibraryTest(unittest.TestCase):
                          {'exposure_percent': None, 'confidence_percent': None})
         self.assertEqual(analysis_library.result_fields(
             {'point': 0, 'upper': .59, 'calculation_status': 'undetermined'}),
-            {'exposure_percent': 0, 'confidence_percent': None})
+            {'exposure_percent': None, 'confidence_percent': None})
         self.assertEqual(analysis_library.result_fields(
             {'point': 0, 'upper': .59, 'calculation_status': 'complete'}),
             {'exposure_percent': 0, 'confidence_percent': None})

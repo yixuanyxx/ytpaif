@@ -23,6 +23,8 @@ def scope_key(theme):
 
 def display_point(estimate):
     """Return the comparable calculated exposure, never an upper bound."""
+    if estimate.get('calculation_status') in ('undetermined', 'unavailable'):
+        return None, 'unavailable'
     point = estimate.get('point')
     if isinstance(point, (int, float)) and 0 <= point <= 1:
         return point, 'point'
