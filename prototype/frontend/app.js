@@ -284,10 +284,13 @@ function analysisRunProgressText(run) {
   const total = run.company_ids?.length || 0;
   const completed = analysisCompletedCount(run);
   const failed = analysisFailedCount(run);
+  const calculated = Number(run?.calculated_count) || 0;
+  const reused = Number(run?.reused_count) || 0;
   const processed = total ? `${completed} of ${total} companies processed` : `${completed} companies processed`;
   if (isActiveAnalysisRun(run)) {
     const verb = run.phase === 'queued' ? 'Analysis queued' : 'Calculating exposure';
-    return `${verb}. ${processed}. You can leave this page; progress is saved.`;
+    const outcomes = completed ? ` ${calculated} calculated${reused ? `, ${reused} reused` : ''}${failed ? `, ${failed} failed` : ''}.` : '';
+    return `${verb}. ${processed}.${outcomes} You can leave this page; progress is saved.`;
   }
   if (run.status === 'cancelled') return `Analysis cancelled. ${processed}.`;
   if (run.status === 'failed') return `Analysis failed. ${processed}${failed ? `; ${failed} failed` : ''}.`;

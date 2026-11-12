@@ -886,7 +886,14 @@ def _classification_allocation(classification, passages):
     allocation = classification.get('allocation')
     if allocation is None:
         if classification.get('whole_unit_supported') is not True:
-            return 0, 1, None, 'insufficient_evidence'
+            # Older/short model replies can omit ``whole_unit_supported`` even
+            # after making a direct leaf classification. A direct mapped
+            # segment with a cited verbatim attribution is a full segment
+            # match; do not discard it merely because that redundant boolean
+            # is absent. An explicit false still means the segment is mixed.
+            quote = ' '.join(str(classification.get('revenue_attribution_quote', '')).split())
+            if classification.get('whole_unit_supported') is False or not quote:
+                return 0, 1, None, 'insufficient_evidence'
         allocation = {'lower': 1, 'upper': 1, 'point': 1, 'method': 'disclosed', 'assumption': ''}
     if not isinstance(allocation, dict):
         raise ValueError('Revenue allocation must be an object')

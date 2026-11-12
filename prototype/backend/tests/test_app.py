@@ -1017,6 +1017,16 @@ class AppFlowTest(unittest.TestCase):
         self.assertTrue(any(row['stage'] == 'thematic_segment_recovery'
                             for row in self.app.all_records('model_outputs')))
 
+    def test_direct_cited_segment_without_redundant_whole_unit_flag_is_counted(self):
+        source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
+        evidence = source['evidence'][0]['evidence_id']
+        classification = {
+            'relationship_type': 'direct', 'node_ids': ['compute_fab'], 'evidence_ids': [evidence],
+            'revenue_attribution_quote': source['evidence'][0]['passage'],
+        }
+        self.assertEqual(self.app._classification_allocation(
+            classification, source['evidence'])[0:3], (1, 1, 1))
+
     def test_extraction_validation_rejects_internal_sales_before_classification(self):
         source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
         evidence = source['evidence'][0]['evidence_id']
