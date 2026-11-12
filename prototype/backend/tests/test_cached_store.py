@@ -30,6 +30,12 @@ class CachedStoreTest(unittest.TestCase):
             self.assertEqual(self.store.find('companies', 'a'), self.rows[0])
             self.assertEqual(self.store.company_records('companies', 'c'), self.rows)
 
+    def test_warm_primary_read_does_not_wait_for_or_rewrite_a_dataset_lock(self):
+        self.warm()
+        with patch.object(self.store, '_locked', side_effect=AssertionError('read lock')), \
+                patch.object(self.store, '_save', side_effect=AssertionError('snapshot rewrite')):
+            self.assertEqual(self.store.all_records('companies'), self.rows)
+
     def test_outage_accepts_writes_across_instances_and_retries_backup(self):
         self.warm()
         updated = {'id': 'a', 'name': 'Changed'}

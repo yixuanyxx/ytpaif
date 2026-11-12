@@ -53,37 +53,56 @@ class CachedStore(SupabaseStore):
             'at': time.time() if at is None else at, 'records': records,
         }, allow_nan=False))
 
+    def _overlay_pending(self, client, kind, complete):
+        rows = {r['id']: r for r in complete['records']}
+        for key in client.scan_iter(match=self._key(kind, ['pending-prefix']) + ':*'):
+            raw_action = client.get(key)
+            if not raw_action:
+                continue
+            action = json.loads(raw_action)
+            if action['record'] is None:
+                rows.pop(action['id'], None)
+            else:
+                rows[action['id']] = action['record']
+        return rows
+
     def all_records(self, kind):
         self._table(kind)
         client = self._client()
-        with self._locked(client, kind):
-            complete = self._cached(kind, ['all'])
-            if complete is None:
-                try:
-                    rows = super().all_records(kind)
-                except SupabaseError as error:
-                    if not error.retryable:
-                        raise
-                    self._fallback.add(kind)
-                    # A cold Redis cannot reconstruct historical backup records.
-                    # Preserve local writes without claiming history is complete.
-                    rows = []
-                else:
+        # Redis SET replaces the complete snapshot atomically. Once present it
+        # is safe to read without the mutation/hydration lock; dashboard polls
+        # must never queue behind a large source or model-output write.
+        raw_snapshot = client.get(self._key(kind, ['all']))
+        complete = json.loads(raw_snapshot) if raw_snapshot else None
+        if complete is None:
+            # A cold cache can require disk recovery or a Supabase hydration.
+            # Only that exceptional path needs cross-process serialization.
+            with self._locked(client, kind):
+                complete = self._cached(kind, ['all'])
+                if complete is None:
+                    try:
+                        rows = super().all_records(kind)
+                    except SupabaseError as error:
+                        if not error.retryable:
+                            raise
+                        self._fallback.add(kind)
+                        # A cold Redis cannot reconstruct historical backup records.
+                        # Preserve local writes without claiming history is complete.
+                        rows = []
+                    else:
+                        self._fallback.discard(kind)
+                        self._save(kind, ['all'], rows)
+                    complete = {'records': rows}
+                if self._cached(kind, ['all']) is not None:
                     self._fallback.discard(kind)
-                    self._save(kind, ['all'], rows)
-                complete = {'records': rows}
-            if self._cached(kind, ['all']) is not None:
-                self._fallback.discard(kind)
-            rows = {r['id']: r for r in complete['records']}
-            for key in client.scan_iter(match=self._key(kind, ['pending-prefix']) + ':*'):
-                action = json.loads(client.get(key))
-                if action['record'] is None:
-                    rows.pop(action['id'], None)
-                else:
-                    rows[action['id']] = action['record']
-            if self._cached(kind, ['all']) is not None:
-                self._save(kind, ['all'], list(rows.values()))
-            return list(rows.values())
+                    # Persist the overlay before a successful backup clears
+                    # pending actions; normal warm reads never rewrite it.
+                    rows = self._overlay_pending(client, kind, complete)
+                    self._save(kind, ['all'], list(rows.values()))
+                    return list(rows.values())
+                return list(self._overlay_pending(client, kind, complete).values())
+        self._fallback.discard(kind)
+        return list(self._overlay_pending(client, kind, complete).values())
 
     def company_records(self, kind, company_id):
         return [r for r in self.all_records(kind) if r.get('company_id') == company_id]
