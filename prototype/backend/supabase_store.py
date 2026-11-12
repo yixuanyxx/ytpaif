@@ -20,7 +20,7 @@ def configuration():
     return url, key
 
 
-def request(path, method='GET', payload=None, headers=None, query=None, raw=None):
+def request(path, method='GET', payload=None, headers=None, query=None, raw=None, timeout=None):
     url, key = configuration()
     if not url or not key:
         raise SupabaseError('Configure SUPABASE_URL and SUPABASE_SECRET_KEY in the backend environment')
@@ -44,10 +44,13 @@ def request(path, method='GET', payload=None, headers=None, query=None, raw=None
     # A brief connection interruption can occur during the dashboard's many
     # independent reads. Retry safe GETs only; repeating a write could create
     # duplicate external effects when its response was lost.
-    attempts = 3 if method.upper() == 'GET' else 1
+    # A caller with an overall deadline needs one bounded attempt; retrying a
+    # request whose socket timeout already consumes the remaining budget would
+    # defeat the user-facing deadline.
+    attempts = 1 if timeout is not None else (3 if method.upper() == 'GET' else 1)
     for attempt in range(attempts):
         try:
-            with urlopen(req, timeout=30) as response:
+            with urlopen(req, timeout=30 if timeout is None else max(0.1, timeout)) as response:
                 data = response.read()
             break
         except HTTPError as error:
@@ -168,14 +171,16 @@ class SupabaseStore:
         offset = 0
         start = time.monotonic() if deadline is not None else None
         while True:
-            if deadline is not None and time.monotonic() - start > deadline:
+            elapsed = time.monotonic() - start if deadline is not None else None
+            if elapsed is not None and elapsed > deadline:
                 raise SupabaseError(
                     f'Supabase read of {kind} exceeded its {deadline:.0f}s overall deadline '
                     f'after fetching {len(result)} row(s)', retryable=True)
+            remaining = None if elapsed is None else deadline - elapsed
             page = request('/rest/v1/' + table, query=query, headers={
                 'Range-Unit': 'items',
                 'Range': f'{offset}-{offset + 999}',
-            })
+            }, timeout=remaining)
             if not isinstance(page, list):
                 raise SupabaseError(f'Supabase returned an invalid {kind} record list')
             result.extend(row['payload'] for row in page)

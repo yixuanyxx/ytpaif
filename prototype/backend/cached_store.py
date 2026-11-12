@@ -30,9 +30,9 @@ class CachedStore(SupabaseStore):
         return client
 
     @contextmanager
-    def _locked(self, client, kind):
+    def _locked(self, client, kind, blocking_timeout=10):
         # Shared Redis locks serialize hydration and mutations across workers.
-        lock = (client.lock(self._key(kind, ['lock']), timeout=120, blocking_timeout=10)
+        lock = (client.lock(self._key(kind, ['lock']), timeout=120, blocking_timeout=blocking_timeout)
                 if hasattr(client, 'lock') else _LOCAL_LOCK)
         with lock:
             yield
@@ -79,7 +79,13 @@ class CachedStore(SupabaseStore):
             # Only that exceptional path needs cross-process serialization.
             # `deadline` only applies to this fall-through Supabase read: once
             # warm (the common case, above), reads never touch Supabase at all.
-            with self._locked(client, kind):
+            # The workspace route passes a short read deadline.  Never spend
+            # longer than that waiting behind a hydration or mutation lock.
+            # A request path must not wait behind a long background hydration.
+            # The owner will atomically publish the completed snapshot; this
+            # reader can return a retryable degraded result and try again.
+            lock_wait = min(1, max(0.1, float(deadline))) if deadline is not None else 10
+            with self._locked(client, kind, blocking_timeout=lock_wait):
                 complete = self._cached(kind, ['all'])
                 if complete is None:
                     try:
