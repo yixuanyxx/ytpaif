@@ -175,6 +175,13 @@ class CachedStore(SupabaseStore):
                                 continue
                             client.delete(key)
                             synced += 1
+            # Binary documents are intentionally outside Redis. Their local
+            # filesystem primary and Redis outbox use this same retry cadence.
+            try:
+                import file_store
+                synced += file_store.sync_pending()
+            except Exception:
+                pass
             return synced
         except Exception:
             return synced  # Redis/network errors leave the persistent outbox intact.

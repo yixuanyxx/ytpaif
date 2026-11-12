@@ -71,6 +71,11 @@ class CachedStoreTest(unittest.TestCase):
             self.store.sync_backup()
         backup.assert_called_once_with('companies', {'id': 'a', 'name': 'Latest'})
 
+    def test_normal_backup_cycle_retries_pending_file_backups(self):
+        with patch('file_store.sync_pending', return_value=1) as files:
+            self.assertEqual(self.store.sync_backup(), 1)
+        files.assert_called_once_with()
+
     def test_permission_error_on_restore_is_not_hidden(self):
         with patch.object(SupabaseStore, 'all_records', side_effect=SupabaseError('403')):
             with self.assertRaises(SupabaseError):

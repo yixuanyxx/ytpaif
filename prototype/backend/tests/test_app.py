@@ -248,6 +248,11 @@ class AppFlowTest(unittest.TestCase):
         budget_env = patch.dict(os.environ, {'GEMINI_BUDGET_DB': str(Path(budget_dir.name) / 'gemini-budget.sqlite')})
         budget_env.start()
         self.addCleanup(budget_env.stop)
+        file_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(file_dir.cleanup)
+        file_env = patch.dict(os.environ, {'APPLICATION_FILE_DIR': file_dir.name})
+        file_env.start()
+        self.addCleanup(file_env.stop)
         # Add prototype to sys.path so app is imported from prototype
         import sys
         proto_dir = str(Path(__file__).resolve().parent)
@@ -1062,8 +1067,10 @@ class AppFlowTest(unittest.TestCase):
                 'file_name': 'holdings.xlsx',
                 'file_content': base64.b64encode(file_bytes).decode('ascii'),
             })
+            self.app.file_store.sync_pending()
         record = result['import']
-        upload.assert_called_once_with(
+        self.assertEqual(self.app.file_store._path('portfolio-files', record['file_storage_path']).read_bytes(), file_bytes)
+        upload.assert_any_call(
             record['file_storage_path'], file_bytes,
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
@@ -1072,6 +1079,23 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(record['file_size'], len(file_bytes))
         self.assertEqual(record['file_sha256'], hashlib.sha256(file_bytes).hexdigest())
         self.assertEqual(len(self.app.all_records('portfolio_imports')), 1)
+
+    def test_source_upload_persists_locally_when_supabase_is_unavailable_then_retries(self):
+        content = b'Persistent document text with enough evidence detail to exceed the extraction threshold for testing.'
+        with patch.object(self.app.supabase_store, 'upload_source',
+                          side_effect=self.app.supabase_store.SupabaseError('HTTP 402', retryable=True)):
+            source = self.app.source_ingest({
+                'company_id': 'DEMO_A', 'filename': 'evidence.txt',
+                'content': base64.b64encode(content).decode('ascii'),
+                'publication_date': '2026-10-01', 'period': 'FY2025', 'url': '',
+            })
+            self.assertEqual(self.app.file_store._path('source-documents', source['storage_path']).read_bytes(), content)
+            queued = self.app.file_store._queue_key('source-documents', source['storage_path'])
+            self.assertIsNotNone(self.app.source_cache._connection().get(queued))
+        with patch.object(self.app.supabase_store, 'upload_source') as upload:
+            self.assertGreaterEqual(self.app.file_store.sync_pending(), 1)
+            upload.assert_any_call(source['storage_path'], content, '.txt')
+        self.assertIsNone(self.app.source_cache._connection().get(queued))
 
     def test_taxonomy_approval_requires_leaves(self):
         # Tier-1 node without any Tier-2 children fails approval

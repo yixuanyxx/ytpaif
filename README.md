@@ -48,12 +48,12 @@ Excel parsing runs in the browser using the bundled SheetJS CE 0.20.3 library in
 - `backend/engine.py`: deterministic taxonomy validation, revenue exposure calculations, and portfolio aggregation.
 - `frontend/index.html`, `frontend/app.js`, `frontend/style.css`: frontend and workflow views.
 
-Runtime application records are stored in persistent Redis and backed up asynchronously to Supabase. Uploaded source and portfolio files remain separate binary objects in private Supabase Storage buckets; Redis stores only their metadata. The backend requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`; credentials stay server-side. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
+Runtime application records are stored in persistent Redis and backed up asynchronously to Supabase. Uploaded source and portfolio files are stored first on the server filesystem (`APPLICATION_FILE_DIR`, defaulting to `prototype/backend/data/files`) and copied asynchronously to private Supabase Storage buckets; Redis stores only their metadata and the durable backup queue. The backend requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`; credentials stay server-side. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
 Login sessions and login rate limits also require a reachable shared Redis server. Configure `REDIS_URL` or run Redis on localhost before starting the backend; otherwise login returns 503 even if the username and password are correct.
 
 Redis is the primary record datastore. Reads use existing Redis records without periodic Supabase refreshes; cold datasets restore from Supabase when available. Record writes and deletes commit atomically to Redis together with pending backup operations. Background backups retry on subsequent activity (at most once every 30 seconds), including after process restarts. Supabase failures do not reject Redis edits. The sync endpoint also attempts pending backups. Missing historical data is reported separately and never presented as a complete empty portfolio.
 
-Run shared Redis with AOF persistence and a no-eviction policy: Redis records and pending backups must survive restarts. Redis loss before a successful backup can lose changes. Uploaded binary files still use Supabase object storage and require its availability; this change covers application records.
+Run shared Redis with AOF persistence and a no-eviction policy: Redis records and pending backups must survive restarts. Redis loss before a successful backup can lose changes. Keep `APPLICATION_FILE_DIR` on persistent, access-restricted server storage and back it up: uploaded binary files are not Redis records. Supabase Storage outages no longer reject new file uploads; their binary backups remain queued locally.
 
 ## Official filing authorities
 
@@ -96,7 +96,7 @@ Exposure extraction and classification default to Gemini (`gemini-3.8-flash`). T
 2. Ensure the existing `themes`, `portfolios`, and `source_documents` tables and private `source-documents` / `portfolio-files` buckets are configured.
 3. If a database error reports `42P01` for `public.audit_events`, remove any remaining public-schema trigger that references the obsolete audit table. This does not remove analyst reviews or the AI Checker feature.
 
-The app uses Redis for company, source and analysis records and Supabase as their backup. The local SQLite source-job queue must be kept on persistent storage when running on a server. New portfolio imports keep their original Excel file in the private Supabase `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in the Redis portfolio record. A record export does not contain those original binary files; back up the private `source-documents` and `portfolio-files` buckets separately.
+The app uses Redis for company, source and analysis records and Supabase as their backup. The local SQLite source-job queue and `APPLICATION_FILE_DIR` must be kept on persistent storage when running on a server. New source and portfolio uploads first save their original bytes locally and queue a retryable copy to the private Supabase `source-documents` or `portfolio-files` bucket. A record export does not contain historical binary files; import a storage-object export to restore originals that were not already copied to the server filesystem.
 
 ## Tests
 

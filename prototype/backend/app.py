@@ -23,6 +23,7 @@ import financials
 import gemini_fallback
 import supabase_store
 import source_cache
+import file_store
 from cached_store import CachedStore
 import app_auth
 import analysis_library
@@ -341,7 +342,11 @@ def source_ingest(d):
             return s
     sid = ident('source')
     storage_path = 'sources/' + sid + ext
-    supabase_store.upload_source(storage_path, content, ext)
+    # Commit uploaded bytes to the persistent filesystem before saving Redis
+    # metadata. Supabase is an asynchronous off-site backup, not a dependency
+    # for accepting the upload.
+    file_store.save('source-documents', storage_path, content,
+                    'application/pdf' if ext == '.pdf' else 'text/plain')
     evidence, warnings = [], []
     for i, p in enumerate(pages):
         text = p.strip()
@@ -2013,7 +2018,7 @@ def portfolio_import(d):
     }
     if file_content is not None:
         storage_path = f"portfolios/{import_record['id']}{file_extension}"
-        supabase_store.upload_portfolio_file(storage_path, file_content, file_content_type)
+        file_store.save('portfolio-files', storage_path, file_content, file_content_type)
         import_record.update(
             file_name=file_name,
             file_storage_path=storage_path,
@@ -2037,11 +2042,11 @@ def source_search_cancel(d):
     return {'search_run': source_discovery.cancel(sys.modules[__name__], d)}
 
 def sync_to_supabase(d=None):
-    """Retry pending Supabase record backups."""
+    """Retry pending Supabase record and file backups."""
     count = source_cache.copy_redis_to_supabase(store)
     if hasattr(store, 'sync_backup'):
         count += store.sync_backup()
-    return {'status': 'ok', 'synced': count, 'message': f'Copied {count} source documents from Redis to Supabase'}
+    return {'status': 'ok', 'synced': count, 'message': f'Copied {count} pending records and files to Supabase'}
 
 _source_update_cursor = 0
 
@@ -2156,6 +2161,7 @@ def state():
                           for case in workspace['cases']]
     model_calls = read('model_calls')
     storage = store.status() if hasattr(store, 'status') else {}
+    storage['document_files'] = file_store.status()
     unavailable = sorted(set(unavailable) | set(storage.get('stale_kinds', [])))
     storage.update(unavailable_kinds=unavailable,
                    cached_fallback=bool(unavailable) or storage.get('cached_fallback', False))

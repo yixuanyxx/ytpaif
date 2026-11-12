@@ -1389,7 +1389,7 @@ test('Calculate Exposure shows a point percentage and colour-only AI confidence 
   assert.doesNotMatch(html,/AI confidence[\s\S]*>\d+%<\/span>/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
-test('Calculate Exposure uses the evidence floor when no point estimate exists',async()=>{
+test('Calculate Exposure shows an evidence range when no point estimate exists',async()=>{
   const {run,node}=setup();
   run(`state.companies=[
       {id:'range',name:'Range company'}, {id:'zero',name:'Exact zero'},
@@ -1413,15 +1413,15 @@ test('Calculate Exposure uses the evidence floor when no point estimate exists',
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
   const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
-  assert.match(row('Range company'),/title="Conservative evidence-based exposure; unresolved revenue was not counted\."[\s\S]*0\.0%/);
+  assert.match(row('Range company'),/title="Evidence range; the point estimate is unresolved\. Portfolio totals remain conservative until review\."[\s\S]*0\.0% – 56\.7%/);
   assert.match(row('Exact zero'),/0\.0%/);
   assert.doesNotMatch(row('Exact zero'),/80\.0%/);
   assert.match(row('Legacy point'),/50\.0%/);
   assert.match(row('Missing estimate'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Missing estimate'),/No calculated exposure is available because the analysis did not complete/);
   assert.match(row('Missing estimate'),/AI confidence is not available">—<\/span>/);
-  assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,upper:.5666},exposure_percent:null}))")),
-    {value:null,basis:'not_calculated'});
+  assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,lower:0,upper:.5666},exposure_percent:null}))")),
+    {value:null,lower:0,upper:.5666,basis:'range'});
 });
 test('Calculate Exposure does not show failed or pending analyses as zero exposure',async()=>{
   const {run,node}=setup();
