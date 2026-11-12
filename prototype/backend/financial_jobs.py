@@ -33,10 +33,32 @@ def cancel(app, data):
     run_id = data.get('id')
     if not run_id:
         raise ValueError('Financial lookup run ID is required')
-    run, _ = source_jobs.Queue().job(run_id)
+    queue = source_jobs.Queue()
+    try:
+        run, _ = queue.job(run_id)
+    except ValueError:
+        # The browser can see an old remote/search_runs mirror after a worker
+        # restart or a queue-volume loss.  With no local queue entry there is
+        # no worker the queue can cancel; mark the matching financial mirror
+        # terminal so it stops presenting a permanently-running cancel button.
+        run = next((record for record in app.all_records('search_runs')
+                    if record.get('id') == run_id), None)
+        if not run or run.get('job_type') != 'financials':
+            raise ValueError('Financial lookup run not found') from None
+        if run.get('status') in ('completed', 'incomplete', 'failed', 'cancelled'):
+            return {'financial_run': run}
+        run = {
+            **run,
+            'status': 'cancelled',
+            'phase': 'finished',
+            'finished_at': app.now(),
+            'cancel_reason': 'Financial lookup cancelled by user (the local job queue entry was unavailable).',
+        }
+        app.put('search_runs', run)
+        return {'financial_run': run}
     if run.get('job_type') != 'financials':
         raise ValueError('Financial lookup run not found')
-    run = source_jobs.Queue().cancel(run_id, 'Financial lookup cancelled by user.')
+    run = queue.cancel(run_id, 'Financial lookup cancelled by user.')
     # Queue storage is durable and takes precedence over its remote mirror in
     # state(). A slow/unavailable remote store must not delay cancellation.
     source_jobs.ensure_worker()

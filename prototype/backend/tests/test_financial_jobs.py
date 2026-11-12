@@ -103,6 +103,24 @@ class FinancialJobsTest(unittest.TestCase):
         self.assertEqual(saved['status'], 'cancelled')
         self.assertEqual(saved['cancel_reason'], 'Financial lookup cancelled by user.')
 
+    def test_cancel_stale_mirrored_lookup_marks_it_terminal(self):
+        """A stale remote run must not crash or leave a dead cancel button."""
+        empty_queue = source_jobs.Queue(Path(self.temp.name) / 'empty.sqlite3')
+        saved = []
+        app = SimpleNamespace(
+            all_records=lambda kind: [copy.deepcopy(self.run)] if kind == 'search_runs' else [],
+            put=lambda kind, record: saved.append((kind, copy.deepcopy(record))),
+            now=lambda: '2026-11-05T00:00:00Z',
+        )
+        with patch.object(financial_jobs.source_jobs, 'Queue', return_value=empty_queue), \
+                patch.object(financial_jobs.source_jobs, 'ensure_worker'):
+            result = financial_jobs.cancel(app, {'id': self.run['id']})
+        cancelled = result['financial_run']
+        self.assertEqual(cancelled['status'], 'cancelled')
+        self.assertEqual(cancelled['phase'], 'finished')
+        self.assertIn('queue entry was unavailable', cancelled['cancel_reason'])
+        self.assertEqual(saved, [('search_runs', cancelled)])
+
     def test_worker_stops_when_lookup_is_cancelled(self):
         calls = []
         self.app.is_cancelled = lambda run_id: len(calls) >= 1
