@@ -1375,10 +1375,11 @@ test('Calculate Exposure shows a point percentage and colour-only AI confidence 
     state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
     state.portfolio_imports=[{id:'core',theme_id:'theme-a',name:'Asia Core',rows:[{company_id:'a'},{company_id:'b'},{company_id:'c'}]}];
     state.source_summaries=[{company_id:'a',count:3},{company_id:'b',count:3},{company_id:'c',count:3}];
+    state.calculation_version='1.5.0';
     state.cases=[
-      {id:'green',theme_id:'theme-a',company_id:'a',review_status:'needs_review',exposure_percent:50,source_confidence_light:'green',source_confidence_basis:'Three trusted sources agree.'},
-      {id:'amber',theme_id:'theme-a',company_id:'b',review_status:'needs_review',estimate:{point:.25},source_confidence_light:'yellow',source_confidence_basis:'Credible sources diverge.'},
-      {id:'red',theme_id:'theme-a',company_id:'c',review_status:'needs_review',estimate:{point:.75},source_confidence_light:'red',source_confidence_basis:'Unapproved website cited.'}
+      {id:'green',theme_id:'theme-a',company_id:'a',review_status:'needs_review',estimate:{point:.5,calculation_version:'1.5.0'},source_confidence_light:'green',source_confidence_basis:'Three trusted sources agree.'},
+      {id:'amber',theme_id:'theme-a',company_id:'b',review_status:'needs_review',estimate:{point:.25,calculation_version:'1.5.0'},source_confidence_light:'yellow',source_confidence_basis:'Credible sources diverge.'},
+      {id:'red',theme_id:'theme-a',company_id:'c',review_status:'needs_review',estimate:{point:.75,calculation_version:'1.5.0'},source_confidence_light:'red',source_confidence_basis:'Unapproved website cited.'}
     ];
     selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
@@ -1389,7 +1390,7 @@ test('Calculate Exposure shows a point percentage and colour-only AI confidence 
   assert.doesNotMatch(html,/AI confidence[\s\S]*>\d+%<\/span>/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
-test('Calculate Exposure restores the saved single percentage when no point estimate exists',async()=>{
+test('Calculate Exposure never presents an upper bound as a comparable percentage',async()=>{
   const {run,node}=setup();
   run(`state.companies=[
       {id:'range',name:'Range company'}, {id:'zero',name:'Exact zero'},
@@ -1413,17 +1414,20 @@ test('Calculate Exposure restores the saved single percentage when no point esti
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
   const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
-  assert.match(row('Range company'),/title="Saved exposure percentage from the prior calculation\."[\s\S]*56\.7%/);
+  assert.match(row('Range company'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Exact zero'),/0\.0%/);
   assert.doesNotMatch(row('Exact zero'),/80\.0%/);
-  assert.match(row('Legacy point'),/50\.0%/);
+  assert.match(row('Legacy point'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Missing estimate'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Missing estimate'),/No calculated exposure is available because the analysis did not complete/);
   assert.match(row('Missing estimate'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,lower:0,upper:.5666},exposure_percent:null}))")),
-    {value:.5666,basis:'upper'});
+    {value:null,basis:'not_calculated'});
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:0,upper:.5966,calculation_status:'undetermined'}}))")),
-    {value:.5966,basis:'upper'});
+    {value:0,basis:'point'});
+  run("state.calculation_version='1.5.0'");
+  assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:.5,calculation_version:'1.4.0'}}))")),
+    {value:null,basis:'stale'});
 });
 test('Calculate Exposure does not show failed or pending analyses as zero exposure',async()=>{
   const {run,node}=setup();

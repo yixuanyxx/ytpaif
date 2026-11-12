@@ -50,12 +50,12 @@ class AnalysisLibraryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             analysis_library.result_fields({'point': .5}, 101)
 
-    def test_saved_upper_value_wins_for_unresolved_or_placeholder_zero_cases(self):
+    def test_upper_bound_is_never_presented_as_a_comparable_exposure(self):
         self.assertEqual(analysis_library.result_fields({'point': None, 'upper': .59}),
-                         {'exposure_percent': 59, 'confidence_percent': None})
+                         {'exposure_percent': None, 'confidence_percent': None})
         self.assertEqual(analysis_library.result_fields(
             {'point': 0, 'upper': .59, 'calculation_status': 'undetermined'}),
-            {'exposure_percent': 59, 'confidence_percent': None})
+            {'exposure_percent': 0, 'confidence_percent': None})
         self.assertEqual(analysis_library.result_fields(
             {'point': 0, 'upper': .59, 'calculation_status': 'complete'}),
             {'exposure_percent': 0, 'confidence_percent': None})

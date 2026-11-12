@@ -603,18 +603,16 @@ def review(d):
 def selected_estimates(theme_id):
     result = {}
     theme = get('themes', theme_id)
-    # Keep the last compatible chart visible while cases are recalculated under
-    # a newer engine version. Stale cases remain non-reusable for analysis.
+    # Stale cases are excluded until recalculated under the current engine, so
+    # dashboard totals never mix methodologies.
     for c in analysis_library.display_results(all_records('cases'), [theme]):
-        if c['review_status'] in ('approved', 'needs_review'):
+        if c['review_status'] in ('approved', 'needs_review') and not c['calculation_stale']:
             estimate = dict(c['estimate'])
             display_point, display_basis = analysis_library.display_point(estimate)
             if display_point is None:
-                estimate['point'] = 0.0
-                point_basis = 'missing'
-            else:
-                estimate['point'] = max(0.0, min(1.0, display_point))
-                point_basis = display_basis if display_basis in ('upper', 'lower') else (estimate.get('point_basis') or display_basis)
+                continue
+            estimate['point'] = display_point
+            point_basis = estimate.get('point_basis') or display_basis
             result[c['company_id']] = {
                 **estimate, 'review_status': c['review_status'], 'case_id': c['id'],
                 'point_basis': point_basis, 'calculation_stale': c['calculation_stale'],

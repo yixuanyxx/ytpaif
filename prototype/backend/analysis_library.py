@@ -22,24 +22,11 @@ def scope_key(theme):
 
 
 def display_point(estimate):
-    """Return the saved single-value exposure used by the legacy workspace.
-
-    Earlier analyses saved the user-facing percentage in ``upper`` whenever a
-    point was unresolved. A cancelled/undetermined retry can subsequently
-    write a placeholder zero point without invalidating that saved value.
-    Completed zero results remain genuine zeroes.
-    """
+    """Return the comparable calculated exposure, never an upper bound."""
     point = estimate.get('point')
-    upper = estimate.get('upper')
-    pending_zero = (point == 0 and estimate.get('calculation_status') in ('undetermined', 'partial')
-                    and isinstance(upper, (int, float)) and upper > 0)
-    if point is not None and not pending_zero:
+    if isinstance(point, (int, float)) and 0 <= point <= 1:
         return point, 'point'
-    if isinstance(upper, (int, float)) and upper >= 0:
-        return upper, 'upper'
-    if point is not None:
-        return point, 'point'
-    return estimate.get('lower'), 'lower'
+    return None, 'unavailable'
 
 
 def result_fields(estimate, confidence_percent=None):

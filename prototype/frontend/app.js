@@ -445,6 +445,10 @@ const pct = (v, signed = false, dec = 1) =>
 const pctRange = e => `${pct(e.lower)} – ${pct(e.upper)}`;
 function caseExposureValue(caseRecord) {
   if (!caseRecord) return {value: null, basis: 'not_calculated'};
+  const calculationVersion = caseRecord?.estimate?.calculation_version;
+  if (state.calculation_version && calculationVersion !== state.calculation_version) {
+    return {value: null, basis: 'stale'};
+  }
   const numeric = value => {
     if (value === null || value === undefined || value === '') return null;
     const parsed = Number(value);
@@ -455,23 +459,7 @@ function caseExposureValue(caseRecord) {
     return parsed === null ? null : Math.max(0, Math.min(1, parsed));
   };
   const point = boundedFraction(caseRecord?.estimate?.point);
-  const rawUpper = numeric(caseRecord?.estimate?.upper);
-  const upper = rawUpper === null || rawUpper < 0 ? null : Math.max(0, Math.min(1, rawUpper));
-  // A cancelled/undetermined retry can leave a placeholder 0 alongside the
-  // saved exposure value. Restore the saved single value in that case while
-  // preserving a completed 0% calculation.
-  const pendingZero = point === 0 && upper !== null && upper > 0
-    && ['undetermined', 'partial'].includes(String(caseRecord?.estimate?.calculation_status || ''));
-  if (point !== null && !pendingZero) return {value: point, basis: 'point'};
-  if (upper !== null) return {value: upper, basis: 'upper'};
-  const lower = boundedFraction(caseRecord?.estimate?.lower);
-  if (lower !== null) return {value: lower, basis: 'conservative_evidence'};
-  const savedPercent = numeric(caseRecord?.exposure_percent);
-  if (savedPercent !== null) {
-    return {value: Math.max(0, Math.min(100, savedPercent)) / 100, basis: 'legacy_point'};
-  }
-  // Do not present a failed/cancelled calculation as an actual 0% result.
-  // A real zero is retained above when the saved point or lower evidence is 0.
+  if (point !== null) return {value: point, basis: 'point'};
   return {value: null, basis: 'not_calculated'};
 }
 
@@ -3722,9 +3710,8 @@ async function viewAnalysis() {
     const analysisState = caseRec && !terminalStateStillRelevant ? null : rawAnalysisState;
     const retryable = ['Analysis failed', 'Analysis incomplete', 'Analysis cancelled'].includes(rawAnalysisState?.label)
       && !rawAnalysisState?.active;
-    const calculationOutdated = Boolean(caseRec?.estimate?.calculation_version
-      && state.calculation_version
-      && caseRec.estimate.calculation_version !== state.calculation_version);
+    const calculationOutdated = Boolean(caseRec && state.calculation_version
+      && caseRec?.estimate?.calculation_version !== state.calculation_version);
     // Missing-source rows and saved zero/unknown cases are deliberately
     // eligible: the backend can discover approved numeric web evidence before
     // analysis. A recent completed fallback is suppressed until its retry
@@ -3843,12 +3830,10 @@ async function viewAnalysis() {
                     || analysisOutcomeForCompany(companyAnalysisRun, c.id);
                   const fallbackWasSearched = Boolean(fallbackSearch?.searched_at
                     || fallbackSearch?.fallback_status || fallbackSearch?.fallback_message);
-                  const exposureTitle = exposure.basis === 'upper'
-                    ? 'Saved exposure percentage from the prior calculation.'
-                    : exposure.basis === 'conservative_evidence'
-                    ? 'Conservative evidence-based exposure; unresolved revenue was not counted.'
-                    : exposure.basis === 'point' || exposure.basis === 'legacy_point'
-                      ? 'Calculated exposure point estimate.'
+                  const exposureTitle = exposure.basis === 'stale'
+                    ? 'Calculated using an earlier methodology. Re-run to calculate a comparable revenue-segment exposure.'
+                    : exposure.basis === 'point'
+                      ? 'Calculated as theme-attributable revenue segments divided by total consolidated external revenue.'
                       : companyAnalysisInProgress
                         ? 'Exposure is being calculated.'
                         : caseRec || terminalAnalysis
