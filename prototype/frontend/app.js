@@ -667,6 +667,8 @@ async function run(fn, loadingMsg) {
 // ── State refresh ──────────────────────────────────
 async function refresh() {
   state = await apiGet('state');
+  const storageNotice = $('#storage-notice');
+  if (storageNotice) storageNotice.hidden = !state.storage?.cached_fallback;
   // Source documents are deliberately loaded only when a company row is opened.
   loadedSourceCompanyIds.clear();
   updateSidebarBadges();

@@ -22,6 +22,7 @@ import financials
 import gemini_fallback
 import supabase_store
 import source_cache
+from cached_store import CachedStore
 import app_auth
 import analysis_library
 import source_confidence
@@ -54,7 +55,7 @@ def load_env():
 
 load_env()
 FRONTEND = (ROOT.parent / 'frontend') if (ROOT.parent / 'frontend').exists() else (ROOT / 'frontend')
-store = supabase_store.SupabaseStore()
+store = CachedStore()
 LOCK = threading.Lock()
 MAX_FILE = 20 * 1024 * 1024
 VERSIONS = {'prompt': '1.4.0', 'extraction': '1.1.0', 'calculation': engine.VERSION}
@@ -2057,7 +2058,12 @@ def refresh_worker_sources():
     ids = list(dict.fromkeys(row[1] for row in updates))
     for start in range(0, len(ids), 100):
         batch = ids[start:start + 100]
-        records = store.find_many('sources', batch)
+        try:
+            records = store.find_many('sources', batch)
+        except supabase_store.SupabaseError as error:
+            if not error.retryable:
+                raise
+            return  # Keep the cursor and cached sources; retry after recovery.
         if records and not source_cache.save_sources_to_redis(records, mark_pending=False):
             return
         found = {record['id'] for record in records}
@@ -2077,7 +2083,12 @@ def stock_sources(d):
     # scorer. Read only this company's current records, rather than trying to
     # replay thousands of unrelated scoring updates before opening a row.
     if sources:
-        current = store.find_many('sources', [source.get('id') for source in sources])
+        try:
+            current = store.find_many('sources', [source.get('id') for source in sources])
+        except supabase_store.SupabaseError as error:
+            if not error.retryable:
+                raise
+            current = []  # Existing Redis metadata still supports the source table.
         if current:
             source_cache.save_sources_to_redis(current, mark_pending=False)
             sources = current
@@ -2132,7 +2143,8 @@ def state():
         'unresolved_search_batch_limit': unresolved_search_batch_limit(),
         'max_tiers': engine.MAX_TIERS,
         'calculation_version': engine.VERSION,
-        'max_children': engine.MAX_CHILDREN
+        'max_children': engine.MAX_CHILDREN,
+        'storage': store.status() if hasattr(store, 'status') else {}
     }
 
 # ── Demo ──────────────────────────────────────────────────────────────────────

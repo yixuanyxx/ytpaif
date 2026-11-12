@@ -9,7 +9,9 @@ from urllib.request import Request, urlopen
 
 
 class SupabaseError(RuntimeError):
-    pass
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def configuration():
@@ -65,7 +67,8 @@ def request(path, method='GET', payload=None, headers=None, query=None, raw=None
                 ) from None
             suffix = f', {error_code}' if error_code else ''
             raise SupabaseError(
-                f'Supabase request failed: {method} {path} (HTTP {error.code}{suffix})'
+                f'Supabase request failed: {method} {path} (HTTP {error.code}{suffix})',
+                retryable=error.code in (402, 408, 429) or error.code >= 500,
             ) from None
         except (URLError, TimeoutError, OSError) as error:
             if attempt + 1 < attempts:
@@ -74,7 +77,8 @@ def request(path, method='GET', payload=None, headers=None, query=None, raw=None
             cause = getattr(error, 'reason', None)
             detail = type(cause).__name__ if cause is not None else type(error).__name__
             raise SupabaseError(
-                f'Supabase request failed: {method} {path} ({type(error).__name__}: {detail})'
+                f'Supabase request failed: {method} {path} ({type(error).__name__}: {detail})',
+                retryable=True,
             ) from None
     if not data:
         return None

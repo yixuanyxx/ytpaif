@@ -9,6 +9,15 @@ import supabase_store
 
 
 class SupabasePersistenceTest(unittest.TestCase):
+    def test_only_availability_errors_allow_cached_fallback(self):
+        for status in (402, 408, 429, 500, 503, 401, 403, 404):
+            with self.subTest(status=status):
+                error = HTTPError('https://project.example', status, 'error', {}, io.BytesIO(b'{}'))
+                with patch.object(supabase_store, 'urlopen', side_effect=error):
+                    with self.assertRaises(supabase_store.SupabaseError) as caught:
+                        supabase_store.request('/rest/v1/themes')
+                self.assertEqual(caught.exception.retryable, status in (402, 408, 429, 500, 503))
+
     def test_company_records_filters_the_library_on_the_server(self):
         with patch.object(supabase_store, 'request', return_value=[{'payload': {'id': 'source'}}]) as send:
             rows = supabase_store.SupabaseStore().company_records('sources', 'company_abc')

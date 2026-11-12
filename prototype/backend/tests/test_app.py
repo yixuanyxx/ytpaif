@@ -14,6 +14,21 @@ from test_fixtures import MemoryStore, demo
 from test_source_cache import FakeRedis
 
 class AppFlowTest(unittest.TestCase):
+    def test_workspace_survives_supabase_outage_after_redis_is_populated(self):
+        from cached_store import CachedStore
+        from supabase_store import SupabaseStore, SupabaseError
+        permanent = self.app.store
+        self.app.store = CachedStore()
+        with patch('source_discovery.recover_stale_runs'), patch.object(self.app, 'refresh_worker_sources'):
+            with patch.object(SupabaseStore, 'all_records', side_effect=permanent.all_records):
+                before = self.app.state()
+            with patch.object(self.app.store, 'FRESH_SECONDS', -1), \
+                    patch.object(SupabaseStore, 'all_records', side_effect=SupabaseError('HTTP 402', retryable=True)):
+                after = self.app.state()
+        for kind in ('themes', 'companies', 'cases', 'reviews', 'runs', 'snapshots', 'portfolio_imports'):
+            self.assertEqual(after[kind], before[kind])
+        self.assertTrue(after['storage']['cached_fallback'])
+
     def test_general_ai_falls_back_and_records_the_model_used(self):
         output = json.dumps({'choices': [{'message': {'content': '{}'}}]}).encode()
         with patch.dict(os.environ, {'FINANCIALS_LLM_API_KEY': 'test', 'LLM_MODEL': 'gemini-3.8-flash'}), \
