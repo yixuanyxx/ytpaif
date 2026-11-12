@@ -39,6 +39,13 @@ class CachedStore(SupabaseStore):
 
     def _cached(self, kind, query):
         value = self._client().get(self._key(kind, query))
+        if not value and query == ['all'] and kind in self._SPECIAL_TABLES:
+            import record_recovery
+            path = record_recovery.directory() / (kind + '.json')
+            if path.is_file():
+                snapshot = json.loads(path.read_text(encoding='utf-8'))
+                self._save(kind, query, snapshot['records'], at=snapshot['at'])
+                return snapshot
         return json.loads(value) if value else None
 
     def _save(self, kind, query, records, at=None):

@@ -2182,6 +2182,13 @@ def state():
 # ── HTTP dispatch ─────────────────────────────────────────────────────────────
 
 def _dispatch(path, d):
+    if path == '/api/records/restore':
+        import record_recovery
+        result = record_recovery.restore(store, d.get('csv', ''))
+        if 'sources' in result['counts']:
+            source_cache.warm_sources(store.all_records('sources'), force=True)
+            mark_source_updates_seen()
+        return result
     if path in ('/api/sync', '/api/sync_to_supabase', '/api/logout'): return sync_to_supabase(d)
     if path in ('/api/stock/sources', '/api/company/sources'): return stock_sources(d)
     if path == '/api/theme':            return theme_create(d)
@@ -2269,6 +2276,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(sync_to_supabase({}))
             assets = {
                 '/': 'index.html',
+                '/recovery': 'recovery.html',
+                '/recovery.js': 'recovery.js',
                 '/app.js': 'app.js',
                 '/style.css': 'style.css',
                 '/xlsx.full.min.js': 'js/xlsx.full.min.js',
@@ -2278,6 +2287,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'error': 'Not found'}, 404)
             mime = {
                 '/': 'text/html; charset=utf-8',
+                '/recovery': 'text/html; charset=utf-8',
+                '/recovery.js': 'text/javascript; charset=utf-8',
                 '/app.js': 'text/javascript; charset=utf-8',
                 '/style.css': 'text/css; charset=utf-8',
                 '/xlsx.full.min.js': 'text/javascript; charset=utf-8',
@@ -2305,6 +2316,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             return self.respond({'error': 'Same-origin local requests required'}, 403)
+        if length > 64 * 1024 * 1024:
+            return self.respond({'error': 'Request exceeds the 64 MB upload limit'}, 413)
         try:
             raw_body = self.rfile.read(length) if length > 0 else b'{}'
             try:

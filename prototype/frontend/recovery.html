@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Restore saved portfolio records</title>
+<link rel="stylesheet" href="/style.css">
+<main style="max-width:800px;margin:60px auto;padding:24px">
+<h1>Restore saved portfolio records</h1>
+<p>Choose the CSV recovery export from Supabase. The export is saved on this server before import. Existing Redis records and pending edits are preserved.</p>
+<label>Recovery export <input id="file" type="file" accept=".csv,text/csv"></label>
+<button id="restore" type="button">Restore to Redis</button>
+<pre id="result" role="status" style="white-space:pre-wrap"></pre>
+<p><a href="/">Open dashboard</a></p>
+<script src="/recovery.js"></script>
+</main></html>

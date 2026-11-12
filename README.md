@@ -108,3 +108,9 @@ node --test prototype/frontend/tests/workflow.test.cjs
 ```
 
 On Windows, set `PYTHONPATH=prototype/backend` before running the unittest command. Run `start_server.bat` from the repository root for the Windows launcher; the backend shortcut delegates to the same launcher.
+
+## Restore records during a Supabase API restriction
+
+The authenticated `/recovery` page imports a SQL Editor CSV with `kind`, `record_count`, and `records_base64` columns. Each row contains a full dataset as base64-encoded UTF-8 JSON payloads. A `total_count` column supports source-library batches; incomplete batches are staged on disk and are never advertised as a complete snapshot. Browser uploads send one CSV row per request.
+
+The importer validates dataset names, IDs, duplicate records and counts, saves the original export and prior snapshots under `prototype/backend/data/record-recovery/`, then restores Redis while preserving current records and pending edits/deletions. Recovery files are private server data, excluded from git. If Redis loses a recovered dataset, the app can reload its saved disk snapshot. The response reports whether Redis AOF and no-eviction configuration were enabled and saved. Restrict access to the server disk and retain an external recovery copy. The endpoint uses the existing login and same-origin protections.
