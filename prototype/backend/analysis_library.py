@@ -21,17 +21,33 @@ def scope_key(theme):
     return hashlib.sha256(json.dumps(scope, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def display_point(estimate):
+    """Return the saved single-value exposure used by the legacy workspace.
+
+    Earlier analyses saved the user-facing percentage in ``upper`` whenever a
+    point was unresolved. A cancelled/undetermined retry can subsequently
+    write a placeholder zero point without invalidating that saved value.
+    Completed zero results remain genuine zeroes.
+    """
+    point = estimate.get('point')
+    upper = estimate.get('upper')
+    pending_zero = (point == 0 and estimate.get('calculation_status') in ('undetermined', 'partial')
+                    and isinstance(upper, (int, float)) and upper > 0)
+    if point is not None and not pending_zero:
+        return point, 'point'
+    if isinstance(upper, (int, float)) and upper >= 0:
+        return upper, 'upper'
+    if point is not None:
+        return point, 'point'
+    return estimate.get('lower'), 'lower'
+
+
 def result_fields(estimate, confidence_percent=None):
     if confidence_percent is not None:
         confidence_percent = engine.number(confidence_percent, 'AI confidence percentage')
         if not 0 <= confidence_percent <= 100:
             raise ValueError('AI confidence percentage must be between 0 and 100')
-    # Older records may have an unknown point with only an uncertainty range.
-    # Do not expose that range's upper bound as a company exposure.  The
-    # evidence floor is the only defensible single value for those records.
-    point = estimate.get('point')
-    if point is None:
-        point = estimate.get('lower')
+    point, _ = display_point(estimate)
     return {'exposure_percent': None if point is None else point * 100,
             'confidence_percent': confidence_percent}
 

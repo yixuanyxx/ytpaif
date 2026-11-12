@@ -608,13 +608,13 @@ def selected_estimates(theme_id):
     for c in analysis_library.display_results(all_records('cases'), [theme]):
         if c['review_status'] in ('approved', 'needs_review'):
             estimate = dict(c['estimate'])
-            point_basis = estimate.get('point_basis') or 'complete'
-            if estimate.get('point') is None:
-                # A saved range is audit information, not a display value.
-                # Its lower bound is the evidence-supported company exposure;
-                # never promote an unknown result to its theoretical maximum.
-                estimate['point'] = max(0.0, min(1.0, estimate.get('lower') or 0.0))
-                point_basis = 'conservative_evidence'
+            display_point, display_basis = analysis_library.display_point(estimate)
+            if display_point is None:
+                estimate['point'] = 0.0
+                point_basis = 'missing'
+            else:
+                estimate['point'] = max(0.0, min(1.0, display_point))
+                point_basis = display_basis if display_basis in ('upper', 'lower') else (estimate.get('point_basis') or display_basis)
             result[c['company_id']] = {
                 **estimate, 'review_status': c['review_status'], 'case_id': c['id'],
                 'point_basis': point_basis, 'calculation_stale': c['calculation_stale'],

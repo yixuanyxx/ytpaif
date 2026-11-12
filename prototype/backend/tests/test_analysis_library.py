@@ -50,6 +50,16 @@ class AnalysisLibraryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             analysis_library.result_fields({'point': .5}, 101)
 
+    def test_saved_upper_value_wins_for_unresolved_or_placeholder_zero_cases(self):
+        self.assertEqual(analysis_library.result_fields({'point': None, 'upper': .59}),
+                         {'exposure_percent': 59, 'confidence_percent': None})
+        self.assertEqual(analysis_library.result_fields(
+            {'point': 0, 'upper': .59, 'calculation_status': 'undetermined'}),
+            {'exposure_percent': 59, 'confidence_percent': None})
+        self.assertEqual(analysis_library.result_fields(
+            {'point': 0, 'upper': .59, 'calculation_status': 'complete'}),
+            {'exposure_percent': 0, 'confidence_percent': None})
+
     def test_new_sources_invalidate_saved_result_but_loading_text_does_not(self):
         source = {'id': 'report', 'company_id': 'company', 'period': 'FY2025',
                   'publication_date': '2026-01-01', 'url': 'https://issuer.test/report.pdf'}

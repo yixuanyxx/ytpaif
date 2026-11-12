@@ -297,7 +297,7 @@ class AppFlowTest(unittest.TestCase):
             self.assertEqual(manifest['theme']['id'], self.theme['id'])
             self.assertEqual(len(manifest['reviews']), 3)
 
-    def test_dashboard_uses_pending_calculation_without_promoting_upper_bound(self):
+    def test_dashboard_uses_saved_upper_value_for_pending_calculation(self):
         case = self.app.all_records('cases')[0]
         case['review_status'] = 'needs_review'
         case['estimate']['point'] = None
@@ -306,8 +306,8 @@ class AppFlowTest(unittest.TestCase):
         self.app.put('cases', case)
 
         selected = self.app.selected_estimates(self.theme['id'])
-        self.assertEqual(selected[case['company_id']]['point'], 0.5)
-        self.assertEqual(selected[case['company_id']]['point_basis'], 'conservative_evidence')
+        self.assertEqual(selected[case['company_id']]['point'], 0.6)
+        self.assertEqual(selected[case['company_id']]['point_basis'], 'upper')
         self.assertEqual(selected[case['company_id']]['review_status'], 'needs_review')
         self.assertTrue(selected[case['company_id']]['calculation_stale'])
 
@@ -315,7 +315,7 @@ class AppFlowTest(unittest.TestCase):
         row = next(row for row in dashboard['companies'] if row['company_id'] == case['company_id'])
         self.assertTrue(row['assessed'])
         self.assertEqual(row['review_status'], 'needs_review')
-        self.assertEqual(row['exposure']['point'], 0.5)
+        self.assertEqual(row['exposure']['point'], 0.6)
 
     def test_evaluate_endpoint_is_removed(self):
         with self.assertRaisesRegex(ValueError, 'Unknown API endpoint'):

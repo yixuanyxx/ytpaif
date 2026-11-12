@@ -455,19 +455,16 @@ function caseExposureValue(caseRecord) {
     return parsed === null ? null : Math.max(0, Math.min(1, parsed));
   };
   const point = boundedFraction(caseRecord?.estimate?.point);
-  if (point !== null) return {value: point, basis: 'point'};
-  // A range's upper bound represents uncertainty, not a calculated exposure.
-  // Legacy cases without a point therefore show their supported evidence
-  // amount rather than being inflated to the maximum possible value.
+  const rawUpper = numeric(caseRecord?.estimate?.upper);
+  const upper = rawUpper === null || rawUpper < 0 ? null : Math.max(0, Math.min(1, rawUpper));
+  // A cancelled/undetermined retry can leave a placeholder 0 alongside the
+  // saved exposure value. Restore the saved single value in that case while
+  // preserving a completed 0% calculation.
+  const pendingZero = point === 0 && upper !== null && upper > 0
+    && ['undetermined', 'partial'].includes(String(caseRecord?.estimate?.calculation_status || ''));
+  if (point !== null && !pendingZero) return {value: point, basis: 'point'};
+  if (upper !== null) return {value: upper, basis: 'upper'};
   const lower = boundedFraction(caseRecord?.estimate?.lower);
-  const upper = boundedFraction(caseRecord?.estimate?.upper);
-  // A zero lower bound with a positive upper bound is an unresolved range,
-  // not a 0% exposure. Keep the uncertainty visible in the queue while the
-  // dashboard aggregation remains conservative until review establishes a
-  // defensible point.
-  if (point === null && lower !== null && upper !== null && upper > lower) {
-    return {value: null, lower, upper, basis: 'range'};
-  }
   if (lower !== null) return {value: lower, basis: 'conservative_evidence'};
   const savedPercent = numeric(caseRecord?.exposure_percent);
   if (savedPercent !== null) {
@@ -3840,14 +3837,14 @@ async function viewAnalysis() {
                   // Prefer the calculated point. Legacy partial cases use the
                   // supported evidence amount, never the uncertainty ceiling.
                   const exposure = caseExposureValue(caseRec);
-                  const pt = exposure.basis === 'range' ? pctRange(exposure) : pct(exposure.value);
+                  const pt = pct(exposure.value);
                   const terminalAnalysis = isTerminalAnalysisRun(companyAnalysisRun);
                   const fallbackSearch = caseRec?.fallback_web_search
                     || analysisOutcomeForCompany(companyAnalysisRun, c.id);
                   const fallbackWasSearched = Boolean(fallbackSearch?.searched_at
                     || fallbackSearch?.fallback_status || fallbackSearch?.fallback_message);
-                  const exposureTitle = exposure.basis === 'range'
-                    ? 'Evidence range; the point estimate is unresolved. Portfolio totals remain conservative until review.'
+                  const exposureTitle = exposure.basis === 'upper'
+                    ? 'Saved exposure percentage from the prior calculation.'
                     : exposure.basis === 'conservative_evidence'
                     ? 'Conservative evidence-based exposure; unresolved revenue was not counted.'
                     : exposure.basis === 'point' || exposure.basis === 'legacy_point'
