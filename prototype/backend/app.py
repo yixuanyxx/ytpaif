@@ -2103,6 +2103,20 @@ def stock_sources(d):
 def state():
     import source_discovery
     import sys
+    unavailable = []
+
+    def read(kind, loader=None):
+        try:
+            return loader() if loader else all_records(kind)
+        except supabase_store.SupabaseError as error:
+            if not error.retryable:
+                raise
+            unavailable.append(kind)
+            if kind == 'search_runs':
+                import source_jobs
+                return source_jobs.Queue().merge([])
+            return []
+
     source_discovery.recover_stale_runs(sys.modules[__name__])
     exposure_config = exposure_llm_config()
     key = exposure_config['key']
@@ -2110,24 +2124,34 @@ def state():
     checker_key = os.environ.get('CHECKER_LLM_API_KEY') or os.environ.get('CLAUDE_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
     checker_model = os.environ.get('CHECKER_LLM_MODEL') or DEFAULT_CHECKER_MODEL
     # Read run status before source counts so a terminal run includes its final saves.
-    search_runs = all_records('search_runs')
+    search_runs = read('search_runs')
     # Keep the session cache warm, but do not send the complete source library
     # to the browser during workspace startup. Individual company documents are
     # fetched from Redis only when the PM opens that company's source row.
     if not source_cache.is_hydrated():
-        source_cache.warm_sources(store.all_records('sources'))
-        mark_source_updates_seen()
+        source_links = read('sources', lambda: store.all_records('sources'))
+        if 'sources' not in unavailable:
+            if source_cache.warm_sources(source_links):
+                mark_source_updates_seen()
+    else:
+        source_links = read('sources', source_link_records)
     refresh_worker_sources()
+    if source_cache.is_hydrated():
+        source_links = source_cache.get_all_sources_from_redis() or source_links
     source_summaries = source_cache.get_source_summaries()
-    workspace = {k: all_records(k) for k in
+    workspace = {k: read(k) for k in
                  ('themes', 'companies', 'cases', 'reviews', 'runs', 'snapshots', 'portfolio_imports')}
     workspace['themes'] = [{**theme, 'analysis_scope_key': analysis_library.scope_key(theme)}
                            for theme in workspace['themes']]
     company_analysis_library = analysis_library.current_results(
-        workspace['cases'], workspace['themes'], source_link_records())
+        workspace['cases'], workspace['themes'], source_links)
     reusable_case_ids = {case['id'] for case in company_analysis_library}
     workspace['cases'] = [{**case, 'analysis_reusable': case['id'] in reusable_case_ids}
                           for case in workspace['cases']]
+    model_calls = read('model_calls')
+    storage = store.status() if hasattr(store, 'status') else {}
+    storage.update(unavailable_kinds=unavailable,
+                   cached_fallback=bool(unavailable) or storage.get('cached_fallback', False))
     return {
         **workspace,
         'company_analysis_library': company_analysis_library,
@@ -2139,12 +2163,12 @@ def state():
         'checker_configured': bool(checker_key),
         'checker_model': checker_model if checker_key else '',
         'financials_ai_configured': bool(os.environ.get('FINANCIALS_LLM_API_KEY', '').strip()),
-        'calls_used': len(all_records('model_calls')),
+        'calls_used': None if 'model_calls' in unavailable else len(model_calls),
         'unresolved_search_batch_limit': unresolved_search_batch_limit(),
         'max_tiers': engine.MAX_TIERS,
         'calculation_version': engine.VERSION,
         'max_children': engine.MAX_CHILDREN,
-        'storage': store.status() if hasattr(store, 'status') else {}
+        'storage': storage
     }
 
 # ── Demo ──────────────────────────────────────────────────────────────────────
@@ -2300,9 +2324,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond({'error': 'Invalid username or password'}, 401)
                 redis.delete(attempts_key)
                 if not source_cache.is_hydrated():
-                    sources = store.all_records('sources')
-                    if not source_cache.warm_sources(sources):
-                        raise RuntimeError('Could not load sources into Redis')
+                    try:
+                        sources = store.all_records('sources')
+                    except supabase_store.SupabaseError as error:
+                        if not error.retryable:
+                            raise
+                    else:
+                        if not source_cache.warm_sources(sources):
+                            raise RuntimeError('Could not load sources into Redis')
                 token = app_auth.create()
                 secure = '; Secure' if origin.startswith('https://') else ''
                 return self.respond({'ok': True}, extra={'Set-Cookie': f'{app_auth.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800{secure}'})

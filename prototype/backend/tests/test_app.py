@@ -14,6 +14,49 @@ from test_fixtures import MemoryStore, demo
 from test_source_cache import FakeRedis
 
 class AppFlowTest(unittest.TestCase):
+    def test_uncached_history_does_not_block_cached_workspace(self):
+        from cached_store import CachedStore
+        from supabase_store import SupabaseStore, SupabaseError
+        import source_cache
+        permanent = self.app.store
+        self.app.store = CachedStore()
+        with patch('source_discovery.recover_stale_runs'), patch.object(self.app, 'refresh_worker_sources'):
+            with patch.object(SupabaseStore, 'all_records', side_effect=permanent.all_records):
+                before = self.app.state()
+            for kind in ('search_runs', 'model_calls', 'reviews', 'runs'):
+                source_cache._connection().delete(self.app.store._key(kind, ['all']))
+            queue = Mock()
+            queue.merge.side_effect = lambda rows: rows + [{'id': 'local-job', 'status': 'running'}]
+            with patch('source_jobs.Queue', return_value=queue), \
+                    patch.object(self.app.store, 'FRESH_SECONDS', -1), \
+                    patch.object(SupabaseStore, 'all_records', side_effect=SupabaseError('HTTP 402', retryable=True)):
+                after = self.app.state()
+        for kind in ('themes', 'companies', 'cases', 'snapshots', 'portfolio_imports'):
+            self.assertEqual(after[kind], before[kind])
+        self.assertEqual(after['search_runs'], [{'id': 'local-job', 'status': 'running'}])
+        self.assertIsNone(after['calls_used'])
+        self.assertEqual(set(after['storage']['unavailable_kinds']),
+                         {'search_runs', 'model_calls', 'reviews', 'runs'})
+
+    def test_cold_cache_outage_returns_explicitly_incomplete_workspace(self):
+        from cached_store import CachedStore
+        from supabase_store import SupabaseStore, SupabaseError
+        self.app.store = CachedStore()
+        with patch('source_discovery.recover_stale_runs'), patch.object(self.app, 'refresh_worker_sources'), \
+                patch.object(SupabaseStore, 'all_records', side_effect=SupabaseError('HTTP 402', retryable=True)):
+            result = self.app.state()
+        self.assertTrue(result['storage']['cached_fallback'])
+        self.assertIn('companies', result['storage']['unavailable_kinds'])
+        self.assertIn('sources', result['storage']['unavailable_kinds'])
+        self.assertFalse(self.app.source_cache.is_hydrated())
+
+    def test_workspace_does_not_suppress_permission_errors(self):
+        from supabase_store import SupabaseError
+        with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app.store, 'all_records', side_effect=SupabaseError('HTTP 403')):
+            with self.assertRaisesRegex(SupabaseError, '403'):
+                self.app.state()
+
     def test_workspace_survives_supabase_outage_after_redis_is_populated(self):
         from cached_store import CachedStore
         from supabase_store import SupabaseStore, SupabaseError

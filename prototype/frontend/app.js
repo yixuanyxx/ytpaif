@@ -668,7 +668,12 @@ async function run(fn, loadingMsg) {
 async function refresh() {
   state = await apiGet('state');
   const storageNotice = $('#storage-notice');
-  if (storageNotice) storageNotice.hidden = !state.storage?.cached_fallback;
+  if (storageNotice) {
+    storageNotice.hidden = !state.storage?.cached_fallback;
+    storageNotice.textContent = state.storage?.unavailable_kinds?.length
+      ? 'Supabase is unavailable. Some saved data could not be loaded. Showing available cached data; restore Supabase access to load the rest. Changes require a successful Supabase save.'
+      : 'Supabase is unavailable. Showing cached data, which may be outdated. Changes require a successful Supabase save.';
+  }
   // Source documents are deliberately loaded only when a company row is opened.
   loadedSourceCompanyIds.clear();
   updateSidebarBadges();
@@ -4508,6 +4513,16 @@ async function viewDashboard() {
     'Thematic exposure across portfolio and benchmark');
 
   const demoMode = dashboardDemoEnabled;
+  const missingDashboardData = (state.storage?.unavailable_kinds || []).filter(kind =>
+    ['themes', 'companies', 'cases', 'snapshots', 'portfolio_imports'].includes(kind));
+  if (!demoMode && missingDashboardData.length) {
+    $('#page-content').innerHTML = `<div class="empty-state" role="status">
+      <h3>Saved portfolio data is temporarily unavailable</h3>
+      <p>Supabase is unavailable and the saved themes, holdings or analysis needed for this dashboard have not all been cached. Restore Supabase access, then reload the page.</p>
+      <p>Your saved portfolio has not been deleted.</p>
+    </div>`;
+    return;
+  }
   const demo = demoMode ? dashboardDemoFixture() : null;
   const themes = demoMode ? [demo.theme] : (state.themes || []).filter(t => t.approved);
   const portfolios = state.portfolio_imports || [];

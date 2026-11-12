@@ -35,6 +35,36 @@ function setup() {
     run:code=>vm.runInContext(code,context)};
 }
 
+test('Missing saved dashboard data shows unavailable rather than an empty portfolio', async()=>{
+  const {run,node,context}=setup();
+  context.fetch=async()=>{throw new Error('Dashboard should not be requested');};
+  run("selectedDashboardThemeId='saved-theme'; selectedDashboardPortfolioId='saved-portfolio'; state.storage={unavailable_kinds:['snapshots']}");
+  await run('viewDashboard()');
+  assert.match(node('#page-content').innerHTML,/temporarily unavailable/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/No portfolio snapshot/);
+  assert.equal(run('selectedDashboardThemeId'),'saved-theme');
+  assert.equal(run('selectedDashboardPortfolioId'),'saved-portfolio');
+});
+
+test('Missing search history does not block dashboard rendering', async()=>{
+  const {run,node}=setup();
+  run("state.storage={unavailable_kinds:['search_runs','model_calls','reviews','runs']}");
+  await run('viewDashboard()');
+  assert.match(node('#page-content').innerHTML,/Select a theme first/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/temporarily unavailable/);
+});
+
+test('Incomplete storage warning clears after recovery', async()=>{
+  const {run,node}=setup();
+  run("apiGet=async()=>({companies:[],cases:[],storage:{cached_fallback:true,unavailable_kinds:['search_runs']}})");
+  await run('refresh()');
+  assert.equal(node('#storage-notice').hidden,false);
+  assert.match(node('#storage-notice').textContent,/Some saved data could not be loaded/);
+  run("apiGet=async()=>({companies:[],cases:[],storage:{cached_fallback:false,unavailable_kinds:[]}})");
+  await run('refresh()');
+  assert.equal(node('#storage-notice').hidden,true);
+});
+
 test('Portfolio format rejects missing and duplicate template headers', async()=>{
   for (const headers of [
     ['Company notes','Portfolio wt','Reference wt','SEDOL'],
