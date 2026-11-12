@@ -156,7 +156,13 @@ def all_records(kind, deadline=None):
     records = store.all_records(kind, deadline=deadline)
     if kind == 'search_runs':
         import source_jobs
-        return source_jobs.Queue().merge(records)
+        # The queue worker may hold SQLite's write lock while checkpointing a
+        # long financial/analysis job.  Workspace startup must never wait its
+        # normal 10 seconds just to merge optional local run status.
+        try:
+            return source_jobs.Queue(timeout=0.1, ensure_schema=False).merge(records)
+        except sqlite3.Error:
+            return records
     return records
 
 def source_link_records():
@@ -2177,7 +2183,9 @@ def state():
                 return source_jobs.Queue().merge([])
             return []
 
-    source_discovery.recover_stale_runs(sys.modules[__name__])
+    # The server starts its detached supervisor at process startup.  Starting
+    # or schema-checking it again on every workspace request can block behind
+    # an active job's SQLite transaction.
     exposure_config = exposure_llm_config()
     key = exposure_config['key']
     model = exposure_config['model']

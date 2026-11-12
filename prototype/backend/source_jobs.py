@@ -21,8 +21,11 @@ def database_path():
 
 
 class Queue:
-    def __init__(self, path=None):
+    def __init__(self, path=None, timeout=10, ensure_schema=True):
         self.path = Path(path or database_path())
+        self.timeout = timeout
+        if not ensure_schema:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs
@@ -40,7 +43,7 @@ class Queue:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=10)
+        db = sqlite3.connect(self.path, timeout=self.timeout)
         try:
             with db:
                 yield db
