@@ -3853,7 +3853,6 @@ async function viewAnalysis() {
                         <span class="badge ${hasSrc ? 'neutral' : 'amber'}" style="font-size:11px">
                           ${sourceCount} docs
                         </span>
-                        ${analysisState ? `<div style="margin-top:4px;font-size:10.5px">${statusDot(analysisState.color, analysisState.error ? `${analysisState.label}: ${analysisState.error}` : analysisState.label)}</div>` : ''}
                       </td>
                       <td style="text-align:center;font-weight:700" data-exposure-basis="${exposure.basis}" title="${exposureTitle}">
                         ${pt}

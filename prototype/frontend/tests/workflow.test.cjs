@@ -1015,7 +1015,8 @@ test('Per-stock Analyse queues a fresh theme exposure and confidence calculation
     {theme_id:'theme-a',portfolio_id:'core',company_ids:['a'],force_recalculate:true});
   assert.equal(run("trackedAnalysisRuns.has('analysis-a')"),true);
   assert.match(node('#page-actions').innerHTML,/Analysis queued.*0 of 1 companies processed/);
-  assert.match(node('#page-content').innerHTML,/Analysis queued/);
+  assert.match(node('#page-content').innerHTML,/3 docs/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Analysis queued/);
 });
 test('Bulk analysis queues source-ready and source-less companies that need exposure',async()=>{
   const {run,node,context} = setup();
@@ -1156,7 +1157,8 @@ test('Active batch locks only its companies and lets an unrelated failed stock r
   const retryStart=html.indexOf('Retry stock');
   const retryRow=html.slice(retryStart,html.indexOf('</tr>',retryStart));
   assert.match(node('#page-actions').innerHTML,/Analysing companies/);
-  assert.match(activeRow,/Analysing…[\s\S]*data-analysis-run-id="active-a"[\s\S]*Cancel/);
+  assert.match(activeRow,/data-analysis-run-id="active-a"[\s\S]*Cancel/);
+  assert.doesNotMatch(activeRow,/Analysing…/);
   assert.match(retryRow,/Retry →/);
   assert.doesNotMatch(retryRow,/onclick="rerunCompanyAnalysis\('b', this\)" disabled/);
   await run("window.rerunCompanyAnalysis('b', {disabled:false,textContent:'Retry →'})");
@@ -1225,7 +1227,8 @@ test('Top and per-stock cancel controls target the jobs they describe',async()=>
   assert.equal(run('companyCancelRequest.path'),'analysis/cancel');
   assert.deepEqual(JSON.parse(run('JSON.stringify(companyCancelRequest.data)')),{id:'bulk-running',company_id:'a'});
   assert.equal(run("state.search_runs.find(run=>run.id==='bulk-running').status"),'running');
-  assert.match(node('#page-content').innerHTML,/Bulk stock[\s\S]*Analysis cancelled[\s\S]*Retry →/);
+  assert.match(node('#page-content').innerHTML,/Bulk stock[\s\S]*Retry →/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Bulk stock[\s\S]*Analysis cancelled/);
 });
 test('Cancelling a singleton stock run stops its spinner immediately',async()=>{
   const {run,node,context}=setup();
@@ -1251,7 +1254,7 @@ test('Cancelling a singleton stock run stops its spinner immediately',async()=>{
   assert.match(node('#page-actions').innerHTML,/Analysis cancelled/);
   assert.doesNotMatch(node('#notice-area').innerHTML,/remaining batch is still running/);
 });
-test('A cancelled rerun keeps the previous result and shows the cancellation status',async()=>{
+test('A cancelled rerun keeps the previous result without adding a row status message',async()=>{
   const {run,node}=setup();
   run(`state.companies=[{id:'a',name:'TSMC'}];
     state.themes=[{id:'theme-a',theme_name:'AI theme',approved:true}];
@@ -1264,7 +1267,8 @@ test('A cancelled rerun keeps the previous result and shows the cancellation sta
     state.ai_configured=true; selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/TSMC[\s\S]*Analysis cancelled[\s\S]*40\.0%[\s\S]*dot-green[\s\S]*Retry →/);
+  assert.match(html,/TSMC[\s\S]*40\.0%[\s\S]*dot-green[\s\S]*Retry →/);
+  assert.doesNotMatch(html,/Analysis cancelled/);
 });
 test('Analysis cancellation errors restore the clicked control',async()=>{
   const {run,node,context}=setup();
@@ -1302,7 +1306,8 @@ test('Analysis polling refreshes terminal results and keeps per-company failures
   assert.equal(run('statusRequest'),'analysis/run?id=analysis-poll');
   assert.match(node('#page-actions').innerHTML,/Analysis finished incompletely.*2 of 2 companies processed.*1 failed/);
   assert.match(node('#page-content').innerHTML,/30\.0%/);
-  assert.match(node('#page-content').innerHTML,/Analysis failed: Provider quota reached[\s\S]*Retry →/);
+  assert.match(node('#page-content').innerHTML,/Retry →/);
+  assert.doesNotMatch(node('#page-content').innerHTML,/Analysis failed: Provider quota reached/);
   assert.equal(run("trackedAnalysisRuns.has('analysis-poll')"),false);
 });
 test('Analysis jobs are excluded from source-search polling and use an analysis-specific timeout message',async()=>{
