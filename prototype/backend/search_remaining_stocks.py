@@ -6,8 +6,8 @@
    - Stopping condition: At least 2 sources per source type for each stock OR 5 minutes limit.
    - Prioritize listed websites first (Yahoo Finance, Reuters, Bloomberg, Capital IQ, official IR / exchange filings), then remainder of web.
    - Token minimization: only search for stocks and source types that have fewer than 2 sources.
-2. Save all sources in the Redis temporary database.
-3. Sync / copy over Redis database to Supabase permanent storage.
+2. Save all source metadata in the Redis primary datastore.
+3. Retry the queued Supabase backup.
 """
 import hashlib
 import json
@@ -28,9 +28,9 @@ from app import load_env
 load_env()
 
 import source_cache
-import supabase_store
+from cached_store import CachedStore
 
-store = supabase_store.SupabaseStore()
+store = CachedStore()
 
 SIX_TYPES = (
     'annual_report',

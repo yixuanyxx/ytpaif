@@ -1,12 +1,12 @@
-"""Redis temporary data storage for source-link metadata.
+"""Redis primary indexes for source-link metadata.
 
-Supabase is the permanent data storage.
-Redis is the temporary data storage during the active user session.
+Supabase is the asynchronous backup for application records.
+Uploaded binary documents remain separate objects in Supabase Storage.
 
 Flow:
-1. When PM opens the app -> copy Supabase database over to Redis database.
-2. During the session -> save all new/updated sources to Redis.
-3. When PM logs out or closes browser tab -> copy Redis database to Supabase.
+1. Restore a cold Redis source index from the durable Redis record snapshot.
+2. Save all new/updated source metadata to Redis without expiry.
+3. Retry pending Supabase backups during normal activity and logout.
 """
 import json
 import hashlib
@@ -306,10 +306,7 @@ def get_source_summaries():
 
 
 def copy_redis_to_supabase(store, force_all=False, raise_errors=False):
-    """Copy all sources from Redis temporary storage to Supabase permanent storage.
-    
-    Triggered when PM logs out or closes browser tab.
-    """
+    """Retry queued Redis source-metadata backups to Supabase."""
     client = _connection()
     if not client:
         return 0

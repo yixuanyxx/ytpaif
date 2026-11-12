@@ -5131,10 +5131,10 @@ function exportMindmap() {
   notice('Mind map exported as SVG.', 'info');
 }
 
-// ── Redis Temporary to Supabase Permanent Storage Sync ──────────────────────
+// ── Retry pending Supabase backups, then log out ────────────────────────────
 window.syncToSupabase = async function() {
   try {
-    notice('Copying temporary Redis data to Supabase permanent storage…', 'info');
+    notice('Retrying pending Supabase backups…', 'info');
     await api('logout', {});
     window.location.assign('/login');
   } catch (err) {

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import uuid
 import re
 import socket
+import sqlite3
 import zipfile
 import engine
 import financials
@@ -48,7 +49,7 @@ def load_env():
                     v = v.strip().strip('\'"')
                     if v:
                         os.environ.setdefault(k, v)
-            except Exception:
+            except (OSError, sqlite3.Error):
                 pass
     if 'GEMINI_API_KEY' in os.environ and 'LLM_API_KEY' not in os.environ:
         os.environ['LLM_API_KEY'] = os.environ['GEMINI_API_KEY']
@@ -158,7 +159,7 @@ def all_records(kind):
     return records
 
 def source_link_records():
-    """Load source metadata from Redis temporary storage before falling back to Supabase."""
+    """Load source metadata from the Redis primary index."""
     return source_cache.load_or_warm(lambda: store.all_records('sources'))
 
 def get(kind, rid):
@@ -2036,7 +2037,7 @@ def source_search_cancel(d):
     return {'search_run': source_discovery.cancel(sys.modules[__name__], d)}
 
 def sync_to_supabase(d=None):
-    """Copy over Redis database to Supabase permanent data storage."""
+    """Retry pending Supabase record backups."""
     count = source_cache.copy_redis_to_supabase(store)
     if hasattr(store, 'sync_backup'):
         count += store.sync_backup()
@@ -2187,7 +2188,14 @@ def _dispatch(path, d):
         result = record_recovery.restore(store, d.get('csv', ''))
         if 'sources' in result['counts']:
             source_cache.warm_sources(store.all_records('sources'), force=True)
-            mark_source_updates_seen()
+            try:
+                mark_source_updates_seen()
+            except Exception:
+                # The source-job cursor is only an optimisation. The complete
+                # Redis source snapshot is already durable at this point, so a
+                # transient local queue error must not turn a successful
+                # recovery into an ambiguous failure that users retry.
+                pass
         return result
     if path in ('/api/sync', '/api/sync_to_supabase', '/api/logout'): return sync_to_supabase(d)
     if path in ('/api/stock/sources', '/api/company/sources'): return stock_sources(d)

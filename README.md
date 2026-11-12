@@ -44,11 +44,11 @@ Excel parsing runs in the browser using the bundled SheetJS CE 0.20.3 library in
 
 ## Implementation
 
-- `backend/app.py`: local Python HTTP server, API, Supabase persistence, source extraction, AI integration, review records, and ZIP exports.
+- `backend/app.py`: local Python HTTP server, API, Redis persistence with Supabase backup, source extraction, AI integration, review records, and ZIP exports.
 - `backend/engine.py`: deterministic taxonomy validation, revenue exposure calculations, and portfolio aggregation.
 - `frontend/index.html`, `frontend/app.js`, `frontend/style.css`: frontend and workflow views.
 
-Runtime records and uploaded source files are stored in Supabase. The backend requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`; credentials stay server-side. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
+Runtime application records are stored in persistent Redis and backed up asynchronously to Supabase. Uploaded source and portfolio files remain separate binary objects in private Supabase Storage buckets; Redis stores only their metadata. The backend requires `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) in `prototype/backend/.env`; credentials stay server-side. Exposure bounds describe evidence and assumptions; rubric scores are non-probabilistic.
 Login sessions and login rate limits also require a reachable shared Redis server. Configure `REDIS_URL` or run Redis on localhost before starting the backend; otherwise login returns 503 even if the username and password are correct.
 
 Redis is the primary record datastore. Reads use existing Redis records without periodic Supabase refreshes; cold datasets restore from Supabase when available. Record writes and deletes commit atomically to Redis together with pending backup operations. Background backups retry on subsequent activity (at most once every 30 seconds), including after process restarts. Supabase failures do not reject Redis edits. The sync endpoint also attempts pending backups. Missing historical data is reported separately and never presented as a complete empty portfolio.
@@ -64,7 +64,7 @@ An authority portal is used only to locate filings: a source is saved only after
 ## Prototype limitations
 
 - Discovery is authority-first for annual reports and regulatory filings. A filing is only saved after its direct document link, issuer, date, reporting period and access rules are verified; upload the official PDF/TXT when an authority's viewer cannot be read automatically.
-- Confirming a portfolio saves companies and a portfolio/benchmark snapshot, including the benchmark name. Both sets of weights must total 100%. Editable draft rows remain in browser memory during the session; saved snapshots persist in Supabase.
+- Confirming a portfolio saves companies and a portfolio/benchmark snapshot in Redis, including the benchmark name, and queues their Supabase backups. Both sets of weights must total 100%. Editable draft rows remain in browser memory during the session.
 - Country and sector are saved with company records and portfolio imports.
 - No multi-user authentication or encrypted storage.
 
@@ -96,7 +96,7 @@ Exposure extraction and classification default to Gemini (`gemini-3.8-flash`). T
 2. Ensure the existing `themes`, `portfolios`, and `source_documents` tables and private `source-documents` / `portfolio-files` buckets are configured.
 3. If a database error reports `42P01` for `public.audit_events`, remove any remaining public-schema trigger that references the obsolete audit table. This does not remove analyst reviews or the AI Checker feature.
 
-The app uses Supabase for company, source and analysis records. The local SQLite source-job queue must be kept on persistent storage when running on a server. New portfolio imports keep their original Excel file in the private `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in `portfolios`.
+The app uses Redis for company, source and analysis records and Supabase as their backup. The local SQLite source-job queue must be kept on persistent storage when running on a server. New portfolio imports keep their original Excel file in the private Supabase `portfolio-files` bucket and store its filename, storage path, size, content type, and checksum in the Redis portfolio record. A record export does not contain those original binary files; back up the private `source-documents` and `portfolio-files` buckets separately.
 
 ## Tests
 

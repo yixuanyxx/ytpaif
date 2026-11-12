@@ -60,6 +60,18 @@ class RecordRecoveryTest(unittest.TestCase):
         record_recovery.restore(self.store, first)  # Safe retry does not duplicate rows.
         result = record_recovery.restore(self.store, export('sources', [{'id': 'b'}], 2))
         self.assertEqual(result['counts'], {'sources': 2})
+        self.assertTrue(result['staged']['sources']['committed'])
+        self.assertEqual({r['id'] for r in self.store.all_records('sources')}, {'a', 'b'})
+
+    def test_completed_batches_are_safe_to_replay_without_recommitting(self):
+        first = export('sources', [{'id': 'a'}], 2)
+        second = export('sources', [{'id': 'b'}], 2)
+        record_recovery.restore(self.store, first)
+        record_recovery.restore(self.store, second)
+        with patch.object(self.store, '_save', side_effect=AssertionError('must not recommit')):
+            replay = record_recovery.restore(self.store, first)
+        self.assertEqual(replay['counts'], {})
+        self.assertTrue(replay['staged']['sources']['committed'])
         self.assertEqual({r['id'] for r in self.store.all_records('sources')}, {'a', 'b'})
 
     def test_invalid_exports_cannot_change_redis(self):

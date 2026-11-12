@@ -58,6 +58,7 @@ def restore(store, text):
     archive = directory() / ('export-' + str(time.time_ns()) + '.json')
     save_file(archive, datasets)
     staged = {}
+    completed_stages = {}
     metadata = {r['kind']: r for r in csv.DictReader(io.StringIO(text.lstrip('\ufeff')))}
     for kind in list(datasets):
         total = int(metadata[kind].get('total_count') or len(datasets[kind]))
@@ -77,11 +78,21 @@ def restore(store, text):
                 if len(stage['rows']) > total:
                     raise ValueError('Recovery batch exceeds expected total')
                 save_file(path, stage)
-                staged[kind] = {'received': len(stage['rows']), 'expected': total}
+                staged[kind] = {
+                    'received': len(stage['rows']), 'expected': total,
+                    'committed': bool(stage.get('committed')),
+                }
+                if stage.get('committed'):
+                    # A browser retry may replay every row after the complete
+                    # dataset was already committed. Validate the replay above,
+                    # but do not rewrite and re-index the full library per row.
+                    del datasets[kind]
+                    continue
                 if len(stage['rows']) < total:
                     del datasets[kind]
                 else:
                     datasets[kind] = list(stage['rows'].values())
+                    completed_stages[kind] = (path, stage)
     counts = {}
     for kind, exported in datasets.items():
         with store._locked(client, kind):
@@ -103,6 +114,11 @@ def restore(store, text):
             store._save(kind, ['all'], records)
             store._fallback.discard(kind)
             counts[kind] = len(records)
+            if kind in completed_stages:
+                path, stage = completed_stages[kind]
+                stage['committed'] = True
+                save_file(path, stage)
+                staged[kind]['committed'] = True
     persistence = {'disk_recovery_copy': True}
     try:
         if client.config_get('appendonly').get('appendonly') != 'yes':
