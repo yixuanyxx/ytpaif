@@ -1336,7 +1336,7 @@ test('Per-stock rerun uses the latest case result in the queue',async()=>{
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
   assert.match(html,/1 companies · 1 cases · 1 awaiting review/);
-  assert.match(html,/90\.0%[\s\S]*dot-green[\s\S]*Source reliability: Green[\s\S]*Re-run →/);
+  assert.match(html,/90\.0%[\s\S]*dot-green[\s\S]*AI confidence: Green[\s\S]*Re-run →/);
   assert.doesNotMatch(html,/20\.0%/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%/);
 });
@@ -1367,10 +1367,10 @@ test('Calculate Exposure confidence uses source provenance, not classification c
     selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/Source reliability is not available/);
-  assert.doesNotMatch(html,/dot-green|Source reliability: Green/);
+  assert.match(html,/AI confidence is not available/);
+  assert.doesNotMatch(html,/dot-green|AI confidence: Green/);
 });
-test('Calculate Exposure shows a point percentage and colour-only source-reliability dots',async()=>{
+test('Calculate Exposure shows a point percentage and colour-only AI confidence dots',async()=>{
   const {run,node} = setup();
   run(`state.companies=[
       {id:'a',name:'TSMC',sedol:'6889106'},
@@ -1389,10 +1389,10 @@ test('Calculate Exposure shows a point percentage and colour-only source-reliabi
     selectedDashboardThemeId='theme-a'; selectedDashboardPortfolioId='core';`);
   await run('viewAnalysis()');
   const html=node('#page-content').innerHTML;
-  assert.match(html,/50\.0%[\s\S]*dot-green[\s\S]*Source reliability: Green/);
-  assert.match(html,/25\.0%[\s\S]*dot-amber[\s\S]*Source reliability: Amber/);
-  assert.match(html,/75\.0%[\s\S]*dot-red[\s\S]*Source reliability: Red/);
-  assert.doesNotMatch(html,/Source reliability[\s\S]*>\d+%<\/span>/);
+  assert.match(html,/50\.0%[\s\S]*dot-green[\s\S]*AI confidence: Green/);
+  assert.match(html,/25\.0%[\s\S]*dot-amber[\s\S]*AI confidence: Amber/);
+  assert.match(html,/75\.0%[\s\S]*dot-red[\s\S]*AI confidence: Red/);
+  assert.doesNotMatch(html,/AI confidence[\s\S]*>\d+%<\/span>/);
   assert.doesNotMatch(html,/High · 92%|Med · 70%|Low · 35%|0\.0% –/);
 });
 test('Calculate Exposure never presents an upper bound as a comparable percentage',async()=>{
@@ -1425,7 +1425,7 @@ test('Calculate Exposure never presents an upper bound as a comparable percentag
   assert.match(row('Legacy point'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Missing estimate'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Missing estimate'),/No calculated exposure is available because the analysis did not complete/);
-  assert.match(row('Missing estimate'),/Source reliability is not available">—<\/span>/);
+  assert.match(row('Missing estimate'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:null,lower:0,upper:.5666},exposure_percent:null}))")),
     {value:null,basis:'not_calculated'});
   assert.deepEqual(JSON.parse(run("JSON.stringify(caseExposureValue({estimate:{point:0,upper:.5966,calculation_status:'undetermined'}}))")),
@@ -1458,14 +1458,14 @@ test('Calculate Exposure does not show failed or pending analyses as zero exposu
   const row=name=>html.slice(html.indexOf(name),html.indexOf('</tr>',html.indexOf(name)));
   assert.match(row('Failed search'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Failed search'),/after targeted web search/);
-  assert.match(row('Failed search'),/Source reliability is not available">—<\/span>/);
+  assert.match(row('Failed search'),/AI confidence is not available">—<\/span>/);
   assert.match(row('Failed search'),/Retry →/);
   assert.match(row('Active search'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Active search'),/Exposure is being calculated/);
-  assert.match(row('Active search'),/Source reliability is not available">—<\/span>/);
+  assert.match(row('Active search'),/AI confidence is not available">—<\/span>/);
   assert.match(row('Not analysed'),/data-exposure-basis="not_calculated"[\s\S]*—/);
   assert.match(row('Not analysed'),/Exposure has not been calculated yet/);
-  assert.match(row('Not analysed'),/Source reliability is not available">—<\/span>/);
+  assert.match(row('Not analysed'),/AI confidence is not available">—<\/span>/);
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue(null))')),
     {value:null,basis:'not_calculated'});
   assert.deepEqual(JSON.parse(run('JSON.stringify(caseExposureValue({estimate:{point:3,upper:4}}))')),
