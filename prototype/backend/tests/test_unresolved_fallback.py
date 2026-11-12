@@ -69,7 +69,7 @@ class UnresolvedFallbackTest(unittest.TestCase):
         row = first['results'][0]
         self.assertEqual(row['fallback_status'], 'not_found')
         self.assertTrue(row['fallback_search_attempted'])
-        self.assertEqual(row['case']['estimate']['point'], 0)
+        self.assertIsNone(row['case']['estimate']['point'])
         self.assertEqual(row['case']['fallback_web_search']['diagnostics']['gemini_search_calls'], 0)
         self.assertEqual(len([c for c in self.app.all_records('cases') if c['company_id'] == 'ACME']), 1)
 
@@ -90,7 +90,7 @@ class UnresolvedFallbackTest(unittest.TestCase):
             initial = self.app.analyze_all(self._request(allow_unresolved_web_search=False))
         self.assertEqual(initial['errors'], [])
         self.assertEqual(initial['results'][0]['fallback_status'], 'deferred')
-        self.assertEqual(initial['results'][0]['case']['estimate']['point'], 0)
+        self.assertIsNone(initial['results'][0]['case']['estimate']['point'])
 
         quote = 'Dedicated AI chip revenue USD 18 million.'
         web_source = {'id': 'web-numeric', 'company_id': 'ACME', 'source_type': 'earnings_call',
