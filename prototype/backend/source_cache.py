@@ -11,12 +11,48 @@ Flow:
 import json
 import hashlib
 import os
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urldefrag
 
 FRESH_FOR_SECONDS = 3600  # Stays active for session
 _client = None
+
+# Named background tasks currently in flight, guarded by _background_lock so
+# a request thread never starts a second overlapping hydration/backup run.
+# This is an in-process guard: the deployed app is a single Python process
+# (ThreadingHTTPServer), so it is sufficient here; a multi-process deployment
+# would need a distributed (Redis-backed) lock instead.
+_background_lock = threading.Lock()
+_background_tasks_running = set()
+
+
+def run_once_in_background(name, fn):
+    """Run `fn` in a daemon thread unless a task named `name` is already
+    running, in which case this is a no-op. Always returns immediately --
+    callers must never block on datastore work from the request thread.
+
+    Returns True once a run is in flight (just started, or already running
+    elsewhere). A failed run clears its own name on exit, so the very next
+    call retries it.
+    """
+    with _background_lock:
+        if name in _background_tasks_running:
+            return True
+        _background_tasks_running.add(name)
+
+    def _run():
+        try:
+            fn()
+        except Exception as e:
+            print(f"Background task '{name}' failed: {e}", flush=True)
+        finally:
+            with _background_lock:
+                _background_tasks_running.discard(name)
+
+    threading.Thread(target=_run, daemon=True, name=f'bg-{name}').start()
+    return True
 
 _SOURCE_FIELDS = (
     'id', 'company_id', 'company_name', 'bloomberg_ticker', 'sedol',
@@ -341,6 +377,42 @@ def copy_redis_to_supabase(store, force_all=False, raise_errors=False):
         if raise_errors:
             raise
         return 0
+
+
+def start_background_hydration(load_sources, on_success=None):
+    """Start at most one Supabase -> Redis source hydration in the background.
+
+    `load_sources` must raise (rather than return a degraded empty result) if
+    the underlying read could not get real data, so a Supabase outage never
+    gets mistaken for "there are no sources" and marked hydrated. On success,
+    `on_success` runs after the Redis copy completes (e.g. to advance the
+    worker-update cursor), matching the previous synchronous behaviour.
+
+    Returns True once a hydration is in flight (just started, or already
+    running); never blocks on the Supabase/Redis work itself.
+    """
+    def _hydrate():
+        sources = load_sources()
+        if not copy_supabase_to_redis(sources, force=True):
+            return  # copy_supabase_to_redis already logged the failure.
+        if on_success:
+            on_success()
+
+    return run_once_in_background('source-hydration', _hydrate)
+
+
+def start_background_backup_retry(store):
+    """Start at most one Redis -> Supabase backup retry in the background.
+
+    Used by both the periodic `/api/sync` beacon and `/api/logout`, neither
+    of which may block their request on a slow or unavailable Supabase.
+    """
+    def _retry():
+        copy_redis_to_supabase(store)
+        if hasattr(store, 'sync_backup'):
+            store.sync_backup()
+
+    return run_once_in_background('backup-retry', _retry)
 
 
 # Backwards compatibility helpers

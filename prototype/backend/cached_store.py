@@ -66,7 +66,7 @@ class CachedStore(SupabaseStore):
                 rows[action['id']] = action['record']
         return rows
 
-    def all_records(self, kind):
+    def all_records(self, kind, deadline=None):
         self._table(kind)
         client = self._client()
         # Redis SET replaces the complete snapshot atomically. Once present it
@@ -77,11 +77,13 @@ class CachedStore(SupabaseStore):
         if complete is None:
             # A cold cache can require disk recovery or a Supabase hydration.
             # Only that exceptional path needs cross-process serialization.
+            # `deadline` only applies to this fall-through Supabase read: once
+            # warm (the common case, above), reads never touch Supabase at all.
             with self._locked(client, kind):
                 complete = self._cached(kind, ['all'])
                 if complete is None:
                     try:
-                        rows = super().all_records(kind)
+                        rows = super().all_records(kind, deadline=deadline)
                     except SupabaseError as error:
                         if not error.retryable:
                             raise

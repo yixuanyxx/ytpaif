@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import zipfile
 from urllib.error import HTTPError
 from test_fixtures import MemoryStore, demo
-from test_source_cache import FakeRedis
+from test_source_cache import FakeRedis, wait_for_background_task
 
 class AppFlowTest(unittest.TestCase):
     def test_uncached_history_does_not_block_cached_workspace(self):
@@ -23,6 +23,10 @@ class AppFlowTest(unittest.TestCase):
         with patch('source_discovery.recover_stale_runs'), patch.object(self.app, 'refresh_worker_sources'):
             with patch.object(SupabaseStore, 'all_records', side_effect=permanent.all_records):
                 before = self.app.state()
+                # A cold source cache now hydrates in the background; wait for
+                # it so the next state() call below sees a deterministic,
+                # already-warm cache rather than racing the hydration thread.
+                wait_for_background_task('source-hydration')
             for kind in ('search_runs', 'model_calls', 'reviews', 'runs'):
                 source_cache._connection().delete(self.app.store._key(kind, ['all']))
             queue = Mock()
@@ -65,6 +69,10 @@ class AppFlowTest(unittest.TestCase):
         with patch('source_discovery.recover_stale_runs'), patch.object(self.app, 'refresh_worker_sources'):
             with patch.object(SupabaseStore, 'all_records', side_effect=permanent.all_records):
                 before = self.app.state()
+                # Let the background hydration triggered by the cold-cache
+                # state() call above finish before relying on the cache being
+                # warm for the next call.
+                wait_for_background_task('source-hydration')
             with patch.object(self.app.store, 'FRESH_SECONDS', -1), \
                     patch.object(SupabaseStore, 'all_records', side_effect=SupabaseError('HTTP 402', retryable=True)):
                 after = self.app.state()
@@ -167,13 +175,97 @@ class AppFlowTest(unittest.TestCase):
         cache.assert_called_once()
         self.assertEqual(results['results'][0]['url'], source['url'])
 
-    def test_opening_the_app_warms_redis_with_supabase_source_records(self):
+    def test_opening_the_app_starts_background_hydration_without_blocking(self):
+        """A cold source cache must never make /api/state fetch the full
+        source table synchronously: that previously blocked the request for
+        as long as a slow/unavailable Supabase took to answer every page.
+        Hydration instead starts in the background, and this request returns
+        immediately with an explicit, retryable 'sources unavailable' flag."""
+        real_all_records = self.app.store.all_records
+
+        def guarded(kind, *args, **kwargs):
+            if kind == 'sources':
+                raise AssertionError('state() must not read sources synchronously')
+            return real_all_records(kind, *args, **kwargs)
+
         with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app, 'refresh_worker_sources'), \
                 patch.object(self.app.source_cache, 'is_hydrated', return_value=False), \
-                patch.object(self.app.source_cache, 'warm_sources') as warm:
+                patch.object(self.app.source_cache, 'start_background_hydration', return_value=True) as start, \
+                patch.object(self.app.store, 'all_records', side_effect=guarded):
+            result = self.app.state()
+        start.assert_called_once()
+        loader = start.call_args.args[0]
+        self.assertTrue(callable(loader))
+        self.assertIn('sources', result['storage']['unavailable_kinds'])
+
+    def test_warm_source_cache_read_is_unchanged(self):
+        """Normal warm-cache behaviour (the common case) must be unaffected:
+        it still reads sources through the existing Redis-primary helper and
+        never touches the new background-hydration path."""
+        with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app, 'refresh_worker_sources'), \
+                patch.object(self.app.source_cache, 'is_hydrated', return_value=True), \
+                patch.object(self.app.source_cache, 'start_background_hydration') as start, \
+                patch.object(self.app, 'source_link_records', return_value=[{'id': 'warm-source'}]) as warm_read:
+            result = self.app.state()
+        start.assert_not_called()
+        warm_read.assert_called_once()
+        self.assertNotIn('sources', result['storage']['unavailable_kinds'])
+
+    def test_state_returns_promptly_when_source_hydration_would_otherwise_hang(self):
+        """Proves /api/state does not block on the hydration work itself: a
+        loader that would hang forever if ever called synchronously must
+        never be invoked from state()'s own thread."""
+        def never_call_me():
+            raise AssertionError('the hydration loader must only run in the background thread')
+
+        captured = {}
+
+        def fake_start_background_hydration(load_sources, on_success=None):
+            captured['loader'] = load_sources
+            return True
+
+        with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app, 'refresh_worker_sources'), \
+                patch.object(self.app.source_cache, 'is_hydrated', return_value=False), \
+                patch.object(self.app.source_cache, 'start_background_hydration',
+                             side_effect=fake_start_background_hydration):
+            result = self.app.state()
+        # state() handed over a loader without ever calling it itself.
+        self.assertIn('loader', captured)
+        self.assertIn('sources', result['storage']['unavailable_kinds'])
+
+    def test_cold_sources_hydration_failure_is_reported_as_unavailable_not_empty(self):
+        """The loader state() builds for the background hydrator must raise
+        (not silently return an empty list) when the underlying Supabase read
+        degraded, so a transient outage never gets hydrated into Redis as
+        'this company has zero sources'."""
+        from supabase_store import SupabaseError
+        captured = {}
+
+        def fake_start_background_hydration(load_sources, on_success=None):
+            captured['loader'] = load_sources
+            return True
+
+        class FallbackMarkingStore:
+            _fallback = {'sources'}
+
+            def all_records(self, kind, deadline=None):
+                return []  # CachedStore's own degraded-outage fallback shape.
+
+        with patch('source_discovery.recover_stale_runs'), \
+                patch.object(self.app, 'refresh_worker_sources'), \
+                patch.object(self.app.source_cache, 'is_hydrated', return_value=False), \
+                patch.object(self.app.source_cache, 'start_background_hydration',
+                             side_effect=fake_start_background_hydration), \
+                patch.object(self.app, 'store', FallbackMarkingStore()):
             self.app.state()
-        warm.assert_called_once()
-        self.assertTrue(all('evidence' in source for source in warm.call_args.args[0]))
+            # Invoke the captured loader while `app.store` is still the
+            # degraded fixture: state() builds this closure over the module
+            # global `store`, so it must be checked before the patch unwinds.
+            with self.assertRaises(SupabaseError):
+                captured['loader']()
 
     def test_worker_saves_refresh_this_process_cache(self):
         import source_jobs
@@ -193,7 +285,7 @@ class AppFlowTest(unittest.TestCase):
         summaries = []
         summary = {'company_id': 'company', 'count': 1, 'types': {'annual_report': 1}}
 
-        def read_records(kind):
+        def read_records(kind, deadline=None):
             if kind == 'search_runs':
                 summaries.append(summary)
                 return [run]

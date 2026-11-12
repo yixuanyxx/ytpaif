@@ -18,6 +18,44 @@ class SupabasePersistenceTest(unittest.TestCase):
                         supabase_store.request('/rest/v1/themes')
                 self.assertEqual(caught.exception.retryable, status in (402, 408, 429, 500, 503))
 
+    def test_all_records_exceeding_its_overall_deadline_fails_fast_and_retryable(self):
+        """A bounded deadline must stop a large multi-page read from running
+        indefinitely, on top of the per-request timeout/retries already
+        inside `request()`. Each full (1000-row) page keeps the loop going;
+        the deadline check -- not page emptiness -- is what ends this read."""
+        full_page = [{'payload': {'id': str(i)}} for i in range(1000)]
+
+        def send(request, **kwargs):
+            return io.BytesIO(json.dumps(full_page).encode())
+
+        # One call for the loop's start time, then one per deadline check:
+        # two pages fetched within budget, the third exceeds it.
+        clock = iter([0, 0, 5, 20])
+        with patch.object(supabase_store, 'urlopen', side_effect=send), \
+                patch.object(supabase_store.time, 'monotonic', side_effect=lambda: next(clock)):
+            with self.assertRaisesRegex(supabase_store.SupabaseError,
+                                        r'exceeded its 10s overall deadline after fetching 2000 row'):
+                caught = None
+                try:
+                    supabase_store.SupabaseStore().all_records('themes', deadline=10)
+                except supabase_store.SupabaseError as error:
+                    caught = error
+                    raise
+        self.assertTrue(caught.retryable)
+
+    def test_all_records_without_a_deadline_is_unbounded_as_before(self):
+        """deadline=None (the default) must behave exactly as before this
+        change: a read that would exceed any particular deadline still
+        completes normally when none is given."""
+        page = [{'payload': {'id': '1'}}]
+
+        def send(request, **kwargs):
+            return io.BytesIO(json.dumps(page).encode())
+
+        with patch.object(supabase_store, 'urlopen', side_effect=send), \
+                patch.object(supabase_store.time, 'monotonic', side_effect=AssertionError('must not check a deadline')):
+            self.assertEqual(supabase_store.SupabaseStore().all_records('themes'), [{'id': '1'}])
+
     def test_company_records_filters_the_library_on_the_server(self):
         with patch.object(supabase_store, 'request', return_value=[{'payload': {'id': 'source'}}]) as send:
             rows = supabase_store.SupabaseStore().company_records('sources', 'company_abc')

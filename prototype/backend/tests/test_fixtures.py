@@ -5,7 +5,7 @@ class MemoryStore:
     def __init__(self):
         self.records = {}
 
-    def all_records(self, kind):
+    def all_records(self, kind, deadline=None):
         return list(self.records.get(kind, {}).values())
 
     def find(self, kind, record_id):

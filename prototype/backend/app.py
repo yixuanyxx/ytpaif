@@ -152,8 +152,8 @@ def put_many(kind, records):
         source_cache.save_sources_to_redis(records)
     return saved
 
-def all_records(kind):
-    records = store.all_records(kind)
+def all_records(kind, deadline=None):
+    records = store.all_records(kind, deadline=deadline)
     if kind == 'search_runs':
         import source_jobs
         return source_jobs.Queue().merge(records)
@@ -2072,11 +2072,16 @@ def source_search_cancel(d):
     return {'search_run': source_discovery.cancel(sys.modules[__name__], d)}
 
 def sync_to_supabase(d=None):
-    """Retry pending Supabase record and file backups."""
-    count = source_cache.copy_redis_to_supabase(store)
-    if hasattr(store, 'sync_backup'):
-        count += store.sync_backup()
-    return {'status': 'ok', 'synced': count, 'message': f'Copied {count} pending records and files to Supabase'}
+    """Retry pending Supabase record and file backups in the background.
+
+    This is also fired via a fire-and-forget `navigator.sendBeacon` on every
+    page unload, so it must always return immediately rather than blocking
+    the request on however long a slow/unavailable Supabase takes to answer.
+    """
+    started = source_cache.start_background_backup_retry(store)
+    return {'status': 'ok', 'started': started,
+            'message': ('Backup retry running in the background.' if started else
+                        'Backup retry unavailable: Redis primary store is unreachable.')}
 
 _source_update_cursor = 0
 
@@ -2138,6 +2143,14 @@ def stock_sources(d):
                       (t_clean and s.get('bloomberg_ticker', '').strip().upper() in (t_clean, t_base, f'{t_base} EQUITY'))]
     return {'sources': sources, 'ticker': ticker, 'company_id': cid, 'count': len(sources)}
 
+# Bounds the *total* time any single /api/state table read may spend waiting
+# on Supabase (on top of the per-page timeout/retries already inside
+# supabase_store.request). Only applies to a cold Redis cache -- a warm
+# cache never calls Supabase at all. Keeps a slow/unavailable datastore from
+# blocking the whole workspace load; the caller degrades to a cached/empty
+# result and an explicit `unavailable` flag instead of hanging.
+STATE_READ_DEADLINE_SECONDS = 12
+
 def state():
     import source_discovery
     import sys
@@ -2145,7 +2158,7 @@ def state():
 
     def read(kind, loader=None):
         try:
-            rows = loader() if loader else all_records(kind)
+            rows = loader() if loader else all_records(kind, deadline=STATE_READ_DEADLINE_SECONDS)
             if kind in getattr(store, '_fallback', set()):
                 unavailable.append(kind)
             return rows
@@ -2170,10 +2183,26 @@ def state():
     # to the browser during workspace startup. Individual company documents are
     # fetched from Redis only when the PM opens that company's source row.
     if not source_cache.is_hydrated():
-        source_links = read('sources', lambda: store.all_records('sources'))
-        if 'sources' not in unavailable:
-            if source_cache.warm_sources(source_links):
-                mark_source_updates_seen()
+        # A cold source cache must never block this request on a full,
+        # synchronous Supabase fetch of every source row (potentially tens of
+        # thousands of rows): that previously made /api/state hang for as
+        # long as Supabase took to answer. Hydration instead runs in the
+        # background (single-flight across concurrent requests), and this
+        # request returns immediately with whatever is already in Redis plus
+        # an explicit, retryable "sources unavailable" flag -- never a silent
+        # empty/complete source list.
+        def _load_sources_for_hydration():
+            records = store.all_records('sources')
+            if 'sources' in getattr(store, '_fallback', set()):
+                # CachedStore already swallowed a retryable Supabase outage
+                # into an empty list; treat that as "could not hydrate" so we
+                # never mark the cache hydrated with zero real sources.
+                raise supabase_store.SupabaseError(
+                    'Supabase sources temporarily unavailable', retryable=True)
+            return records
+        source_cache.start_background_hydration(_load_sources_for_hydration, on_success=mark_source_updates_seen)
+        source_links = source_cache.get_all_sources_from_redis() or []
+        unavailable.append('sources')
     else:
         source_links = read('sources', source_link_records)
     refresh_worker_sources()
@@ -2401,8 +2430,10 @@ class Handler(BaseHTTPRequestHandler):
             if not app_auth.valid(self.headers.get('Cookie', '')):
                 return self.respond({'error': 'Login required'}, 401)
             if path == '/api/logout':
-                count = source_cache.copy_redis_to_supabase(store, raise_errors=True)
-                result = {'status': 'ok', 'synced': count}
+                # Logging out must always succeed promptly; it must not wait
+                # on a slow/unavailable Supabase to retry pending backups.
+                started = source_cache.start_background_backup_retry(store)
+                result = {'status': 'ok', 'started': started}
                 app_auth.revoke(self.headers.get('Cookie', ''))
                 return self.respond(result, extra={'Set-Cookie': f'{app_auth.COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'})
             if path == '/api/export':

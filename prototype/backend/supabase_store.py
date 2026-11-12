@@ -154,13 +154,24 @@ class SupabaseStore:
         except KeyError:
             raise ValueError(f'No Supabase table configured for {kind}') from None
 
-    def _rows(self, kind, filters=None):
+    def _rows(self, kind, filters=None, deadline=None):
+        """`deadline`, in seconds, bounds the *total* time across every page of
+        a multi-page read -- on top of the per-request timeout/retries inside
+        `request()` -- so a large or currently-slow table can't hold a caller
+        (e.g. a user-facing request) indefinitely. None means unbounded,
+        preserving existing behaviour for callers that need a complete read
+        regardless of how long it takes (e.g. offline export tooling)."""
         table = self._table(kind)
         query = {'select': 'payload,created_at', 'order': 'created_at.asc,id.asc'}
         query.update(filters or {})
         result = []
         offset = 0
+        start = time.monotonic() if deadline is not None else None
         while True:
+            if deadline is not None and time.monotonic() - start > deadline:
+                raise SupabaseError(
+                    f'Supabase read of {kind} exceeded its {deadline:.0f}s overall deadline '
+                    f'after fetching {len(result)} row(s)', retryable=True)
             page = request('/rest/v1/' + table, query=query, headers={
                 'Range-Unit': 'items',
                 'Range': f'{offset}-{offset + 999}',
@@ -172,12 +183,12 @@ class SupabaseStore:
                 return result
             offset += len(page)
 
-    def all_records(self, kind):
-        return self._rows(kind)
+    def all_records(self, kind, deadline=None):
+        return self._rows(kind, deadline=deadline)
 
-    def company_records(self, kind, company_id):
+    def company_records(self, kind, company_id, deadline=None):
         """Read one company's records without downloading the entire library."""
-        return self._rows(kind, {'company_id': 'eq.' + str(company_id)})
+        return self._rows(kind, {'company_id': 'eq.' + str(company_id)}, deadline=deadline)
 
     def find(self, kind, record_id):
         if not record_id:
