@@ -566,8 +566,20 @@ async function api(path, data, { timeoutMs = 30000 } = {}) {
   }
 }
 
-async function apiGet(path) {
-  const r = await fetch('/api/' + path);
+async function apiGet(path, { timeoutMs = 20000 } = {}) {
+  const controller = typeof AbortController === 'undefined' ? null : new AbortController();
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let r;
+  try {
+    r = await fetch('/api/' + path, { signal: controller?.signal });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Workspace loading took too long. Please reload; the server may be temporarily unavailable.');
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
   let json;
   try {
     json = await r.json();

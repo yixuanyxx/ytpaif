@@ -2150,15 +2150,21 @@ def stock_sources(d):
 # blocking the whole workspace load; the caller degrades to a cached/empty
 # result and an explicit `unavailable` flag instead of hanging.
 STATE_READ_DEADLINE_SECONDS = 12
+STATE_TOTAL_DEADLINE_SECONDS = 15
 
 def state():
     import source_discovery
     import sys
     unavailable = []
+    started_at = time.monotonic()
 
     def read(kind, loader=None):
+        remaining = STATE_TOTAL_DEADLINE_SECONDS - (time.monotonic() - started_at)
+        if remaining <= 0:
+            unavailable.append(kind)
+            return []
         try:
-            rows = loader() if loader else all_records(kind, deadline=STATE_READ_DEADLINE_SECONDS)
+            rows = loader() if loader else all_records(kind, deadline=min(STATE_READ_DEADLINE_SECONDS, remaining))
             if kind in getattr(store, '_fallback', set()):
                 unavailable.append(kind)
             return rows
@@ -2201,14 +2207,18 @@ def state():
                     'Supabase sources temporarily unavailable', retryable=True)
             return records
         source_cache.start_background_hydration(_load_sources_for_hydration, on_success=mark_source_updates_seen)
-        source_links = source_cache.get_all_sources_from_redis() or []
+        source_links = None
         unavailable.append('sources')
     else:
-        source_links = read('sources', source_link_records)
-    refresh_worker_sources()
-    if source_cache.is_hydrated():
-        source_links = source_cache.get_all_sources_from_redis() or source_links
-    source_summaries = source_cache.get_source_summaries()
+        # Workspace startup must not read and JSON-decode the complete source
+        # library. Full documents are loaded only for a company row the user
+        # opens; the startup payload uses this compact cached summary instead.
+        source_links = None
+    source_summaries = source_cache.cached_source_summaries()
+    if source_summaries is None:
+        source_cache.start_background_summary_refresh()
+        source_summaries = []
+    source_cache.run_once_in_background('source-update-refresh', refresh_worker_sources)
     workspace = {k: read(k) for k in
                  ('themes', 'companies', 'cases', 'reviews', 'runs', 'snapshots', 'portfolio_imports')}
     workspace['themes'] = [{**theme, 'analysis_scope_key': analysis_library.scope_key(theme)}

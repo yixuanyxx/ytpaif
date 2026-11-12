@@ -199,18 +199,21 @@ class AppFlowTest(unittest.TestCase):
         self.assertTrue(callable(loader))
         self.assertIn('sources', result['storage']['unavailable_kinds'])
 
-    def test_warm_source_cache_read_is_unchanged(self):
-        """Normal warm-cache behaviour (the common case) must be unaffected:
-        it still reads sources through the existing Redis-primary helper and
-        never touches the new background-hydration path."""
+    def test_warm_workspace_uses_compact_source_summary(self):
+        """A warm workspace must not deserialize the full source library."""
+        summary = [{'company_id': 'company', 'count': 1, 'types': {'annual_report': 1}}]
         with patch('source_discovery.recover_stale_runs'), \
                 patch.object(self.app, 'refresh_worker_sources'), \
                 patch.object(self.app.source_cache, 'is_hydrated', return_value=True), \
                 patch.object(self.app.source_cache, 'start_background_hydration') as start, \
-                patch.object(self.app, 'source_link_records', return_value=[{'id': 'warm-source'}]) as warm_read:
+                patch.object(self.app.source_cache, 'cached_source_summaries', return_value=summary), \
+                patch.object(self.app.source_cache, 'start_background_summary_refresh') as refresh_summary, \
+                patch.object(self.app, 'source_link_records') as full_source_read:
             result = self.app.state()
         start.assert_not_called()
-        warm_read.assert_called_once()
+        refresh_summary.assert_not_called()
+        full_source_read.assert_not_called()
+        self.assertEqual(result['source_summaries'], summary)
         self.assertNotIn('sources', result['storage']['unavailable_kinds'])
 
     def test_state_returns_promptly_when_source_hydration_would_otherwise_hang(self):
@@ -295,7 +298,7 @@ class AppFlowTest(unittest.TestCase):
                 patch.object(self.app, 'all_records', side_effect=read_records), \
                 patch.object(self.app, 'refresh_worker_sources'), \
                 patch.object(self.app.source_cache, 'is_hydrated', return_value=True), \
-                patch.object(self.app.source_cache, 'get_source_summaries', side_effect=lambda: list(summaries)):
+                patch.object(self.app.source_cache, 'cached_source_summaries', side_effect=lambda: list(summaries)):
             state = self.app.state()
         self.assertEqual(state['search_runs'], [run])
         self.assertEqual(state['source_summaries'], [summary])

@@ -69,6 +69,51 @@ def _key(name):
     return f'{prefix}:source-cache:{name}'
 
 
+def _summaries(sources):
+    """Build compact source-library summaries without retaining document text."""
+    counts = {}
+    coverage = {}
+    financial_sources = {}
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    for source in sources:
+        company_id = source.get('company_id')
+        source_type = source.get('source_type')
+        if not company_id or not source_type:
+            continue
+        by_type = counts.setdefault(company_id, {})
+        by_type[source_type] = by_type.get(source_type, 0) + 1
+        facts = [
+            {**fact, 'publication_date': fact.get('publication_date') or source.get('publication_date', '')}
+            for fact in (source.get('financial_facts') or [])
+            if fact.get('metric') in ('market_cap', 'revenue') and fact.get('display')
+        ]
+        if facts:
+            financial_sources.setdefault(company_id, []).append({'id': source.get('id', ''), 'financial_facts': facts})
+        if source.get('link_status') == 'verified' and source.get('url') and source.get('publication_date', '9999') <= today:
+            year = str(source.get('period', ''))
+            identity = hashlib.sha256(urldefrag(source['url'])[0].rstrip('/').encode()).hexdigest()
+            coverage.setdefault(company_id, {}).setdefault(source_type, {}).setdefault(year, set()).add((identity, source.get('publication_date', '9999')))
+    return [
+        {'company_id': company_id, 'types': types, 'count': sum(types.values()),
+         'verified': {kind: {year: sorted(urls) for year, urls in years.items()}
+                      for kind, years in coverage.get(company_id, {}).items()},
+         'financial_sources': financial_sources.get(company_id, [])}
+        for company_id, types in counts.items()
+    ]
+
+
+def cached_source_summaries():
+    """Return the precomputed summary snapshot, never loading every source."""
+    client = _connection()
+    if not client:
+        return None
+    try:
+        value = client.get(_key('summaries'))
+        return json.loads(value) if value else None
+    except Exception:
+        return None
+
+
 def _record(source):
     """Normalize source record: document evidence and files stay in Supabase."""
     record = {}
@@ -173,6 +218,7 @@ def copy_supabase_to_redis(sources, force=False):
                 if base_t and base_t != ticker:
                     pipe.sadd(_key(f'ticker:{base_t}'), source_id)
 
+        pipe.set(_key('summaries'), json.dumps(_summaries(sources), separators=(',', ':')))
         pipe.set(_key('hydrated-at'), str(time.time()))
         pipe.execute()
         return True
@@ -188,6 +234,9 @@ def save_sources_to_redis(sources, mark_pending=True):
         return False
     try:
         pipe = client.pipeline(transaction=True)
+        # A batch update can alter counts, coverage, and financial facts. Do
+        # not rebuild the complete library in the request that saved it.
+        pipe.delete(_key('summaries'))
         for source in sources:
             record = _record(source)
             source_id = record.get('id')
@@ -254,6 +303,7 @@ def delete_source(source_id):
         if not record:
             return False
         pipe = client.pipeline(transaction=True)
+        pipe.delete(_key('summaries'))
         pipe.delete(_key(f'source:{source_id}'))
         pipe.srem(_key('ids'), source_id)
         pipe.srem(_key('pending_sync_ids'), source_id)
@@ -307,38 +357,21 @@ def get_source_summaries():
     Financial facts are included without document text so the source-library
     table can show market data before its expandable document rows are loaded.
     """
+    cached = cached_source_summaries()
+    if cached is not None:
+        return cached
     sources = get_all_sources_from_redis()
-    if sources is None:
-        return []
-    counts = {}
-    coverage = {}
-    financial_sources = {}
-    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-    for source in sources:
-        company_id = source.get('company_id')
-        source_type = source.get('source_type')
-        if not company_id or not source_type:
-            continue
-        by_type = counts.setdefault(company_id, {})
-        by_type[source_type] = by_type.get(source_type, 0) + 1
-        facts = [
-            {**fact, 'publication_date': fact.get('publication_date') or source.get('publication_date', '')}
-            for fact in (source.get('financial_facts') or [])
-            if fact.get('metric') in ('market_cap', 'revenue') and fact.get('display')
-        ]
-        if facts:
-            financial_sources.setdefault(company_id, []).append({'id': source.get('id', ''), 'financial_facts': facts})
-        if source.get('link_status') == 'verified' and source.get('url') and source.get('publication_date', '9999') <= today:
-            year = str(source.get('period', ''))
-            identity = hashlib.sha256(urldefrag(source['url'])[0].rstrip('/').encode()).hexdigest()
-            coverage.setdefault(company_id, {}).setdefault(source_type, {}).setdefault(year, set()).add((identity, source.get('publication_date', '9999')))
-    return [
-        {'company_id': company_id, 'types': types, 'count': sum(types.values()),
-         'verified': {kind: {year: sorted(urls) for year, urls in years.items()}
-                      for kind, years in coverage.get(company_id, {}).items()},
-         'financial_sources': financial_sources.get(company_id, [])}
-        for company_id, types in counts.items()
-    ]
+    return _summaries(sources) if sources is not None else []
+
+
+def start_background_summary_refresh():
+    """Rebuild a missing summary snapshot without delaying workspace startup."""
+    def _refresh():
+        sources = get_all_sources_from_redis()
+        client = _connection()
+        if sources is not None and client:
+            client.set(_key('summaries'), json.dumps(_summaries(sources), separators=(',', ':')))
+    return run_once_in_background('source-summary-refresh', _refresh)
 
 
 def copy_redis_to_supabase(store, force_all=False, raise_errors=False):
