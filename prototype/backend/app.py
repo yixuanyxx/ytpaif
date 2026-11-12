@@ -2229,11 +2229,25 @@ def state():
     workspace['cases'] = [{**case, 'analysis_reusable': case['id'] in reusable_case_ids}
                           for case in workspace['cases']]
     model_calls = read('model_calls')
-    storage = store.status() if hasattr(store, 'status') else {}
-    storage['document_files'] = file_store.status()
-    unavailable = sorted(set(unavailable) | set(storage.get('stale_kinds', [])))
-    storage.update(unavailable_kinds=unavailable,
-                   cached_fallback=bool(unavailable) or storage.get('cached_fallback', False))
+    # ``CachedStore.status()`` scans every pending-outbox prefix and starts a
+    # backup worker.  ``file_store.status()`` performs another Redis scan.
+    # Both are maintenance work, not workspace data; doing them in this
+    # request can make a degraded Redis connection block the entire page.
+    # Preserve the UI's degraded-state contract using the read results above.
+    stale_kinds = sorted(getattr(store, '_fallback', set()))
+    unavailable = sorted(set(unavailable) | set(stale_kinds))
+    storage = {
+        'configured': bool(supabase_store.configuration()[0]),
+        'primary': 'redis',
+        'pending': None,
+        'stale_kinds': stale_kinds,
+        'cached_fallback': bool(unavailable),
+        'unavailable_kinds': unavailable,
+        'document_files': {
+            'primary': 'filesystem',
+            'pending_backup': None,
+        },
+    }
     return {
         **workspace,
         'company_analysis_library': company_analysis_library,
