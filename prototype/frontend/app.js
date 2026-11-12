@@ -495,20 +495,20 @@ function sourceConfidenceDot(light, basis) {
   const color = ['green', 'amber', 'red'].includes(normalized) ? normalized : 'grey';
   const label = color === 'grey' ? 'not calculated' : normalized;
   const detail = basis || (color === 'grey'
-    ? 'Re-run the company analysis to calculate source confidence.'
-    : `AI confidence: ${label}.`);
-  return `<span class="status-indicator" title="${esc(detail)}"><span class="status-dot-sm confidence-light-dot dot-${color}" role="img" aria-label="AI confidence: ${esc(label)}"></span></span>`;
+    ? 'Re-run the company analysis to assess source reliability.'
+    : `Source reliability: ${label}.`);
+  return `<span class="status-indicator" title="${esc(detail)}"><span class="status-dot-sm confidence-light-dot dot-${color}" role="img" aria-label="Source reliability: ${esc(label)}"></span></span>`;
 }
 function confidencePill(caseRecord) {
-  if (!caseRecord) return '<span title="AI confidence is not available">—</span>';
+  if (!caseRecord) return '<span title="Source reliability is not available">—</span>';
   const aliases = {green:'green', high:'green', yellow:'amber', amber:'amber', medium:'amber', red:'red', low:'red'};
   // The Step 4 light represents source agreement/provenance only. Do not
   // substitute classification confidence, which measures a different thing.
   const color = aliases[String(caseRecord.source_confidence_light || '').toLowerCase()];
-  if (!color) return '<span title="AI confidence is not available">—</span>';
+  if (!color) return '<span title="Source reliability is not available">—</span>';
   const label = color === 'green' ? 'Green' : color === 'amber' ? 'Amber' : 'Red';
-  const title = caseRecord.source_confidence_basis || `${label} AI confidence`;
-  return `<span class="status-indicator" title="${esc(title)}"><span class="status-dot-sm confidence-light-dot dot-${color}" role="img" aria-label="AI confidence: ${label}"></span></span>`;
+  const title = caseRecord.source_confidence_basis || `${label} source reliability`;
+  return `<span class="status-indicator" title="${esc(title)}"><span class="status-dot-sm confidence-light-dot dot-${color}" role="img" aria-label="Source reliability: ${label}"></span></span>`;
 }
 function reviewStatusBadge(s) {
   if (s === 'approved')    return badge('Approved', 'green');
@@ -3814,7 +3814,7 @@ async function viewAnalysis() {
                   <th>Company</th>
                   <th style="text-align:center">Sources</th>
                   <th style="text-align:center">Exposure</th>
-                  <th style="text-align:center">AI confidence</th>
+                  <th style="text-align:center">Source reliability</th>
                   <th style="text-align:right">Action</th>
                 </tr>
               </thead>
