@@ -38,7 +38,7 @@ rollback() {
 trap rollback ERR
 git checkout --detach "$sha"
 prototype/backend/.venv/bin/pip install -r prototype/backend/requirements.txt
-restart_marker=/var/lib/ytpaif/redis-restart-verified-20261112
+restart_marker=/var/lib/ytpaif/redis-restart-verified-20261112-v2
 if [[ ! -e "$restart_marker" ]]; then
   verify_redis_restart
   install -d -m 700 /var/lib/ytpaif
