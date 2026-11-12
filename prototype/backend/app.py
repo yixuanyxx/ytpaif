@@ -2038,6 +2038,8 @@ def source_search_cancel(d):
 def sync_to_supabase(d=None):
     """Copy over Redis database to Supabase permanent data storage."""
     count = source_cache.copy_redis_to_supabase(store)
+    if hasattr(store, 'sync_backup'):
+        count += store.sync_backup()
     return {'status': 'ok', 'synced': count, 'message': f'Copied {count} source documents from Redis to Supabase'}
 
 _source_update_cursor = 0
@@ -2107,7 +2109,10 @@ def state():
 
     def read(kind, loader=None):
         try:
-            return loader() if loader else all_records(kind)
+            rows = loader() if loader else all_records(kind)
+            if kind in getattr(store, '_fallback', set()):
+                unavailable.append(kind)
+            return rows
         except supabase_store.SupabaseError as error:
             if not error.retryable:
                 raise
@@ -2150,6 +2155,7 @@ def state():
                           for case in workspace['cases']]
     model_calls = read('model_calls')
     storage = store.status() if hasattr(store, 'status') else {}
+    unavailable = sorted(set(unavailable) | set(storage.get('stale_kinds', [])))
     storage.update(unavailable_kinds=unavailable,
                    cached_fallback=bool(unavailable) or storage.get('cached_fallback', False))
     return {

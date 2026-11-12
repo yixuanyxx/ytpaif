@@ -59,7 +59,7 @@ test('Incomplete storage warning clears after recovery', async()=>{
   run("apiGet=async()=>({companies:[],cases:[],storage:{cached_fallback:true,unavailable_kinds:['search_runs']}})");
   await run('refresh()');
   assert.equal(node('#storage-notice').hidden,false);
-  assert.match(node('#storage-notice').textContent,/Some saved data could not be loaded/);
+  assert.match(node('#storage-notice').textContent,/historical backup data could not be restored/);
   run("apiGet=async()=>({companies:[],cases:[],storage:{cached_fallback:false,unavailable_kinds:[]}})");
   await run('refresh()');
   assert.equal(node('#storage-notice').hidden,true);

@@ -70,7 +70,8 @@ class AppFlowTest(unittest.TestCase):
                 after = self.app.state()
         for kind in ('themes', 'companies', 'cases', 'reviews', 'runs', 'snapshots', 'portfolio_imports'):
             self.assertEqual(after[kind], before[kind])
-        self.assertTrue(after['storage']['cached_fallback'])
+        self.assertEqual(after['storage']['primary'], 'redis')
+        self.assertFalse(after['storage']['cached_fallback'])
 
     def test_general_ai_falls_back_and_records_the_model_used(self):
         output = json.dumps({'choices': [{'message': {'content': '{}'}}]}).encode()
@@ -239,6 +240,9 @@ class AppFlowTest(unittest.TestCase):
                 self.app.portfolio_import({'name': name, 'rows': []})
 
     def setUp(self):
+        backup = patch('cached_store.CachedStore.request_backup')
+        backup.start()
+        self.addCleanup(backup.stop)
         budget_dir = tempfile.TemporaryDirectory()
         self.addCleanup(budget_dir.cleanup)
         budget_env = patch.dict(os.environ, {'GEMINI_BUDGET_DB': str(Path(budget_dir.name) / 'gemini-budget.sqlite')})
