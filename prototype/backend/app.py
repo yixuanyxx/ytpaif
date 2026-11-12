@@ -1078,15 +1078,42 @@ def analyze(d):
                     _validate_extracted_revenue(retried_facts, theme['nodes'], selected)
                     facts = retried_facts
                 except ValueError as retry_error:
-                    # A denominator without revenue segments cannot support a
-                    # thematic numerator.  Do not persist that as 0%: fail the
-                    # company cleanly so it remains retryable with better
-                    # documents/evidence.
-                    raise ValueError(
-                        'Revenue segments could not be reconciled from the supplied documents; '
-                        'no exposure was saved. Upload or select a filing with a revenue-segment breakdown before retrying. '
-                        + str(retry_error)
-                    ) from None
+                    # Full company reconciliation is preferable, but it is not
+                    # required to calculate the requested ratio.  Recover by
+                    # extracting only non-overlapping revenue segments that
+                    # plausibly map to the approved taxonomy, retaining the
+                    # consolidated denominator.  This avoids turning a
+                    # difficult "Other revenue" reconciliation into either a
+                    # false 0% or a discarded thematic numerator.
+                    thematic_facts = llm(
+                        'Extract a usable thematic-revenue numerator from the supplied passages. '
+                        'Return the complete facts object only: total_revenue, denominator_evidence_ids, period, currency, scale, units and unresolved_questions. '
+                        'Use the supported consolidated external total revenue as the denominator. '
+                        'In units, include ONLY non-overlapping disclosed revenue segments whose activities may map to the supplied taxonomy through names, definitions, examples, keywords, synonyms or similar phrases. '
+                        'Do not include the consolidated total as a unit, do not include unrelated segments merely to reconcile the company total, and do not combine overlapping segment tables. '
+                        'A partial thematic numerator is acceptable: the deterministic calculation divides its mapped segment revenue by the total denominator. '
+                        'Every unit requires unit_id, activity, revenue, period, currency, scale, external=true, evidence_ids and overlap_group. '
+                        'If no disclosed thematic-revenue segment can be identified, return units as an empty list and explain why in unresolved_questions. '
+                        'Never invent revenue amounts, shares or evidence IDs.',
+                        {'prior_validation_error': str(retry_error), 'rejected_facts': rejected_facts,
+                         'company': company, 'taxonomy': engine.nest_taxonomy(theme['nodes']),
+                         'reporting_period': theme.get('reporting_period'), 'passages': passages},
+                        run_rec, provider_kind='exposure')
+                    put('model_outputs', {'id': ident('output'), 'run_id': run_rec['id'],
+                                           'stage': 'thematic_segment_recovery', 'output': thematic_facts})
+                    try:
+                        if not isinstance(thematic_facts, dict) or not isinstance(thematic_facts.get('units'), list):
+                            raise ValueError('Thematic segment recovery did not return revenue units')
+                        _validate_extracted_revenue(thematic_facts, theme['nodes'], selected)
+                        facts = thematic_facts
+                    except ValueError as thematic_error:
+                        # A denominator without a thematic segment numerator
+                        # must remain unavailable and retryable, never 0%.
+                        raise ValueError(
+                            'Revenue segments could not be derived from the supplied documents; '
+                            'no exposure was saved. Upload or select a filing with a revenue-segment breakdown before retrying. '
+                            + str(thematic_error)
+                        ) from None
         run_rec['status'] = 'classifying'
         put('runs', run_rec)
         # A searchable node is any leaf, including a leaf that sits above the
@@ -1104,7 +1131,7 @@ def analyze(d):
             'Copy unit_id values exactly from facts.units. Never create a unit for the consolidated denominator or invent additional unit IDs. '
             'Process the deepest leaves first, then leaves at higher tiers. At each tier consider all node details together to distinguish their meanings. '
             'Match using names, definitions, examples, keywords, synonyms and similar phrases in the supplied documents. '
-            'Set whole_unit_supported=true ONLY if cited evidence establishes that the whole revenue unit qualifies for its matched leaves. '
+            'Set whole_unit_supported=true when cited evidence establishes that the disclosed segment activity itself maps to its matched taxonomy leaf; do not require a separate source-level confidence score. '
             'For every direct thematic revenue unit, return the best evidence-grounded point allocation: allocation shares are fractions of that extracted unit, not percentages of total company revenue. '
             'For a broad mixed revenue unit, estimate only the qualifying fraction; for a segment whose activity directly matches a taxonomy leaf, count the whole disclosed segment. '
             'Use disclosed for an explicit share, derived for arithmetic from cited figures, estimated only for a bounded and documented assumption grounded in cited evidence, and insufficient_evidence when no defensible share exists. '

@@ -987,6 +987,36 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(result['estimate']['calculation_status'], 'partial')
         self.assertTrue(any(row['stage'] == 'extraction_retry' for row in self.app.all_records('model_outputs')))
 
+    def test_thematic_segment_recovery_calculates_without_full_company_reconciliation(self):
+        source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
+        evidence = source['evidence'][0]['evidence_id']
+        rejected = {'total_revenue': 100, 'denominator_evidence_ids': [evidence], 'period': 'FY2025',
+                    'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': []}
+        malformed_repair = {'total_revenue': 100, 'period': 'FY2025'}
+        invalid_retry = {'total_revenue': 100, 'denominator_evidence_ids': [evidence], 'period': 'FY2025',
+                         'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': []}
+        thematic = {'total_revenue': 100, 'denominator_evidence_ids': [evidence], 'period': 'FY2025',
+                    'currency': 'USD', 'scale': 'millions', 'unresolved_questions': [], 'units': [{
+                        'unit_id': 'ai-segment', 'activity': 'AI hardware', 'revenue': 35,
+                        'period': 'FY2025', 'currency': 'USD', 'scale': 'millions', 'external': True,
+                        'evidence_ids': [evidence], 'overlap_group': None}]}
+        classification = {'classifications': [{
+            'unit_id': 'ai-segment', 'node_ids': ['compute_fab'], 'relationship_type': 'direct',
+            'rationale': 'Disclosed AI hardware segment', 'scope_check': 'Within the approved theme',
+            'evidence_ids': [evidence], 'unresolved_questions': [], 'whole_unit_supported': True,
+            'revenue_attribution_quote': source['evidence'][0]['passage']}],
+            'confidence_band': 'medium', 'confidence_percent': None,
+            'confidence_basis': 'One cited revenue segment supports the mapping.'}
+        with patch.object(self.app, 'llm', side_effect=[
+                rejected, malformed_repair, invalid_retry, thematic, classification]) as model:
+            result = self.app.analyze({'theme_id': self.theme['id'], 'company_id': 'DEMO_A',
+                                       'evidence_ids': [evidence]})
+        self.assertEqual(model.call_count, 5)
+        self.assertAlmostEqual(result['estimate']['point'], .35)
+        self.assertEqual(result['estimate']['point_basis'], 'segment_estimate')
+        self.assertTrue(any(row['stage'] == 'thematic_segment_recovery'
+                            for row in self.app.all_records('model_outputs')))
+
     def test_extraction_validation_rejects_internal_sales_before_classification(self):
         source = next(s for s in self.app.all_records('sources') if s['company_id'] == 'DEMO_A')
         evidence = source['evidence'][0]['evidence_id']
