@@ -122,30 +122,33 @@ function sourceSearchCompletionSummary(search) {
     ? `AI source search reached its ${(search.time_limit_seconds || 300) / 60}-minute limit. ${count} documents saved.${ending}`
     : `AI source search is over. ${count} documents saved.${ending}`;
 }
+function notifyFinishedSourceSearch(search) {
+  if (!search || $('#alert-modal')?.open) return false;
+  if (search.job_type === 'financials') {
+    showAlert(financialLookupSummary(search),
+      search.status === 'cancelled' ? 'Financial lookup cancelled' : 'Financial lookup finished',
+      { searchCompletion: true });
+    return true;
+  }
+  const count = search.results_count || 0;
+  if (search.status === 'failed') {
+    showAlert(sourceSearchFailureSummary(search), 'Source search failed', { searchCompletion: true });
+  } else if (search.status === 'cancelled') {
+    showAlert(`AI source search stopped. ${count} documents were saved before it stopped.`, 'Source search stopped', { searchCompletion: true });
+  } else {
+    const title = search.completion_reason === 'time_limit_reached' ? 'Source search timed out' : 'Source search finished';
+    showAlert(sourceSearchCompletionSummary(search), title, { searchCompletion: true });
+  }
+  return true;
+}
 function notifyFinishedSourceSearches() {
-  if ($('#alert-modal')?.open) return;
   for (const search of state.search_runs || []) {
     // Analysis jobs share the durable `search_runs` transport, but their
     // outcomes belong to Calculate Exposure rather than Source Documents.
     if (isAnalysisRun(search)) continue;
     if (!trackedSourceSearches.has(search.id) || !['completed', 'incomplete', 'failed', 'cancelled'].includes(search.status)) continue;
     trackedSourceSearches.delete(search.id);
-    if (search.job_type === 'financials') {
-      showAlert(financialLookupSummary(search),
-        search.status === 'cancelled' ? 'Financial lookup cancelled' : 'Financial lookup finished',
-        { searchCompletion: true });
-      return;
-    }
-    const count = search.results_count || 0;
-    if (search.status === 'failed') {
-      showAlert(sourceSearchFailureSummary(search), 'Source search failed', { searchCompletion: true });
-    } else if (search.status === 'cancelled') {
-      showAlert(`AI source search stopped. ${count} documents were saved before it stopped.`, 'Source search stopped', { searchCompletion: true });
-    } else {
-      const title = search.completion_reason === 'time_limit_reached' ? 'Source search timed out' : 'Source search finished';
-      showAlert(sourceSearchCompletionSummary(search), title, { searchCompletion: true });
-    }
-    return;
+    if (notifyFinishedSourceSearch(search)) return;
   }
 }
 function monitorSourceSearches() {
@@ -158,20 +161,39 @@ function monitorSourceSearches() {
   }
   if (sourceSearchPollTimer || !trackedSourceSearches.size) return;
   sourceSearchPollTimer = setTimeout(async () => {
+    const terminalRuns = [];
     try {
-      const running = [...trackedSourceSearches];
-      if (!running.length) return;
-      const previousSummaries = state.source_summaries || [];
-      const previousCompanies = state.companies || [];
-      await refresh();
+      for (const id of [...trackedSourceSearches]) {
+        const response = await apiGet(`source/search/run?id=${encodeURIComponent(id)}`);
+        const searchRun = response?.search_run;
+        if (!searchRun?.id || isAnalysisRun(searchRun)) {
+          throw new Error('The source-search status response was invalid.');
+        }
+        state.search_runs = [...(state.search_runs || []).filter(run => run.id !== searchRun.id), searchRun];
+        if (['completed', 'incomplete', 'failed', 'cancelled'].includes(searchRun.status)) {
+          trackedSourceSearches.delete(id);
+          terminalRuns.push(searchRun);
+        }
+      }
       sourceSearchPollErrorShown = false;
       if (currentView === 'sources') {
         updateSourceSearchLock();
-        await updateSourceLibraryProgress(previousSummaries, previousCompanies);
         updateFinancialLookupStatus();
       }
-      notifyFinishedSourceSearches();
-      const sourceRuns = (state.search_runs || []).filter(r => running.includes(r.id) && isSourceSearchRun(r));
+      // Completion dialogs are relevant only on Source Documents. In
+      // particular, they must not cover an in-progress exposure analysis.
+      if (currentView === 'sources') {
+        for (const searchRun of terminalRuns) notifyFinishedSourceSearch(searchRun);
+      }
+      // A terminal search may have added sources. Refresh its compact library
+      // summary in the background, but never make job polling or a page render
+      // wait on the full workspace endpoint.
+      if (terminalRuns.length) {
+        void refresh().then(async () => {
+          if (currentView === 'sources') await viewSources();
+        }).catch(() => {});
+      }
+      const sourceRuns = (state.search_runs || []).filter(r => trackedSourceSearches.has(r.id) && isSourceSearchRun(r));
       const pending = sourceRuns.some(r => ['running', 'cancelling'].includes(r.status));
       const cancelling = sourceRuns.some(r => r.status === 'cancelling');
       if (currentView === 'sources' && sourceRuns.length) {
@@ -188,7 +210,9 @@ function monitorSourceSearches() {
     } catch (error) {
       const status = $('#source-search-status');
       if (currentView === 'sources' && status) status.textContent = `Could not check source-search status: ${error.message}`;
-      if (!sourceSearchPollErrorShown && !$('#alert-modal')?.open) {
+      // Source/financial polling must never interrupt Calculate Exposure or
+      // another page. A failed status check belongs only to Source Documents.
+      if (currentView === 'sources' && !sourceSearchPollErrorShown && !$('#alert-modal')?.open) {
         sourceSearchPollErrorShown = true;
         showAlert(`Could not check source-search status: ${error.message}`, 'Source search status unavailable', { searchCompletion: true });
       }

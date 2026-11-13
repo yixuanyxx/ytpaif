@@ -181,28 +181,23 @@ test('Source search shows portfolios independently of theme and locks during an 
   assert.equal(node('#btn-run-search').disabled,false);
 });
 
-test('Source counts and search results update during polling without rerendering the form', async()=>{
+test('Source-search polling uses the small status endpoint instead of refreshing the workspace', async()=>{
   const {context,run,node,rows}=setup();
   rows[0].dataset.cid = 'a';
   const checkbox = {checked:false};
   rows[0].querySelector = () => checkbox;
   let poll;
+  context.requested = '';
   context.setTimeout = callback => { poll = callback; return 1; };
   run(`selectedSourcePortfolioId='p'; state.portfolio_imports=[{id:'p',rows:[{company_id:'a'}]}];
     currentView='sources'; state.search_runs=[{id:'job',status:'running',results:[]}];
-    refresh=async()=>{
-      state.source_summaries=[{company_id:'a',count:3,types:{annual_report:2,regulatory_filing:1}}];
-      state.search_runs[0].results=[{company_id:'a',title:'Annual Report'},{company_id:'b',title:'Other Portfolio'}];
-    };`);
+    apiGet=async path=>{ globalThis.requested=path; return {search_run:{id:'job',status:'running',search_mode:'short',company_ids:['a'],results:[]}}; };
+    refresh=async()=>{ throw new Error('polling must not refresh the workspace'); };`);
   node('#src-detail-a').style.display='none';
   node('#src-lib-filter').value='TSMC';
   run('monitorSourceSearches()');
   await poll();
-  assert.match(node('#src-checklist-count-a').innerHTML,/2\/6 source types/);
-  assert.match(node('#src-coverage-a').innerHTML,/2 \/ 6/);
-  assert.match(node('#source-library-count').textContent,/3 documents/);
-  assert.match(node('#source-search-results').innerHTML,/1 candidate filings.*[\s\S]*Annual Report/);
-  assert.doesNotMatch(node('#source-search-results').innerHTML,/Other Portfolio/);
+  assert.equal(context.requested,'source/search/run?id=job');
   assert.equal(node('#src-lib-filter').value,'TSMC');
   assert.equal(checkbox.checked,false);
   assert.equal(node('#btn-run-search').disabled,true);

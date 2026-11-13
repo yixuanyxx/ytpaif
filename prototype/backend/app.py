@@ -2077,6 +2077,48 @@ def source_search_cancel(d):
     import sys
     return {'search_run': source_discovery.cancel(sys.modules[__name__], d)}
 
+
+def source_search_run(d):
+    """Return one source/financial job without rebuilding the whole workspace.
+
+    Source and financial jobs used to be polled by requesting ``/api/state``.
+    That can include a large source-library read and makes an unrelated job
+    status check hold the entire UI on its loading overlay.  The queue is the
+    authoritative fast path; the durable search_runs record is only a fallback
+    after a worker restart or queue-volume loss.
+    """
+    run_id = str(d.get('id') or '').strip()
+    if not run_id:
+        raise ValueError('Search run ID is required')
+    try:
+        import source_jobs
+        queued = source_jobs.Queue(timeout=0.25, ensure_schema=False).job(run_id)
+        run = queued[0] if queued else None
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        run = None
+
+    if run is None:
+        run = find('search_runs', run_id)
+        if not run:
+            raise ValueError('Search run not found')
+        # A non-terminal mirror with no local queue entry cannot make further
+        # progress. Mark it terminal once instead of polling it forever.
+        if run.get('status') in ('queued', 'running', 'cancelling'):
+            run = {
+                **run,
+                'status': 'cancelled',
+                'phase': 'finished',
+                'finished_at': now(),
+                'cancel_reason': 'Search stopped because its local job queue entry was unavailable.',
+            }
+            put('search_runs', run)
+
+    if run.get('job_type') == 'analysis':
+        raise ValueError('Use the analysis status endpoint for this run')
+    if run.get('job_type') != 'financials' and run.get('search_mode') not in ('short', 'long'):
+        raise ValueError('Search run not found')
+    return {'search_run': run}
+
 def sync_to_supabase(d=None):
     """Retry pending Supabase record and file backups in the background.
 
@@ -2396,6 +2438,12 @@ class Handler(BaseHTTPRequestHandler):
                 run_id = (parse_qs(parsed_path.query).get('id') or [''])[0]
                 try:
                     return self.respond(analysis_run({'id': run_id}))
+                except ValueError as error:
+                    return self.respond({'error': str(error)}, 400)
+            if path == '/api/source/search/run':
+                run_id = (parse_qs(parsed_path.query).get('id') or [''])[0]
+                try:
+                    return self.respond(source_search_run({'id': run_id}))
                 except ValueError as error:
                     return self.respond({'error': str(error)}, 400)
             if path in ('/api/sync', '/api/sync_to_supabase', '/api/logout'):
