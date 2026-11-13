@@ -3023,10 +3023,19 @@ async function viewSources() {
     button.disabled = true;
     $('#source-search-status').textContent = 'Stopping source search…';
     try {
-      await api('source/search/cancel', { id: activeSearch.id });
-      await refresh();
+      const result = await api('source/search/cancel', { id: activeSearch.id });
+      const cancelled = result.search_run;
+      if (!cancelled?.id) throw new Error('The source search could not be cancelled.');
+      // The cancel response is the durable queue transition. Do not turn a
+      // later, optional workspace poll failure into a false cancellation
+      // failure: a slow /api/state was leaving the UI stuck on “Stopping”.
+      state.search_runs = [...(state.search_runs || []).filter(run => run.id !== cancelled.id), cancelled];
+      trackedSourceSearches.add(cancelled.id);
       if (currentView === 'sources') await viewSources();
-      monitorSourceSearches();
+      notifyFinishedSourceSearches();
+      void refresh().then(async () => {
+        if (currentView === 'sources') await viewSources();
+      }).catch(() => {});
     } catch (error) {
       if (currentView === 'sources') {
         $('#source-search-status').textContent = `Could not stop source search: ${error.message}`;
@@ -3601,10 +3610,14 @@ window.cancelPortfolioFinancials = async function(portfolioId) {
     if (!cancelled?.id) throw new Error('The financial lookup could not be cancelled.');
     state.search_runs = [...(state.search_runs || []).filter(run => run.id !== cancelled.id), cancelled];
     trackedSourceSearches.add(cancelled.id);
-    await refresh();
     if (currentView === 'sources') await viewSources();
-    updateFinancialLookupStatus();
     notifyFinishedSourceSearches();
+    // The durable cancellation response is authoritative. Refreshing the
+    // entire workspace is best-effort only, so a slow state request cannot
+    // make a completed cancellation look like it failed.
+    void refresh().then(async () => {
+      if (currentView === 'sources') await viewSources();
+    }).catch(() => {});
   } catch (error) {
     if (button) {
       button.disabled = false;
