@@ -987,8 +987,10 @@ test('Unified Step 4 renders the queue and bulk analysis controls',async()=>{
 test('Active analysis progress distinguishes attempts from calculated exposures',()=>{
   const {run}=setup();
   const text = run(`analysisRunProgressText({job_type:'analysis',status:'running',phase:'analysing',
-    company_ids:['a','b','c'],companies_completed:['a','b'],calculated_count:1,reused_count:0,failed_count:1})`);
+    company_ids:['a','b','c'],companies_completed:['a','b'],calculated_count:1,reused_count:0,failed_count:1,
+    errors:[{reason:'Provider request rejected'}]})`);
   assert.match(text,/2 of 3 companies processed\. 1 calculated, 1 failed\./);
+  assert.match(text,/Latest error: Provider request rejected/);
 });
 test('Analysis view omits manual AI analysis and stage pipeline cards',async()=>{
   const {run,node} = setup();

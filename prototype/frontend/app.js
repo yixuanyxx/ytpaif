@@ -290,7 +290,12 @@ function analysisRunProgressText(run) {
   if (isActiveAnalysisRun(run)) {
     const verb = run.phase === 'queued' ? 'Analysis queued' : 'Calculating exposure';
     const outcomes = completed ? ` ${calculated} calculated${reused ? `, ${reused} reused` : ''}${failed ? `, ${failed} failed` : ''}.` : '';
-    return `${verb}. ${processed}.${outcomes} You can leave this page; progress is saved.`;
+    // A batch can remain active while individual companies fail. Surface the
+    // first durable failure reason here so the user can diagnose a provider,
+    // source, or validation issue before another 70+ attempts are made.
+    const firstError = failed ? analysisErrorMessages(run)[0] : '';
+    const detail = firstError ? ` Latest error: ${firstError}.` : '';
+    return `${verb}. ${processed}.${outcomes}${detail} You can leave this page; progress is saved.`;
   }
   if (run.status === 'cancelled') return `Analysis cancelled. ${processed}.`;
   if (run.status === 'failed') return `Analysis failed. ${processed}${failed ? `; ${failed} failed` : ''}.`;
