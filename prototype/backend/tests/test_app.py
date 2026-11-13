@@ -14,6 +14,14 @@ from test_fixtures import MemoryStore, demo
 from test_source_cache import FakeRedis, wait_for_background_task
 
 class AppFlowTest(unittest.TestCase):
+    def test_health_reports_an_in_memory_redis_fallback_as_degraded(self):
+        import source_cache
+        with patch.object(source_cache, '_connection', return_value=None), \
+                patch.dict(os.environ, {'REDIS_URL': 'redis://configured.example'}, clear=False):
+            self.assertEqual(self.app.health(), {
+                'status': 'degraded', 'redis': 'unavailable', 'redis_configured': True,
+            })
+
     def test_uncached_history_does_not_block_cached_workspace(self):
         from cached_store import CachedStore
         from supabase_store import SupabaseStore, SupabaseError

@@ -2324,6 +2324,27 @@ def dispatch(path, d):
     return _dispatch(path, d)
 
 
+def health():
+    """Return bounded, non-sensitive runtime health for the reverse proxy.
+
+    This must never initialise or advertise the in-memory test Redis fallback
+    as a production datastore.  It lets deployment monitoring distinguish a
+    live HTTP process from one that cannot reach its required persistent
+    Redis server, without exposing connection details or application data.
+    """
+    configured = bool(os.environ.get('REDIS_URL', '').strip())
+    try:
+        client = source_cache._connection()
+        fake = client is None or type(client).__module__.startswith('fakeredis')
+        return {
+            'status': 'degraded' if fake else 'ok',
+            'redis': 'unavailable' if fake else 'ok',
+            'redis_configured': configured,
+        }
+    except Exception:
+        return {'status': 'degraded', 'redis': 'unavailable', 'redis_configured': configured}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
 
@@ -2357,7 +2378,7 @@ class Handler(BaseHTTPRequestHandler):
             parsed_path = up(self.path)
             path = parsed_path.path
             if path == '/api/health':
-                return self.respond({'status': 'ok'})
+                return self.respond(health())
             if path in ('/login', '/login.js', '/login.css'):
                 files = {'/login': ('login.html', 'text/html; charset=utf-8'), '/login.js': ('login.js', 'text/javascript; charset=utf-8'), '/login.css': ('login.css', 'text/css; charset=utf-8')}
                 filename, mime = files[path]
