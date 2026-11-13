@@ -951,7 +951,32 @@ def cancel(app, data):
     if not run_id:
         raise ValueError('Search run ID is required')
     import source_jobs
-    run = source_jobs.Queue().cancel(run_id)
+    queue = source_jobs.Queue()
+    try:
+        run = queue.cancel(run_id)
+    except (TypeError, ValueError):
+        # A process/volume restart can lose the local queue while the durable
+        # Redis record is still shown as running. There is then no worker to
+        # interrupt, but leaving that mirror running traps the user behind a
+        # permanently broken Cancel button. End the matching source-search
+        # mirror explicitly, as financial lookups already do.
+        run = next((record for record in app.all_records('search_runs')
+                    if record.get('id') == run_id), None)
+        source_run = (run and run.get('job_type') not in ('financials', 'analysis')
+                      and run.get('search_mode') in ('short', 'long'))
+        if not source_run:
+            raise ValueError('Source-search run not found') from None
+        if run.get('status') in ('completed', 'incomplete', 'failed', 'cancelled'):
+            return run
+        run = {
+            **run,
+            'status': 'cancelled',
+            'phase': 'finished',
+            'finished_at': app.now(),
+            'cancel_reason': 'Source search cancelled by user (the local job queue entry was unavailable).',
+        }
+        app.put('search_runs', run)
+        return run
     # state() merges this persistent queue over the remote mirror. Returning
     # must not depend on Supabase responding while the supervisor stops work.
     source_jobs.ensure_worker()

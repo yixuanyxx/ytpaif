@@ -35,8 +35,14 @@ def cancel(app, data):
         raise ValueError('Financial lookup run ID is required')
     queue = source_jobs.Queue()
     try:
-        run, _ = queue.job(run_id)
-    except ValueError:
+        queued = queue.job(run_id)
+        # A queue-volume reset from an older worker can surface as ``None``
+        # rather than the current Queue.job() ValueError contract. Treat both
+        # shapes as a missing local entry and resolve the durable mirror below.
+        run = queued[0] if queued else None
+        if run is None:
+            raise ValueError('Job not found')
+    except (TypeError, ValueError):
         # The browser can see an old remote/search_runs mirror after a worker
         # restart or a queue-volume loss.  With no local queue entry there is
         # no worker the queue can cancel; mark the matching financial mirror

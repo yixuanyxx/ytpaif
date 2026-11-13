@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 from unittest.mock import patch
 import source_discovery as discovery
+import source_jobs
 
 
 def worker_app(sources, snapshots):
@@ -433,6 +434,24 @@ class DiscoveryTest(unittest.TestCase):
                 cancelled = discovery.cancel(app, {'id': 'job'})
             self.assertEqual(cancelled['status'], 'cancelled')
             self.assertEqual(queue.job('job')[0]['status'], 'cancelled')
+
+    def test_cancel_stale_mirrored_search_marks_it_terminal(self):
+        """A queue-volume reset must not leave a source search uncancellable."""
+        run = {'id': 'stale-search', 'search_mode': 'short', 'status': 'running',
+               'results': [], 'errors': []}
+        saved = []
+        app = SimpleNamespace(
+            all_records=lambda kind: [run] if kind == 'search_runs' else [],
+            put=lambda kind, record: saved.append((kind, record)),
+            now=lambda: '2026-11-05T00:00:00Z',
+        )
+        missing_queue = SimpleNamespace(cancel=lambda job_id: (_ for _ in ()).throw(ValueError('missing')))
+        with patch.object(source_jobs, 'Queue', return_value=missing_queue):
+            cancelled = discovery.cancel(app, {'id': run['id']})
+        self.assertEqual(cancelled['status'], 'cancelled')
+        self.assertEqual(cancelled['phase'], 'finished')
+        self.assertIn('queue entry was unavailable', cancelled['cancel_reason'])
+        self.assertEqual(saved, [('search_runs', cancelled)])
 
     def test_short_and_long_workers_stop_while_network_is_blocked(self):
         for mode in ('short', 'long'):

@@ -121,6 +121,20 @@ class FinancialJobsTest(unittest.TestCase):
         self.assertIn('queue entry was unavailable', cancelled['cancel_reason'])
         self.assertEqual(saved, [('search_runs', cancelled)])
 
+    def test_cancel_none_queue_lookup_marks_stale_mirror_terminal(self):
+        """Older queue workers could return None for a lost job row."""
+        saved = []
+        app = SimpleNamespace(
+            all_records=lambda kind: [copy.deepcopy(self.run)] if kind == 'search_runs' else [],
+            put=lambda kind, record: saved.append((kind, copy.deepcopy(record))),
+            now=lambda: '2026-11-05T00:00:00Z',
+        )
+        queue = SimpleNamespace(job=lambda run_id: None)
+        with patch.object(financial_jobs.source_jobs, 'Queue', return_value=queue):
+            cancelled = financial_jobs.cancel(app, {'id': self.run['id']})['financial_run']
+        self.assertEqual(cancelled['status'], 'cancelled')
+        self.assertEqual(saved, [('search_runs', cancelled)])
+
     def test_worker_stops_when_lookup_is_cancelled(self):
         calls = []
         self.app.is_cancelled = lambda run_id: len(calls) >= 1
