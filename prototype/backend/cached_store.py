@@ -110,7 +110,14 @@ class CachedStore(SupabaseStore):
                     return list(rows.values())
                 return list(self._overlay_pending(client, kind, complete).values())
         self._fallback.discard(kind)
-        return list(self._overlay_pending(client, kind, complete).values())
+        # `_mutate()` publishes the pending edit and its replacement snapshot
+        # in one Redis transaction.  A warm snapshot therefore already
+        # contains every local edit.  Scanning the outbox here used to turn
+        # each workspace load into a remote SCAN for every table; with a large
+        # source/analysis outbox that can hold `/api/state` long enough for the
+        # browser to time out.  Keep the scan only on cold-cache recovery,
+        # where it is required to merge edits made before a snapshot existed.
+        return list(complete['records'])
 
     def company_records(self, kind, company_id):
         return [r for r in self.all_records(kind) if r.get('company_id') == company_id]

@@ -36,6 +36,11 @@ class CachedStoreTest(unittest.TestCase):
                 patch.object(self.store, '_save', side_effect=AssertionError('snapshot rewrite')):
             self.assertEqual(self.store.all_records('companies'), self.rows)
 
+    def test_warm_primary_read_does_not_scan_the_backup_outbox(self):
+        self.warm()
+        with patch.object(self.redis, 'scan_iter', side_effect=AssertionError('outbox scan')):
+            self.assertEqual(self.store.all_records('companies'), self.rows)
+
     def test_outage_accepts_writes_across_instances_and_retries_backup(self):
         self.warm()
         updated = {'id': 'a', 'name': 'Changed'}
